@@ -1,0 +1,81 @@
+# cb-testnet-verifier preset: Header Validation Modes
+#
+# Tests Commit-Boost's header validation modes using mux routing.
+# The default path uses "standard" mode (full decode + signature verification).
+# A mux route overrides to "none" mode (light path, minimal decoding).
+#
+# To use this config effectively, you need to populate the mux's
+# validator_pubkeys with real pubkeys from the devnet. Steps:
+#
+#   1. Start the enclave with this config (mux pubkeys empty = no routing)
+#   2. Query validator pubkeys:
+#      curl -s http://<beacon-url>/eth/v1/beacon/states/head/validators \
+#        | jq '.data[:5] | .[].validator.pubkey'
+#   3. Paste those pubkeys into the [[mux]] validator_pubkeys list
+#   4. Restart the enclave with the updated config
+#
+# Usage:
+#   ./scripts/run-and-verify.sh --config configs/pbs-validation-modes.yml --keep
+
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+    count: 3
+
+additional_services:
+  - spamoor
+  - dora
+  - prometheus
+
+mev_type: commit-boost
+
+mev_params:
+  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_relay_image: ethpandaops/mev-boost-relay:main
+  mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_image: ethpandaops/reth-rbuilder:develop
+  commit_boost_config: |
+    chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }
+
+    [pbs]
+    host = "0.0.0.0"
+    port = {{ .Port }}
+    timeout_get_header_ms = 950
+    timeout_get_payload_ms = 4000
+    header_validation_mode = "standard"
+
+    {{ range $index, $relay := .Relays }}
+    [[relays]]
+    id = "relay_{{$index}}"
+    url = "{{ $relay }}"
+    {{- end }}
+
+    # Mux: route specific validators through "none" mode (light path).
+    # Replace the placeholder pubkey with real validator pubkeys from your devnet.
+    [[mux]]
+    id = "light_path"
+    validator_pubkeys = []
+    timeout_get_header_ms = 500
+    header_validation_mode = "none"
+    [[mux.relays]]
+    id = "mux_relay_0"
+    url = "{{ index .Relays 0 }}"
+
+    [metrics]
+    host = "0.0.0.0"
+    port = 9090
+
+    [logs.stdout]
+    level = "debug"
+
+    [logs.file]
+    enabled = false
+
+network_params:
+  network: kurtosis
+  seconds_per_slot: 12
+  num_validator_keys_per_node: 128
+  preregistered_validator_keys_mnemonic:
+    "giant issue aisle success illegal bike spike
+    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy
+    very lucky have athlete"

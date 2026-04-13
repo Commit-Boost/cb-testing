@@ -1,0 +1,30 @@
+# Kurtosis config: SSZ get_header testing with Lighthouse
+# Lighthouse sends Accept: application/octet-stream;q=1.0,application/json;q=0.9 by default.
+# No extra flags needed. Use --builder-disable-ssz to force JSON-only.
+#
+# Prerequisites:
+#   just build-pbs kurtosis
+#
+# Run:
+#   kurtosis run github.com/ethpandaops/ethereum-package \
+#     --enclave CB-Testnet \
+#     --args-file provisioning/kurtosis-ssz-lighthouse.yml
+#
+# Verify SSZ is flowing:
+#   kurtosis service logs CB-Testnet commit-boost-001-lighthouse-geth 2>&1 | grep -i "content_type\|ssz\|encoding"
+
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+    count: 2
+
+additional_services:
+  - dora
+
+mev_type: commit-boost
+
+mev_params:
+  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_relay_image: ethpandaops/mev-boost-relay:main
+  mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_image: ethpandaops/reth-rbuilder:develop

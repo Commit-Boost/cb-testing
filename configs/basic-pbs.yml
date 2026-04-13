@@ -1,0 +1,42 @@
+# cb-testnet-verifier preset: Basic PBS Pipeline
+#
+# The default starting config. Tests the core MEV pipeline:
+# - Validator registration with relay
+# - Builder block submission
+# - Header delivery through Commit-Boost
+# - Payload delivery and on-chain confirmation
+#
+# 2 Lighthouse/Geth nodes, 12-second slots, 128 validators per node.
+# spamoor generates transactions so the builder has something to build.
+#
+# Usage:
+#   ./scripts/run-and-verify.sh --config configs/basic-pbs.yml
+#
+# Expected result: All Tier 1 checks pass. Tier 2 metrics checks SKIP
+# (metrics port not exposed in kurtosis).
+
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+    count: 2
+
+additional_services:
+  - spamoor
+  - dora
+
+mev_type: commit-boost
+
+mev_params:
+  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_relay_image: ethpandaops/mev-boost-relay:main
+  mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_image: ethpandaops/reth-rbuilder:develop
+
+network_params:
+  network: kurtosis
+  seconds_per_slot: 12
+  num_validator_keys_per_node: 128
+  preregistered_validator_keys_mnemonic:
+    "giant issue aisle success illegal bike spike
+    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy
+    very lucky have athlete"

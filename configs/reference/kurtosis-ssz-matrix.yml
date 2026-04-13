@@ -1,0 +1,60 @@
+# Kurtosis config: SSZ encoding matrix across all CL clients
+# Tests SSZ get_header behavior with every major CL implementation.
+#
+# SSZ builder API support by client (as of 2026-04):
+#
+#   Lighthouse: SSZ preferred by default. --builder-disable-ssz to force JSON.
+#   Teku:       SSZ preferred by default. No flag. Hardcoded.
+#   Nimbus:     SSZ preferred by default. No flag. Hardcoded.
+#   Lodestar:   SSZ preferred by default. No flag. Adaptive with 415 fallback.
+#   Prysm:      JSON by default. Requires --enable-builder-ssz flag.
+#   Grandine:   Unknown / not audited.
+#
+# All clients except Prysm send Accept: application/octet-stream with higher
+# priority than application/json. Prysm is the only holdout requiring explicit opt-in.
+#
+# This config runs all SSZ-capable CLs to verify CB handles the full matrix.
+#
+# Prerequisites:
+#   just build-pbs kurtosis
+#
+# Run:
+#   kurtosis run github.com/ethpandaops/ethereum-package \
+#     --enclave CB-Testnet \
+#     --args-file provisioning/kurtosis-ssz-matrix.yml
+#
+# Verify per-client encoding:
+#   for svc in $(kurtosis enclave inspect CB-Testnet 2>&1 | grep commit-boost | awk '{print $1}'); do
+#     echo "=== $svc ==="; kurtosis service logs CB-Testnet $svc 2>&1 | grep "content_type" | tail -3
+#   done
+
+participants:
+  # SSZ by default (no flags needed)
+  - el_type: geth
+    cl_type: lighthouse
+
+  - el_type: nethermind
+    cl_type: teku
+
+  - el_type: reth
+    cl_type: nimbus
+
+  - el_type: erigon
+    cl_type: lodestar
+
+  # SSZ requires explicit flag
+  - el_type: besu
+    cl_type: prysm
+    cl_extra_params:
+      - "--enable-builder-ssz"
+
+additional_services:
+  - dora
+
+mev_type: commit-boost
+
+mev_params:
+  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_relay_image: ethpandaops/mev-boost-relay:main
+  mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_image: ethpandaops/reth-rbuilder:develop
