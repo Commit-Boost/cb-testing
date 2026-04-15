@@ -107,7 +107,7 @@ def get_seconds_per_slot(beacon_url: str) -> int:
 
 def wait_for_readiness(
     beacon_url: str,
-    target_epoch: int = 5,
+    target_epoch: int = 7,
     timeout: int = 1500,
     poll_interval: int = 10,
 ) -> bool:
@@ -209,7 +209,7 @@ def observe_epochs(
 def run_verification(
     enclave: str,
     min_epochs: int = 2,
-    target_epoch: int = 5,
+    target_epoch: int = 7,
     timeout: int = 1500,
     json_mode: bool = False,
     mev_threshold: float = 0.30,
@@ -374,7 +374,7 @@ def main():
         help="Observation window in epochs (default: 2)",
     )
     parser.add_argument(
-        "--target-epoch", type=int, default=5,
+        "--target-epoch", type=int, default=7,
         help="Wait until this epoch before starting checks (default: 5)",
     )
     parser.add_argument(

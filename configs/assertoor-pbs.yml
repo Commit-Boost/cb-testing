@@ -1,0 +1,61 @@
+# cb-testnet-verifier preset: Assertoor PBS Pipeline
+#
+# Runs CB MEV pipeline checks inside assertoor for CI integration.
+# Assertoor handles readiness and timing. The kurtosis-assertoor GitHub
+# Action polls assertoor's API for results and returns pass/fail.
+#
+# CB-specific checks (relay data API, payload hash matching, MEV delivery
+# rate) run as run_shell tasks with curl+jq inside the assertoor container.
+#
+# Usage (local):
+#   kurtosis run github.com/ethpandaops/ethereum-package \
+#     --enclave CB-Testnet --args-file configs/assertoor-pbs.yml
+#
+#   # Check status:
+#   ASSERTOOR=$(kurtosis port print CB-Testnet assertoor http)
+#   curl -s $ASSERTOOR/api/v1/test_runs | jq '.[0].status'
+#
+# Usage (CI with GitHub Action):
+#   uses: ethpandaops/kurtosis-assertoor-github-action@v1
+#   with:
+#     ethereum_package_args: configs/assertoor-pbs.yml
+#
+# The assertoor test YAML is loaded from this repo via raw GitHub URL.
+# For local dev without CI, use the standalone verifier instead:
+#   ./scripts/run-and-verify.sh --config configs/basic-pbs.yml
+
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+    count: 2
+
+additional_services:
+  - spamoor
+  - dora
+  - assertoor
+
+mev_type: commit-boost
+
+mev_params:
+  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_relay_image: ethpandaops/mev-boost-relay:main
+  mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_image: ethpandaops/reth-rbuilder:develop
+
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: false
+  tests:
+    # For CI: use the raw GitHub URL (uncomment and update branch/tag):
+    # - file: "https://raw.githubusercontent.com/jvranek/cb-testing/main/assertoor/cb-mev-pipeline.yaml"
+    # For local testing: serve the file and use host.docker.internal:
+    - file: "http://host.docker.internal:8888/assertoor/cb-mev-pipeline.yaml"
+
+network_params:
+  network: kurtosis
+  seconds_per_slot: 12
+  num_validator_keys_per_node: 128
+  preregistered_validator_keys_mnemonic:
+    "giant issue aisle success illegal bike spike
+    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy
+    very lucky have athlete"

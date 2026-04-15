@@ -7,43 +7,30 @@ from cb_verifier.report import CheckResult, ResultStatus
 def check_builder_blocks_received(relay_url: str, start_slot: int, end_slot: int) -> CheckResult:
     """Check that builder blocks were received by the relay in the given slot range.
 
-    NOTE: The relay data API's builder_blocks_received endpoint has no `cursor` param
-    (unlike proposer_payload_delivered). The `slot` param filters to a single slot.
-    We fetch recent entries with `limit` only, then filter client-side by slot range.
+    NOTE: The relay data API's builder_blocks_received endpoint requires at least one
+    filter param (slot, block_hash, block_number, or builder_pubkey). Limit-only
+    queries return 400. We sample slots across the range to collect builder blocks.
     """
     try:
         all_entries = []
-        # Fetch recent builder blocks. No cursor available on this endpoint,
-        # so we request a generous limit and filter client-side.
-        try:
-            resp = requests.get(
-                f"{relay_url}/relay/v1/data/bidtraces/builder_blocks_received",
-                params={"limit": 500},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                entries = resp.json()
-                all_entries = [e for e in entries if start_slot <= int(e.get('slot', 0)) <= end_slot]
-        except Exception:
-            pass
-
-        # If the bulk query missed our range (e.g. too many newer entries pushed
-        # our window out of the limit), sample individual slots as fallback.
-        if not all_entries:
-            sample_slots = list(range(start_slot, end_slot + 1, max(1, (end_slot - start_slot) // 10)))
-            for slot in sample_slots:
-                try:
-                    resp = requests.get(
-                        f"{relay_url}/relay/v1/data/bidtraces/builder_blocks_received",
-                        params={"slot": slot},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        entries = resp.json()
-                        if entries:
-                            all_entries.extend(entries)
-                except Exception:
-                    continue
+        # The relay requires at least one filter param (slot, block_hash,
+        # block_number, or builder_pubkey). Limit-only queries return 400.
+        # Sample slots across the range to collect builder blocks.
+        sample_slots = list(range(start_slot, end_slot + 1, max(1, (end_slot - start_slot) // 10)))
+        for slot in sample_slots:
+            try:
+                resp = requests.get(
+                    f"{relay_url}/relay/v1/data/bidtraces/builder_blocks_received",
+                    params={"slot": slot},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    entries = resp.json()
+                    if entries:
+                        all_entries.extend(entries)
+            except Exception:
+                continue
+        # Deduplicate across sampled slots
         slots = sorted(set(int(e["slot"]) for e in all_entries))
         count = len(all_entries)
         if count > 0:

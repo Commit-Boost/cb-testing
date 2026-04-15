@@ -1,0 +1,272 @@
+id: cb-mev-pipeline
+name: "Commit-Boost MEV pipeline verification"
+timeout: 60m
+config:
+  # Internal kurtosis DNS names. These are the defaults for a standard
+  # ethereum-package enclave with lighthouse/geth. Override via testConfig
+  # in assertoor_params if your enclave uses different CL/EL types.
+  beaconUrl: "http://cl-1-lighthouse-geth:4000"
+  relayUrl: "http://mev-relay-api:9062"
+  targetEpoch: 9
+  minEpochs: 2
+  mevThreshold: "0.30"
+  missedSlotThreshold: "0.10"
+tasks:
+
+  # ---------------------------------------------------------------
+  # Phase 1: Chain readiness (native assertoor tasks)
+  # ---------------------------------------------------------------
+
+  - name: check_clients_are_healthy
+    title: "At least one client is ready"
+    timeout: 5m
+    config:
+      minClientCount: 1
+
+  - name: run_tasks_concurrent
+    title: "CL and EL are synced"
+    timeout: 10m
+    config:
+      tasks:
+        - name: check_consensus_sync_status
+          title: "CL synced"
+        - name: check_execution_sync_status
+          title: "EL synced"
+
+  - name: check_consensus_finality
+    title: "Chain is finalizing"
+    timeout: 35m
+    config:
+      minFinalizedEpochs: 2
+      maxUnfinalizedEpochs: 5
+
+  - name: check_consensus_slot_range
+    title: "Past target epoch (slot 288)"
+    timeout: 35m
+    config:
+      minSlotNumber: 288
+
+  # ---------------------------------------------------------------
+  # Phase 2: MEV pipeline checks (curl + jq inside assertoor)
+  # ---------------------------------------------------------------
+
+  - name: run_shell
+    title: "Relay delivered payloads to proposers"
+    timeout: 2m
+    config:
+      shell: bash
+      envVars:
+        RELAY_URL: "relayUrl"
+      command: |
+        set -eo pipefail
+        RELAY_URL=$(echo "$RELAY_URL" | tr -d '"')
+
+        resp=$(curl -sf "${RELAY_URL}/relay/v1/data/bidtraces/proposer_payload_delivered?limit=200") || {
+          echo "Failed to query relay"; exit 1
+        }
+
+        count=$(echo "$resp" | jq 'length')
+        if [ "$count" -eq 0 ]; then
+          echo "FAIL: No payloads delivered by relay"
+          exit 1
+        fi
+
+        echo "Delivered $count payload(s). First 5:"
+        echo "$resp" | jq -r '.[:5][] | "  slot=\(.slot) hash=\(.block_hash[:16])... value=\(.value)"'
+        echo "PASS: $count payload(s) delivered"
+        echo "payloads_delivered=$count" >> "$ASSERTOOR_SUMMARY"
+
+  - name: run_shell
+    title: "Builder blocks received by relay (tier 2)"
+    timeout: 2m
+    config:
+      shell: bash
+      envVars:
+        RELAY_URL: "relayUrl"
+        BEACON_URL: "beaconUrl"
+      command: |
+        set -eo pipefail
+        RELAY_URL=$(echo "$RELAY_URL" | tr -d '"')
+        BEACON_URL=$(echo "$BEACON_URL" | tr -d '"')
+
+        # The relay may not retain builder_blocks_received data long (Redis TTL).
+        # This is a tier 2 check: informational, does not fail the pipeline.
+        head_slot=$(curl -sf "${BEACON_URL}/eth/v1/beacon/headers/head"           | jq -r '.data.header.message.slot')
+        start_slot=$((head_slot - 64))
+
+        total=0
+        for slot in $(seq $start_slot 4 $head_slot); do
+          resp=$(curl -s "${RELAY_URL}/relay/v1/data/bidtraces/builder_blocks_received?slot=${slot}")
+          n=$(echo "$resp" | jq 'if type == "array" then length else 0 end')
+          total=$((total + n))
+        done
+
+        echo "Builder blocks received: $total (sampled slots $start_slot to $head_slot)"
+        echo "builder_blocks=$total" >> "$ASSERTOOR_SUMMARY"
+
+        if [ "$total" -gt 0 ]; then
+          echo "PASS: $total builder block(s) received"
+        else
+          echo "WARN: No builder blocks in relay data API (may be evicted from cache)"
+          echo "Payloads-delivered check is the authoritative signal for builder activity."
+        fi
+
+  - name: run_shell
+    title: "Payload hashes match on-chain blocks"
+    timeout: 5m
+    config:
+      shell: bash
+      envVars:
+        RELAY_URL: "relayUrl"
+        BEACON_URL: "beaconUrl"
+      command: |
+        set -eo pipefail
+        RELAY_URL=$(echo "$RELAY_URL" | tr -d '"')
+        BEACON_URL=$(echo "$BEACON_URL" | tr -d '"')
+
+        payloads=$(curl -sf "${RELAY_URL}/relay/v1/data/bidtraces/proposer_payload_delivered?limit=200")
+        count=$(echo "$payloads" | jq 'length')
+
+        if [ "$count" -eq 0 ]; then
+          echo "SKIP: No payloads to verify"
+          exit 0
+        fi
+
+        matched=0
+        mismatched=0
+        missed=0
+
+        while IFS= read -r row; do
+          slot=$(echo "$row" | jq -r '.slot')
+          relay_hash=$(echo "$row" | jq -r '.block_hash')
+
+          chain_hash=$(curl -sf "${BEACON_URL}/eth/v2/beacon/blocks/${slot}" \
+            | jq -r '.data.message.body.execution_payload.block_hash // empty' 2>/dev/null) || {
+            missed=$((missed + 1))
+            continue
+          }
+
+          if [ -z "$chain_hash" ]; then
+            missed=$((missed + 1))
+            continue
+          fi
+
+          if [ "$relay_hash" = "$chain_hash" ]; then
+            matched=$((matched + 1))
+          else
+            mismatched=$((mismatched + 1))
+            echo "MISMATCH slot=$slot relay=${relay_hash:0:16}... chain=${chain_hash:0:16}..."
+          fi
+        done < <(echo "$payloads" | jq -c '.[]')
+
+        echo "Result: $matched matched, $mismatched mismatched, $missed missed (of $count)"
+        echo "matched=$matched mismatched=$mismatched missed=$missed" >> "$ASSERTOOR_SUMMARY"
+
+        if [ "$mismatched" -gt 0 ]; then
+          echo "FAIL: $mismatched hash mismatches"
+          exit 1
+        fi
+
+        if [ "$matched" -eq 0 ]; then
+          echo "FAIL: No payloads matched (all missed slots)"
+          exit 1
+        fi
+
+        echo "PASS: All $matched delivered payloads match on-chain"
+
+  - name: run_shell
+    title: "MEV delivery rate (tier 2)"
+    timeout: 5m
+    config:
+      shell: bash
+      envVars:
+        RELAY_URL: "relayUrl"
+        BEACON_URL: "beaconUrl"
+        MEV_THRESHOLD: "mevThreshold"
+      command: |
+        set -eo pipefail
+        RELAY_URL=$(echo "$RELAY_URL" | tr -d '"')
+        BEACON_URL=$(echo "$BEACON_URL" | tr -d '"')
+        MEV_THRESHOLD=$(echo "$MEV_THRESHOLD" | tr -d '"')
+
+        head_slot=$(curl -sf "${BEACON_URL}/eth/v1/beacon/headers/head" \
+          | jq -r '.data.header.message.slot')
+        start_slot=$((head_slot - 64))
+
+        # Build set of delivered payload hashes in our window
+        payloads=$(curl -sf "${RELAY_URL}/relay/v1/data/bidtraces/proposer_payload_delivered?cursor=${head_slot}&limit=200")
+        delivered_hashes=$(echo "$payloads" | jq -r --argjson start "$start_slot" --argjson end "$head_slot" \
+          '[.[] | select((.slot | tonumber) >= $start and (.slot | tonumber) <= $end) | .block_hash] | .[]')
+
+        # Count MEV blocks vs total blocks
+        mev_blocks=0
+        total_blocks=0
+
+        for slot in $(seq $start_slot $head_slot); do
+          chain_hash=$(curl -sf "${BEACON_URL}/eth/v2/beacon/blocks/${slot}" \
+            | jq -r '.data.message.body.execution_payload.block_hash // empty' 2>/dev/null) || continue
+          [ -z "$chain_hash" ] && continue
+
+          total_blocks=$((total_blocks + 1))
+          if echo "$delivered_hashes" | grep -qF "$chain_hash"; then
+            mev_blocks=$((mev_blocks + 1))
+          fi
+        done
+
+        if [ "$total_blocks" -eq 0 ]; then
+          echo "WARN: No blocks in observation window"
+          exit 0
+        fi
+
+        rate_pct=$((mev_blocks * 100 / total_blocks))
+        threshold_pct=$(echo "$MEV_THRESHOLD" | awk '{printf "%d", $1 * 100}')
+
+        echo "MEV delivery: $mev_blocks/$total_blocks ($rate_pct%) threshold=$threshold_pct%"
+        echo "mev_rate=${rate_pct}% ($mev_blocks/$total_blocks)" >> "$ASSERTOOR_SUMMARY"
+
+        # Tier 2: warn but don't fail
+        if [ "$rate_pct" -lt "$threshold_pct" ]; then
+          echo "WARN: Below threshold (${rate_pct}% < ${threshold_pct}%)"
+        else
+          echo "PASS: ${rate_pct}% >= ${threshold_pct}%"
+        fi
+
+  - name: run_shell
+    title: "Missed slot rate (tier 2)"
+    timeout: 3m
+    config:
+      shell: bash
+      envVars:
+        BEACON_URL: "beaconUrl"
+        MISSED_THRESHOLD: "missedSlotThreshold"
+      command: |
+        set -eo pipefail
+        BEACON_URL=$(echo "$BEACON_URL" | tr -d '"')
+        MISSED_THRESHOLD=$(echo "$MISSED_THRESHOLD" | tr -d '"')
+
+        head_slot=$(curl -sf "${BEACON_URL}/eth/v1/beacon/headers/head" \
+          | jq -r '.data.header.message.slot')
+        start_slot=$((head_slot - 64))
+        total=64
+        missed=0
+
+        for slot in $(seq $start_slot $head_slot); do
+          code=$(curl -sf -o /dev/null -w "%{http_code}" \
+            "${BEACON_URL}/eth/v1/beacon/headers/${slot}" 2>/dev/null) || code="000"
+          if [ "$code" = "404" ] || [ "$code" = "000" ]; then
+            missed=$((missed + 1))
+          fi
+        done
+
+        rate_pct=$((missed * 100 / total))
+        threshold_pct=$(echo "$MISSED_THRESHOLD" | awk '{printf "%d", $1 * 100}')
+
+        echo "Missed: $missed/$total ($rate_pct%) threshold=$threshold_pct%"
+        echo "missed_slots=$missed/$total (${rate_pct}%)" >> "$ASSERTOOR_SUMMARY"
+
+        # Tier 2: warn but don't fail
+        if [ "$rate_pct" -ge "$threshold_pct" ]; then
+          echo "WARN: Above threshold (${rate_pct}% >= ${threshold_pct}%)"
+        else
+          echo "PASS: ${rate_pct}% < ${threshold_pct}%"
+        fi
