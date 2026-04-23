@@ -18,23 +18,17 @@ Validator -> CB (submit_block) -> Relay -> Payload on chain
 ## Prerequisites
 
 - [Kurtosis CLI](https://docs.kurtosis.com/install) (>= 0.90)
-- Python 3.10+
-- [uv](https://github.com/astral-sh/uv) (recommended) or pip
+- [Rust toolchain](https://rustup.rs/) (1.91+)
 - Docker (for Kurtosis)
 
 If you're testing a local CB build, you also need:
 - The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned
-- Rust toolchain (to build the PBS image)
 
 ## Quick start
 
 ```bash
-# Set up Python environment
-uv venv
-source .venv/bin/activate
-uv pip install requests
-
 # Run with the default config (2 Lighthouse/Geth nodes)
+# (builds automatically on first run via cargo)
 ./scripts/run-and-verify.sh
 
 # Takes ~55 minutes. You'll see:
@@ -56,7 +50,7 @@ just build-pbs kurtosis
 
 ### Testing against a specific ethereum-package
 
-If you have a local checkout of the [ethereum-package](https://github.com/ethpandaops/ethereum-package) (e.g., with the custom CB config PR):
+If you have a local checkout of the [ethereum-package](https://github.com/ethpandaops/ethereum-package) (e.g., with the [custom CB config PR](https://github.com/ethpandaops/ethereum-package/pull/1355)):
 
 ```bash
 ./scripts/run-and-verify.sh --package ../ethereum-package --keep -v
@@ -128,7 +122,7 @@ Start from `basic-pbs.yml` and modify the `commit_boost_config` block. The confi
 ### cb-verify
 
 ```
-python3 -m cb_verifier --enclave CB-Testnet [OPTIONS]
+cargo run --release -- --enclave CB-Testnet [OPTIONS]
 
 Options:
   --enclave NAME        Kurtosis enclave name (required)
@@ -178,11 +172,21 @@ With the default `seconds_per_slot: 12` (matching mainnet), expect ~55 minutes t
 
 ## Metrics limitations
 
-CB's metrics server only starts when the `CB_METRICS_PORT` environment variable is set. This env var is normally injected by `cb docker init` when generating docker-compose files, but the ethereum-package doesn't set it.
+CB's metrics server only starts when the `CB_METRICS_PORT` environment variable is set. This env var is normally injected by `cb docker init` when generating docker-compose files, but upstream `ethpandaops/ethereum-package` doesn't set it. The TOML `[metrics]` block in `commit_boost_config` alone is ignored by PBS standalone -- see `crates/metrics/src/provider.rs` in commit-boost-client.
 
-The verifier attempts to fetch metrics via `kurtosis service exec` (curling localhost inside the container), but this will fail until the upstream issue is resolved. There's an open issue to fix this: the config file's `[metrics]` block should be sufficient to start the metrics server without the env var.
+### Fixed in local ethereum-package fork
 
-Tier 2 metric checks (latency, errors, header values) will show as SKIP until this is fixed. All Tier 1 checks work without metrics.
+The `JasonVranek/ethereum-package` fork patches this in `src/mev/commit-boost/mev_boost/mev_boost_launcher.star`:
+- Adds `metrics: 9090/tcp` to `USED_PORTS`
+- Adds `CB_METRICS_PORT: "9090"` to `env_vars`
+
+Run against the local fork to enable metrics:
+
+```bash
+./scripts/run-and-verify.sh --package ../ethereum-package --config configs/assertoor-pbs.yml
+```
+
+With the fork, the `cb_*_matrix` checks populate with per-endpoint, per-relay status code counts, and the `cb_relay_latency` p95 histogram check activates. Using upstream ethereum-package, these tier 2 checks SKIP. All tier 1 checks (chain health, relay pipeline, payload matching) work either way.
 
 ## Assertoor integration (CI)
 
@@ -250,15 +254,19 @@ For iterating on checks locally, the standalone verifier (`./scripts/run-and-ver
 ## Project layout
 
 ```
-src/cb_verifier/
-  __main__.py             CLI entry point and orchestrator
-  discovery.py            Kurtosis service/port discovery
-  report.py               Terminal (ANSI) and JSON output formatting
+src/
+  main.rs                 CLI entry point and orchestrator (clap)
+  beacon.rs               Beacon API client (alloy types)
+  relay.rs                Relay Data API client (alloy types)
+  discovery.rs            Kurtosis service/port discovery
+  metrics.rs              Prometheus metrics fetching
+  report.rs               Terminal (ANSI) and JSON output formatting
   checks/
-    chain_health.py       Finality, sync, missed slots, CB service status
-    relay_pipeline.py     Builder blocks, delivered payloads, MEV delivery rate
-    payload_matching.py   Cross-ref relay payloads with on-chain blocks
-    cb_metrics.py         CB Prometheus metric assertions
+    mod.rs                CheckResult, CheckStatus types
+    chain_health.rs       Finality, sync, missed slots, CB service status
+    relay_pipeline.rs     Builder blocks, delivered payloads, MEV delivery rate
+    payload_matching.rs   Cross-ref relay payloads with on-chain blocks
+    cb_metrics.rs         CB Prometheus metric assertions
 assertoor/
   cb-mev-pipeline.yaml    Assertoor test definition for CI
 configs/
@@ -269,6 +277,6 @@ configs/
   reference/              Additional configs for SSZ, client matrix, etc.
 scripts/
   run-and-verify.sh       Full lifecycle: launch, verify, tear down
-pyproject.toml            Python project config (deps, entry point)
+Cargo.toml                Rust project config
 PLAN.md                   Design doc and roadmap
 ```

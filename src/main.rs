@@ -1,0 +1,477 @@
+//! cb-verify: Automated verification for Commit-Boost Kurtosis testnets.
+//!
+//! Discovers services in a running enclave, polls for readiness,
+//! runs verification checks, and produces a structured report.
+
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use eyre::Result;
+use tracing::{error, info, warn};
+
+mod beacon;
+mod checks;
+mod discovery;
+mod health;
+mod metrics;
+mod relay;
+mod report;
+
+use beacon::BeaconClient;
+use checks::{CheckResult, CheckStatus};
+use health::{HealthTarget, ServiceKind};
+use relay::RelayClient;
+use report::{ObservationWindow, VerificationReport};
+
+const SLOTS_PER_EPOCH: u64 = 32;
+
+/// Verify Commit-Boost MEV pipeline in a Kurtosis devnet.
+#[derive(Parser, Debug)]
+#[command(name = "cb-verify", version, about)]
+struct Cli {
+    /// Kurtosis enclave name
+    #[arg(long)]
+    enclave: String,
+
+    /// Observation window in epochs
+    #[arg(long, default_value_t = 2)]
+    min_epochs: u64,
+
+    /// Wait until this epoch before starting checks
+    #[arg(long, default_value_t = 7)]
+    target_epoch: u64,
+
+    /// Max seconds to wait for devnet readiness
+    #[arg(long, default_value_t = 3600)]
+    timeout: u64,
+
+    /// Minimum MEV delivery rate threshold
+    #[arg(long, default_value_t = 0.30)]
+    mev_threshold: f64,
+
+    /// Output JSON report instead of terminal colors
+    #[arg(long)]
+    json: bool,
+
+    /// Enable debug logging
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Strict mode: promote soft warnings to FAIL. Affects:
+    ///
+    /// - get_header with zero 200s but some 204s (relay alive but no bids
+    ///   ever delivered -- builder idle or below threshold).
+    /// - submit_blinded_block with zero (200+202) deliveries (proposer
+    ///   never chose a builder block in the observation window).
+    ///
+    /// 5xx responses always FAIL regardless of this flag. Use in CI.
+    #[arg(long)]
+    strict: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    color_eyre::install()?;
+    let cli = Cli::parse();
+
+    // Initialize tracing
+    let filter = if cli.verbose {
+        "debug,hyper=info,reqwest=info,rustls=info"
+    } else {
+        "info"
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
+    let code = run_verification(&cli).await;
+    std::process::exit(code);
+}
+
+async fn run_verification(cli: &Cli) -> i32 {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // Step 1: Discover services
+    info!("Discovering services in enclave '{}'...", cli.enclave);
+    let services = match discovery::discover(&cli.enclave) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Service discovery failed: {e}");
+            let report = make_error_report(&cli.enclave, &now, &format!("Discovery failed: {e}"));
+            report::print_report(&report, cli.json);
+            return 2;
+        }
+    };
+
+    if services.beacon_urls.is_empty() {
+        error!("No beacon nodes found in enclave");
+        let report = make_error_report(&cli.enclave, &now, "No beacon nodes found");
+        report::print_report(&report, cli.json);
+        return 2;
+    }
+
+    let beacon = BeaconClient::new(&services.beacon_urls[0]);
+    let relays: Vec<RelayClient> = services
+        .relay_urls
+        .iter()
+        .map(|url| RelayClient::new(url))
+        .collect();
+    let metrics_url = services.cb_metrics_urls.first().map(|s| s.as_str());
+
+    info!("Beacon: {}", services.beacon_urls[0]);
+    info!("Relays: {:?}", services.relay_urls);
+    info!("CB metrics: {}", metrics_url.unwrap_or("not available"));
+
+    if relays.is_empty() {
+        warn!("No relay URLs found -- relay checks will fail");
+    }
+
+    // Step 2: Wait for readiness
+    if !wait_for_readiness(&beacon, cli.target_epoch, cli.timeout).await {
+        let report = make_error_report(
+            &cli.enclave,
+            &now,
+            &format!("Devnet did not stabilize within {}s", cli.timeout),
+        );
+        report::print_report(&report, cli.json);
+        return 2;
+    }
+
+    // Build the health-monitoring set -- anything whose disappearance would
+    // invalidate the run. We track every beacon node, every relay, and every
+    // CB PBS endpoint. Dead = run aborts.
+    let health_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut targets: Vec<HealthTarget> = Vec::new();
+    for (i, url) in services.beacon_urls.iter().enumerate() {
+        targets.push(HealthTarget::new(
+            format!("beacon[{i}]"),
+            url,
+            ServiceKind::Beacon,
+        ));
+    }
+    for (i, url) in services.relay_urls.iter().enumerate() {
+        targets.push(HealthTarget::new(
+            format!("relay[{i}]"),
+            url,
+            ServiceKind::Relay,
+        ));
+    }
+    for (i, url) in services.cb_pbs_urls.iter().enumerate() {
+        targets.push(HealthTarget::new(
+            format!("cb-pbs[{i}]"),
+            url,
+            ServiceKind::CbPbs,
+        ));
+    }
+
+    // Step 2b: Tier 0 connectivity preflight.
+    //
+    // Fail loud, fail once. Probe every service we care about; if anything
+    // that *should* be reachable isn't, bail before the observation window
+    // instead of emitting confusing errors for each downstream check.
+    info!("Running preflight on {} target(s)...", targets.len());
+    let dead_at_preflight = health::probe_all(&health_client, &targets).await;
+    if !dead_at_preflight.is_empty() {
+        for (label, e) in &dead_at_preflight {
+            warn!("  {label} UNREACHABLE: {e}");
+        }
+        let summary: Vec<String> = dead_at_preflight
+            .iter()
+            .map(|(l, _)| l.clone())
+            .collect();
+        error!(
+            "{} of {} service(s) unreachable: {:?}",
+            dead_at_preflight.len(),
+            targets.len(),
+            summary
+        );
+        let report = make_error_report(
+            &cli.enclave,
+            &now,
+            &format!(
+                "Preflight failed ({} of {} services): {}. Kurtosis port mapping may be stale or a container crashed. Try: kurtosis enclave inspect {} ; docker ps -a",
+                dead_at_preflight.len(),
+                targets.len(),
+                summary.join(", "),
+                cli.enclave
+            ),
+        );
+        report::print_report(&report, cli.json);
+        return 2;
+    }
+    info!("  All {} service(s) reachable", targets.len());
+
+    // Step 3: Observe for min_epochs, with periodic health checks across
+    // every critical service.
+    //
+    // Kurtosis happily leaves stopped containers in place -- when that happens
+    // the service stops accepting connections but the enclave still looks
+    // "up". Probing every ~30s means we fail fast instead of waiting out the
+    // whole window and surfacing a ghost error at the end.
+    let sps = beacon.get_seconds_per_slot().await;
+    let obs_timeout = cli.min_epochs * SLOTS_PER_EPOCH * sps + 120;
+    let window = match observe_epochs(
+        &beacon,
+        &health_client,
+        &targets,
+        cli.min_epochs,
+        obs_timeout,
+    )
+    .await
+    {
+        ObserveOutcome::Done(w) => w,
+        ObserveOutcome::ServiceDied { label, detail } => {
+            error!("{label} died during observation window -- aborting");
+            let report = make_error_report(
+                &cli.enclave,
+                &now,
+                &format!(
+                    "{label} went offline mid-observation: {detail}. Check: docker ps -a ; kurtosis enclave inspect {}",
+                    cli.enclave
+                ),
+            );
+            report::print_report(&report, cli.json);
+            return 2;
+        }
+        ObserveOutcome::Timeout => {
+            let report =
+                make_error_report(&cli.enclave, &now, "Failed to complete observation window");
+            report::print_report(&report, cli.json);
+            return 2;
+        }
+    };
+
+    // Step 4: Run all checks
+    let mut all_checks: Vec<CheckResult> = Vec::new();
+
+    info!("Running chain health checks...");
+    all_checks.extend(
+        checks::chain_health::run_chain_health_checks(
+            &beacon,
+            window.start_slot,
+            window.end_slot,
+            &cli.enclave,
+        )
+        .await,
+    );
+
+    // Fetch validator pubkeys for tier-3 relay registration check. SKIP the
+    // tier-3 check if this fails rather than aborting the whole run.
+    let validator_pubkeys: Vec<String> = match beacon.get_active_validator_pubkeys().await {
+        Ok(pks) => {
+            info!("Fetched {} active validator pubkey(s)", pks.len());
+            pks
+        }
+        Err(e) => {
+            warn!("Failed to fetch validator pubkeys (registration check will SKIP): {e}");
+            Vec::new()
+        }
+    };
+
+    info!("Running relay pipeline checks...");
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    all_checks.extend(
+        checks::relay_pipeline::run_relay_checks(
+            &relays,
+            &beacon,
+            window.start_slot,
+            window.end_slot,
+            cli.mev_threshold,
+            &validator_pubkeys,
+            &http_client,
+        )
+        .await,
+    );
+
+    info!("Running payload matching checks...");
+    all_checks.extend(
+        checks::payload_matching::run_payload_checks(
+            &relays,
+            &beacon,
+            window.start_slot,
+            window.end_slot,
+        )
+        .await,
+    );
+
+    info!("Running CB metrics checks...");
+    all_checks.extend(
+        checks::cb_metrics::run_metrics_checks(
+            &http_client,
+            metrics_url,
+            Some(cli.enclave.as_str()),
+            &services.cb_service_names,
+            cli.strict,
+        )
+        .await,
+    );
+
+    // Step 5: Report
+    let tier1_failed = all_checks
+        .iter()
+        .any(|c| c.tier == 1 && c.status == CheckStatus::Fail);
+
+    let report = VerificationReport {
+        enclave: cli.enclave.clone(),
+        timestamp: now,
+        observation_window: Some(window),
+        result: if tier1_failed {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Pass
+        },
+        checks: all_checks,
+    };
+
+    report::print_report(&report, cli.json);
+    report::exit_code(&report)
+}
+
+/// Poll the beacon node until the devnet is ready for verification.
+async fn wait_for_readiness(beacon: &BeaconClient, target_epoch: u64, timeout: u64) -> bool {
+    let sps = beacon.get_seconds_per_slot().await;
+    info!(
+        "Waiting for readiness (target epoch {target_epoch}, slot {}, timeout {timeout}s, {sps}s slots)...",
+        target_epoch * SLOTS_PER_EPOCH
+    );
+
+    let start = Instant::now();
+    let timeout_dur = Duration::from_secs(timeout);
+    let poll_interval = Duration::from_secs(10);
+
+    loop {
+        if start.elapsed() >= timeout_dur {
+            error!("Timeout: devnet did not stabilize within {timeout}s");
+            return false;
+        }
+
+        // Check syncing
+        match beacon.is_syncing().await {
+            Err(_) => {
+                info!("  Beacon node not reachable yet...");
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            Ok(true) => {
+                info!("  Beacon node still syncing...");
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            Ok(false) => {}
+        }
+
+        let head = match beacon.get_head_slot().await {
+            Ok(s) => Some(s),
+            Err(_) => None,
+        };
+        let finalized = match beacon.get_finalized_epoch().await {
+            Ok(f) => Some(f),
+            Err(_) => None,
+        };
+        let current_epoch = head.map(|h| h / SLOTS_PER_EPOCH).unwrap_or(0);
+
+        info!(
+            "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (target: epoch>={target_epoch}, finalized>=2)",
+            head, finalized
+        );
+
+        if let (Some(_), Some(fin)) = (head, finalized) {
+            if fin >= 2 && current_epoch >= target_epoch {
+                info!("Devnet is ready.");
+                return true;
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Outcome of the observation window.
+enum ObserveOutcome {
+    /// Completed normally.
+    Done(ObservationWindow),
+    /// A monitored service stopped responding mid-window. Fail fast so the
+    /// user isn't waiting 20+ minutes for an obviously-broken run.
+    ServiceDied { label: String, detail: String },
+    /// Window didn't complete before the timeout.
+    Timeout,
+}
+
+/// Wait for num_epochs to pass and return the observation window.
+///
+/// Interleaves a lightweight health probe across every tracked service every
+/// ~30s. If anything that was reachable at preflight stops responding, abort
+/// the window immediately.
+async fn observe_epochs(
+    beacon: &BeaconClient,
+    http: &reqwest::Client,
+    targets: &[HealthTarget],
+    num_epochs: u64,
+    timeout: u64,
+) -> ObserveOutcome {
+    let Ok(start_slot) = beacon.get_head_slot().await else {
+        return ObserveOutcome::Timeout;
+    };
+    let target_slot = start_slot + (num_epochs * SLOTS_PER_EPOCH);
+
+    info!("Observing {num_epochs} epochs: slot {start_slot} -> {target_slot}");
+
+    let start = Instant::now();
+    let timeout_dur = Duration::from_secs(timeout);
+    let poll_interval = Duration::from_secs(5);
+    // Probe services every N poll ticks -- 6 * 5s = 30s.
+    const PROBE_EVERY_N_TICKS: u32 = 6;
+    let mut tick: u32 = 0;
+
+    loop {
+        if start.elapsed() >= timeout_dur {
+            error!("Timeout waiting for observation window");
+            return ObserveOutcome::Timeout;
+        }
+
+        if let Ok(head) = beacon.get_head_slot().await {
+            if head >= target_slot {
+                info!("Observation window complete: slot {start_slot} -> {head}");
+                return ObserveOutcome::Done(ObservationWindow {
+                    start_slot,
+                    end_slot: head,
+                });
+            }
+        }
+
+        // Periodic service liveness check. A stopped container doesn't refuse
+        // politely -- it TCP-resets or times out, both of which surface here.
+        tick = tick.wrapping_add(1);
+        if tick % PROBE_EVERY_N_TICKS == 0 {
+            let dead = health::probe_all(http, targets).await;
+            if let Some((label, err)) = dead.into_iter().next() {
+                warn!("  {label} health probe failed mid-observation: {err}");
+                return ObserveOutcome::ServiceDied {
+                    label,
+                    detail: err.to_string(),
+                };
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+fn make_error_report(enclave: &str, timestamp: &str, detail: &str) -> VerificationReport {
+    VerificationReport {
+        enclave: enclave.to_string(),
+        timestamp: timestamp.to_string(),
+        observation_window: None,
+        result: CheckStatus::Fail,
+        checks: vec![CheckResult::fail("setup", 1, detail)],
+    }
+}
+
+

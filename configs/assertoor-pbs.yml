@@ -1,28 +1,28 @@
-# cb-testnet-verifier preset: Assertoor PBS Pipeline
+# cb-testnet-verifier preset: Assertoor PBS Pipeline + Metrics
 #
-# Runs CB MEV pipeline checks inside assertoor for CI integration.
-# Assertoor handles readiness and timing. The kurtosis-assertoor GitHub
-# Action polls assertoor's API for results and returns pass/fail.
+# Runs CB MEV pipeline checks inside assertoor for CI integration, AND
+# enables CB's Prometheus metrics endpoint so cb-verify's status-code
+# matrix checks populate when run against the same enclave.
 #
-# CB-specific checks (relay data API, payload hash matching, MEV delivery
-# rate) run as run_shell tasks with curl+jq inside the assertoor container.
+# Two verifiers, one enclave, same invariants. Run assertoor for CI-blessed
+# pass/fail, then run cb-verify against the same enclave to get the full
+# status-code matrix + latency histograms.
 #
 # Usage (local):
 #   kurtosis run github.com/ethpandaops/ethereum-package \
 #     --enclave CB-Testnet --args-file configs/assertoor-pbs.yml
 #
-#   # Check status:
+#   # Check assertoor status:
 #   ASSERTOOR=$(kurtosis port print CB-Testnet assertoor http)
 #   curl -s $ASSERTOOR/api/v1/test_runs | jq '.[0].status'
+#
+#   # Run cb-verify against the same enclave (metrics now populated):
+#   ./scripts/run-and-verify.sh --config configs/assertoor-pbs.yml
 #
 # Usage (CI with GitHub Action):
 #   uses: ethpandaops/kurtosis-assertoor-github-action@v1
 #   with:
 #     ethereum_package_args: configs/assertoor-pbs.yml
-#
-# The assertoor test YAML is loaded from this repo via raw GitHub URL.
-# For local dev without CI, use the standalone verifier instead:
-#   ./scripts/run-and-verify.sh --config configs/basic-pbs.yml
 
 participants:
   - el_type: geth
@@ -33,6 +33,7 @@ additional_services:
   - spamoor
   - dora
   - assertoor
+  - prometheus
 
 mev_type: commit-boost
 
@@ -41,6 +42,35 @@ mev_params:
   mev_relay_image: ethpandaops/mev-boost-relay:main
   mev_builder_cl_image: sigp/lighthouse:latest
   mev_builder_image: ethpandaops/reth-rbuilder:develop
+  # Enable CB metrics so cb-verify's status-code matrix populates.
+  # The kurtosis ethereum-package doesn't publish port 9090 to the host
+  # by default, so cb-verify falls back to `kurtosis service exec` + curl
+  # inside the container to scrape. See checks/cb_metrics.rs.
+  commit_boost_config: |
+    chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }
+
+    [pbs]
+    host = "0.0.0.0"
+    port = {{ .Port }}
+    timeout_get_header_ms = 950
+    timeout_get_payload_ms = 4000
+    late_in_slot_time_ms = 2000
+
+    {{ range $index, $relay := .Relays }}
+    [[relays]]
+    id = "mev_relay_{{$index}}"
+    url = "{{ $relay }}"
+    {{- end }}
+
+    [metrics]
+    host = "0.0.0.0"
+    port = 9090
+
+    [logs.stdout]
+    level = "debug"
+
+    [logs.file]
+    enabled = false
 
 assertoor_params:
   run_stability_check: false

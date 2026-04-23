@@ -17,7 +17,7 @@ CONFIG=""
 PACKAGE="github.com/ethpandaops/ethereum-package"
 KEEP=false
 JSON_FLAG=""
-TIMEOUT=1500
+TIMEOUT=3600
 MIN_EPOCHS=2
 VERBOSE=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -101,8 +101,7 @@ echo "Enclave '$ENCLAVE' is up. Starting verification..."
 echo ""
 
 # Step 3: Run verification
-export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:$PYTHONPATH}"
-python3 -m cb_verifier \
+cargo run --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
     --enclave "$ENCLAVE" \
     --timeout "$TIMEOUT" \
     --min-epochs "$MIN_EPOCHS" \
