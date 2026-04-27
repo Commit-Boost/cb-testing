@@ -22,9 +22,9 @@ pub enum ServiceKind {
     /// Beacon API: `/eth/v1/node/health` returns 200 when ready, 206 when
     /// syncing -- both prove the service is alive.
     Beacon,
-    /// MEV-Boost relay data API: `builder_blocks_received?slot=0` returns
-    /// 200 (empty list) or 400 (if slot is invalid for the fork) -- either
-    /// way, the service answered.
+    /// MEV-Boost relay data API: `proposer_payload_delivered?limit=1` always
+    /// returns 200 (empty array `[]` if no payloads) -- no slot dependency,
+    /// always valid.
     Relay,
     /// Commit-Boost PBS: `/eth/v1/builder/status` is the standard
     /// mev-boost liveness endpoint, returns 200 when running.
@@ -56,7 +56,7 @@ impl HealthTarget {
         match self.kind {
             ServiceKind::Beacon => format!("{}/eth/v1/node/health", self.base_url),
             ServiceKind::Relay => format!(
-                "{}/relay/v1/data/bidtraces/builder_blocks_received?slot=0",
+                "{}/relay/v1/data/bidtraces/proposer_payload_delivered?limit=1",
                 self.base_url
             ),
             ServiceKind::CbPbs => format!("{}/eth/v1/builder/status", self.base_url),

@@ -17,8 +17,11 @@ CONFIG=""
 PACKAGE="github.com/ethpandaops/ethereum-package"
 KEEP=false
 JSON_FLAG=""
+STRICT_FLAG=""
+LIVE_METRICS_FLAG=""
 TIMEOUT=3600
 MIN_EPOCHS=2
+TARGET_EPOCH=7
 VERBOSE=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
@@ -32,8 +35,11 @@ usage() {
     echo "  --package PATH      ethereum-package path or ref (default: ethpandaops/ethereum-package)"
     echo "  --keep              Don't tear down the enclave on exit"
     echo "  --json              Output JSON report"
+    echo "  --strict            Promote WARN to FAIL (zero bids, zero deliveries)"
+    echo "  --live-metrics      Show counter deltas every 30s during observation"
     echo "  --timeout SECS      Readiness timeout (default: 1500)"
     echo "  --min-epochs N      Observation window in epochs (default: 2)"
+    echo "  --target-epoch N    Wait until this epoch before checks (default: 5)"
     echo "  -v, --verbose       Verbose logging"
     echo "  -h, --help          Show this help"
     exit 0
@@ -46,8 +52,11 @@ while [[ $# -gt 0 ]]; do
         --package)    PACKAGE="$2"; shift 2;;
         --keep)       KEEP=true; shift;;
         --json)       JSON_FLAG="--json"; shift;;
+        --strict)     STRICT_FLAG="--strict"; shift;;
+        --live-metrics) LIVE_METRICS_FLAG="--live-metrics"; shift;;
         --timeout)    TIMEOUT="$2"; shift 2;;
         --min-epochs) MIN_EPOCHS="$2"; shift 2;;
+        --target-epoch) TARGET_EPOCH="$2"; shift 2;;
         -v|--verbose) VERBOSE="-v"; shift;;
         -h|--help)    usage;;
         *)            echo "Unknown option: $1"; exit 2;;
@@ -105,5 +114,8 @@ cargo run --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
     --enclave "$ENCLAVE" \
     --timeout "$TIMEOUT" \
     --min-epochs "$MIN_EPOCHS" \
+    --target-epoch "$TARGET_EPOCH" \
     $JSON_FLAG \
+    $STRICT_FLAG \
+    $LIVE_METRICS_FLAG \
     $VERBOSE

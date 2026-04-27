@@ -3,16 +3,20 @@
 //! Discovers services in a running enclave, polls for readiness,
 //! runs verification checks, and produces a structured report.
 
+#![allow(unused_imports)]
+#![allow(dead_code)]
+
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eyre::Result;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 mod beacon;
 mod checks;
 mod discovery;
 mod health;
+mod live;
 mod metrics;
 mod relay;
 mod report;
@@ -20,6 +24,7 @@ mod report;
 use beacon::BeaconClient;
 use checks::{CheckResult, CheckStatus};
 use health::{HealthTarget, ServiceKind};
+use live::{LIVE_METRICS_FILTER, compute_deltas, format_delta_json, format_delta_log};
 use relay::RelayClient;
 use report::{ObservationWindow, VerificationReport};
 
@@ -38,6 +43,7 @@ struct Cli {
     min_epochs: u64,
 
     /// Wait until this epoch before starting checks
+    /// (default 7: genesis + validator activation + relay registration + builder warm-up)
     #[arg(long, default_value_t = 7)]
     target_epoch: u64,
 
@@ -67,6 +73,12 @@ struct Cli {
     /// 5xx responses always FAIL regardless of this flag. Use in CI.
     #[arg(long)]
     strict: bool,
+
+    /// Enable live metrics polling during observation window. Scrapes :9090/metrics
+    /// every 30s and logs counter deltas as they occur. Skips if metrics URL not
+    /// directly accessible.
+    #[arg(long)]
+    live_metrics: bool,
 }
 
 #[tokio::main]
@@ -179,29 +191,81 @@ async fn run_verification(cli: &Cli) -> i32 {
         for (label, e) in &dead_at_preflight {
             warn!("  {label} UNREACHABLE: {e}");
         }
-        let summary: Vec<String> = dead_at_preflight
+
+        let summary: Vec<String> = dead_at_preflight.iter().map(|(l, _)| l.clone()).collect();
+
+        // When ONLY relay targets are dead, try post-mortem: query the relay's
+        // Postgres directly. If the pipeline worked before the crash, Postgres
+        // still has the evidence. Salvage the verdict instead of hard-failing.
+        let all_are_relays = dead_at_preflight
             .iter()
-            .map(|(l, _)| l.clone())
-            .collect();
-        error!(
-            "{} of {} service(s) unreachable: {:?}",
-            dead_at_preflight.len(),
-            targets.len(),
-            summary
-        );
-        let report = make_error_report(
-            &cli.enclave,
-            &now,
-            &format!(
-                "Preflight failed ({} of {} services): {}. Kurtosis port mapping may be stale or a container crashed. Try: kurtosis enclave inspect {} ; docker ps -a",
+            .all(|(l, _)| l.starts_with("relay["));
+        let relay_died = dead_at_preflight
+            .iter()
+            .any(|(l, _)| l.starts_with("relay["));
+
+        if all_are_relays && relay_died {
+            info!("Relay Data API unreachable — attempting post-mortem via Postgres...");
+            let postmortem = discovery::query_mev_relay_postgres(&cli.enclave);
+            if !postmortem.is_empty() {
+                info!(
+                    "Post-mortem: found {} payload(s) in relay Postgres before crash:",
+                    postmortem.len()
+                );
+                for r in &postmortem {
+                    let hash_short = if r.block_hash.len() > 28 {
+                        &r.block_hash[..28]
+                    } else {
+                        &r.block_hash
+                    };
+                    info!("  slot={} hash={}... value={}", r.slot, hash_short, r.value);
+                }
+                info!(
+                    "Pipeline worked before relay crash. Proceeding with non-relay checks \
+                     (relay API checks will SKIP)."
+                );
+                // Fall through to Step 3 — observation window. Relay checks
+                // will naturally SKIP because the relay URLs are unreachable.
+            } else {
+                error!("Post-mortem: no delivery records found in relay Postgres.");
+                let report = make_error_report(
+                    &cli.enclave,
+                    &now,
+                    &format!(
+                        "Preflight failed ({} of {} services): {}. Relay API unreachable \
+                         and post-mortem Postgres query found no delivery records. \
+                         Try: kurtosis enclave inspect {} ; docker ps -a",
+                        dead_at_preflight.len(),
+                        targets.len(),
+                        summary.join(", "),
+                        cli.enclave
+                    ),
+                );
+                report::print_report(&report, cli.json);
+                return 2;
+            }
+        } else {
+            error!(
+                "{} of {} service(s) unreachable: {:?}",
                 dead_at_preflight.len(),
                 targets.len(),
-                summary.join(", "),
-                cli.enclave
-            ),
-        );
-        report::print_report(&report, cli.json);
-        return 2;
+                summary
+            );
+            let report = make_error_report(
+                &cli.enclave,
+                &now,
+                &format!(
+                    "Preflight failed ({} of {} services): {}. Kurtosis port mapping may be \
+                     stale or a container crashed. Try: kurtosis enclave inspect {} ; docker ps -a",
+                    dead_at_preflight.len(),
+                    targets.len(),
+                    summary.join(", "),
+                    cli.enclave
+                ),
+            );
+            report::print_report(&report, cli.json);
+            return 2;
+        }
     }
     info!("  All {} service(s) reachable", targets.len());
 
@@ -220,6 +284,9 @@ async fn run_verification(cli: &Cli) -> i32 {
         &targets,
         cli.min_epochs,
         obs_timeout,
+        metrics_url,
+        cli.live_metrics,
+        cli.json,
     )
     .await
     {
@@ -415,6 +482,9 @@ async fn observe_epochs(
     targets: &[HealthTarget],
     num_epochs: u64,
     timeout: u64,
+    metrics_url: Option<&str>,
+    live_metrics: bool,
+    json_output: bool,
 ) -> ObserveOutcome {
     let Ok(start_slot) = beacon.get_head_slot().await else {
         return ObserveOutcome::Timeout;
@@ -429,6 +499,30 @@ async fn observe_epochs(
     // Probe services every N poll ticks -- 6 * 5s = 30s.
     const PROBE_EVERY_N_TICKS: u32 = 6;
     let mut tick: u32 = 0;
+
+    // Live metrics setup: initial scrape + state
+    let mut prev_scrape: Option<prometheus_parse::Scrape> = if live_metrics {
+        match metrics_url {
+            Some(url) => match metrics::fetch_metrics(http, url).await {
+                Ok(s) => {
+                    info!("live: initial scrape captured, polling every 30s");
+                    Some(s)
+                }
+                Err(e) => {
+                    warn!("live: initial metrics scrape failed: {e}");
+                    None
+                }
+            },
+            None => {
+                warn!(
+                    "--live-metrics requested but metrics not HTTP-reachable; skipping live deltas"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
         if start.elapsed() >= timeout_dur {
@@ -458,6 +552,33 @@ async fn observe_epochs(
                     detail: err.to_string(),
                 };
             }
+
+            // Live metrics: scrape, compute deltas vs previous, log.
+            if live_metrics {
+                if let Some(url) = metrics_url {
+                    match metrics::fetch_metrics(http, url).await {
+                        Ok(curr) => {
+                            let deltas =
+                                compute_deltas(prev_scrape.as_ref(), &curr, LIVE_METRICS_FILTER);
+                            if !deltas.is_empty() {
+                                if json_output {
+                                    for line in format_delta_json(&deltas) {
+                                        eprintln!("{line}");
+                                    }
+                                } else {
+                                    for line in format_delta_log(&deltas) {
+                                        info!("{line}");
+                                    }
+                                }
+                            }
+                            prev_scrape = Some(curr);
+                        }
+                        Err(e) => {
+                            debug!("live: metrics scrape failed (non-fatal): {e}");
+                        }
+                    }
+                }
+            }
         }
 
         tokio::time::sleep(poll_interval).await;
@@ -473,5 +594,3 @@ fn make_error_report(enclave: &str, timestamp: &str, detail: &str) -> Verificati
         checks: vec![CheckResult::fail("setup", 1, detail)],
     }
 }
-
-

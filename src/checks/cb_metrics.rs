@@ -228,9 +228,7 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
         return CheckResult::fail(
             id,
             tier,
-            format!(
-                "{endpoint}: {r5xx:.0} 5xx from relay(s) -- relay or CB-to-relay failure"
-            ),
+            format!("{endpoint}: {r5xx:.0} 5xx from relay(s) -- relay or CB-to-relay failure"),
         )
         .with_data(data);
     }
@@ -348,8 +346,7 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
                 CheckResult::pass(id, tier, format!("{endpoint}: {r200:.0} 200 responses"))
                     .with_data(data)
             } else {
-                CheckResult::skip(id, tier, format!("{endpoint}: no 200 responses"))
-                    .with_data(data)
+                CheckResult::skip(id, tier, format!("{endpoint}: no 200 responses")).with_data(data)
             }
         }
         _ => CheckResult::skip(id, tier, format!("Unknown endpoint: {endpoint}")).with_data(data),
@@ -448,7 +445,11 @@ pub fn histogram_quantile(q: f64, buckets: &[(f64, f64)]) -> Option<f64> {
     } else {
         buckets[idx - 1]
     };
-    let lower_le = if lower_le.is_infinite() { 0.0 } else { lower_le };
+    let lower_le = if lower_le.is_infinite() {
+        0.0
+    } else {
+        lower_le
+    };
 
     let span = cum - lower_cum;
     if span <= 0.0 {
@@ -609,11 +610,18 @@ pub async fn run_metrics_checks(
         }
     }
 
-    skip_all("Metrics not available (CB needs metrics config; not set in default kurtosis PBS mode)")
+    skip_all(
+        "Metrics not available (CB needs metrics config; not set in default kurtosis PBS mode)",
+    )
 }
 
 fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
-    let endpoints = ["get_header", "register_validator", "submit_blinded_block", "status"];
+    let endpoints = [
+        "get_header",
+        "register_validator",
+        "submit_blinded_block",
+        "status",
+    ];
     let mut out: Vec<CheckResult> = endpoints
         .iter()
         .map(|ep| {
@@ -677,8 +685,14 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
         assert_eq!(s.relay_get("200"), 14.0);
         assert_eq!(s.relay_get("204"), 18.0);
         assert_eq!(s.relay_get("5xx"), 2.0);
-        assert_eq!(s.relay_by_id.get("r0").unwrap().get("200").copied(), Some(14.0));
-        assert_eq!(s.relay_by_id.get("r1").unwrap().get("5xx").copied(), Some(2.0));
+        assert_eq!(
+            s.relay_by_id.get("r0").unwrap().get("200").copied(),
+            Some(14.0)
+        );
+        assert_eq!(
+            s.relay_by_id.get("r1").unwrap().get("5xx").copied(),
+            Some(2.0)
+        );
         // beacon side
         assert_eq!(s.beacon_get("200"), 14.0);
         assert_eq!(s.beacon_get("204"), 18.0);
@@ -715,8 +729,14 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
         let mut s = EndpointStats::default();
         s.add_relay("r0", "200", 10.0);
         s.add_relay("r0", "500", 1.0);
-        assert_eq!(classify_endpoint("get_header", &s, false).status, CheckStatus::Fail);
-        assert_eq!(classify_endpoint("get_header", &s, true).status, CheckStatus::Fail);
+        assert_eq!(
+            classify_endpoint("get_header", &s, false).status,
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            classify_endpoint("get_header", &s, true).status,
+            CheckStatus::Fail
+        );
     }
 
     #[test]

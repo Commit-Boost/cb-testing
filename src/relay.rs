@@ -36,17 +36,16 @@ impl RelayClient {
     ///
     /// Any HTTP response (even 4xx) indicates the relay is reachable. Only
     /// returns Err on connection refused, DNS failure, TLS error, or timeout.
-    /// Uses `builder_blocks_received` with a synthetic slot filter because the
-    /// relay rejects unfiltered queries with 400 -- a successful 400 still
-    /// proves the service is up.
+    /// Uses `proposer_payload_delivered?limit=1` which always returns 200
+    /// (empty array `[]` if no payloads) regardless of slot.
     pub async fn ping(&self) -> Result<()> {
         let url = format!(
-            "{}/relay/v1/data/bidtraces/builder_blocks_received",
+            "{}/relay/v1/data/bidtraces/proposer_payload_delivered",
             self.base_url
         );
         self.client
             .get(&url)
-            .query(&[("slot", "0")])
+            .query(&[("limit", "1")])
             .send()
             .await
             .map(|_| ())
