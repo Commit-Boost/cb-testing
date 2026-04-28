@@ -27,21 +27,26 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Build cb-verify
-        run: cargo build --release
+        run: just build-release
 
       - name: Checkout Commit-Boost
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: commit-boost/commit-boost-client
           ref: ${{ github.event.inputs.cb_ref }}
@@ -95,12 +100,12 @@ jobs:
         run: |
           echo "=== Verification Report ==="
           if [ -f verify-report.json ]; then
-            cat verify-report.json | python3 -m json.tool || cat verify-report.json
+            python3 -m json.tool verify-report.json || cat verify-report.json
           fi
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: verify-${{ github.run_id }}
           path: |

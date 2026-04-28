@@ -149,7 +149,7 @@ pub fn collect_endpoint_stats(scrape: &Scrape, endpoint: &str) -> EndpointStats 
         if !is_beacon_side && !is_relay_side {
             continue;
         }
-        if s.labels.get("endpoint").map(|v| v.as_ref()) != Some(endpoint) {
+        if s.labels.get("endpoint") != Some(endpoint) {
             continue;
         }
         let code = match s.labels.get("http_status_code") {
@@ -330,9 +330,7 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
                 )
                 .with_data(data)
             } else {
-                let msg = format!(
-                    "submit_blinded_block: 0 deliveries (200+202=0); proposer never chose a builder block. Pass --strict to treat as failure"
-                );
+                let msg = "submit_blinded_block: 0 deliveries (200+202=0); proposer never chose a builder block. Pass --strict to treat as failure".to_string();
                 if strict {
                     CheckResult::fail(id, tier, msg.replace("Pass --strict ", "(--strict) "))
                         .with_data(data)

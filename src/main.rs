@@ -124,11 +124,7 @@ async fn run_verification(cli: &Cli) -> i32 {
     }
 
     let beacon = BeaconClient::new(&services.beacon_urls[0]);
-    let relays: Vec<RelayClient> = services
-        .relay_urls
-        .iter()
-        .map(|url| RelayClient::new(url))
-        .collect();
+    let relays: Vec<RelayClient> = services.relay_urls.iter().map(RelayClient::new).collect();
     let metrics_url = services.cb_metrics_urls.first().map(|s| s.as_str());
 
     info!("Beacon: {}", services.beacon_urls[0]);
@@ -284,9 +280,11 @@ async fn run_verification(cli: &Cli) -> i32 {
         &targets,
         cli.min_epochs,
         obs_timeout,
-        metrics_url,
-        cli.live_metrics,
-        cli.json,
+        ObserveLiveOpts {
+            metrics_url,
+            live_metrics: cli.live_metrics,
+            json_output: cli.json,
+        },
     )
     .await
     {
@@ -434,14 +432,8 @@ async fn wait_for_readiness(beacon: &BeaconClient, target_epoch: u64, timeout: u
             Ok(false) => {}
         }
 
-        let head = match beacon.get_head_slot().await {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        };
-        let finalized = match beacon.get_finalized_epoch().await {
-            Ok(f) => Some(f),
-            Err(_) => None,
-        };
+        let head = beacon.get_head_slot().await.ok();
+        let finalized = beacon.get_finalized_epoch().await.ok();
         let current_epoch = head.map(|h| h / SLOTS_PER_EPOCH).unwrap_or(0);
 
         info!(
@@ -449,11 +441,12 @@ async fn wait_for_readiness(beacon: &BeaconClient, target_epoch: u64, timeout: u
             head, finalized
         );
 
-        if let (Some(_), Some(fin)) = (head, finalized) {
-            if fin >= 2 && current_epoch >= target_epoch {
-                info!("Devnet is ready.");
-                return true;
-            }
+        if let (Some(_), Some(fin)) = (head, finalized)
+            && fin >= 2
+            && current_epoch >= target_epoch
+        {
+            info!("Devnet is ready.");
+            return true;
         }
 
         tokio::time::sleep(poll_interval).await;
@@ -471,6 +464,13 @@ enum ObserveOutcome {
     Timeout,
 }
 
+/// Live-metrics options for the observation window.
+struct ObserveLiveOpts<'a> {
+    metrics_url: Option<&'a str>,
+    live_metrics: bool,
+    json_output: bool,
+}
+
 /// Wait for num_epochs to pass and return the observation window.
 ///
 /// Interleaves a lightweight health probe across every tracked service every
@@ -482,9 +482,7 @@ async fn observe_epochs(
     targets: &[HealthTarget],
     num_epochs: u64,
     timeout: u64,
-    metrics_url: Option<&str>,
-    live_metrics: bool,
-    json_output: bool,
+    live_opts: ObserveLiveOpts<'_>,
 ) -> ObserveOutcome {
     let Ok(start_slot) = beacon.get_head_slot().await else {
         return ObserveOutcome::Timeout;
@@ -501,8 +499,9 @@ async fn observe_epochs(
     let mut tick: u32 = 0;
 
     // Live metrics setup: initial scrape + state
-    let mut prev_scrape: Option<prometheus_parse::Scrape> = if live_metrics {
-        match metrics_url {
+    #[allow(unused_mut)]
+    let mut prev_scrape: Option<prometheus_parse::Scrape> = if live_opts.live_metrics {
+        match live_opts.metrics_url {
             Some(url) => match metrics::fetch_metrics(http, url).await {
                 Ok(s) => {
                     info!("live: initial scrape captured, polling every 30s");
@@ -530,20 +529,20 @@ async fn observe_epochs(
             return ObserveOutcome::Timeout;
         }
 
-        if let Ok(head) = beacon.get_head_slot().await {
-            if head >= target_slot {
-                info!("Observation window complete: slot {start_slot} -> {head}");
-                return ObserveOutcome::Done(ObservationWindow {
-                    start_slot,
-                    end_slot: head,
-                });
-            }
+        if let Ok(head) = beacon.get_head_slot().await
+            && head >= target_slot
+        {
+            info!("Observation window complete: slot {start_slot} -> {head}");
+            return ObserveOutcome::Done(ObservationWindow {
+                start_slot,
+                end_slot: head,
+            });
         }
 
         // Periodic service liveness check. A stopped container doesn't refuse
         // politely -- it TCP-resets or times out, both of which surface here.
         tick = tick.wrapping_add(1);
-        if tick % PROBE_EVERY_N_TICKS == 0 {
+        if tick.is_multiple_of(PROBE_EVERY_N_TICKS) {
             let dead = health::probe_all(http, targets).await;
             if let Some((label, err)) = dead.into_iter().next() {
                 warn!("  {label} health probe failed mid-observation: {err}");
@@ -554,28 +553,27 @@ async fn observe_epochs(
             }
 
             // Live metrics: scrape, compute deltas vs previous, log.
-            if live_metrics {
-                if let Some(url) = metrics_url {
-                    match metrics::fetch_metrics(http, url).await {
-                        Ok(curr) => {
-                            let deltas =
-                                compute_deltas(prev_scrape.as_ref(), &curr, LIVE_METRICS_FILTER);
-                            if !deltas.is_empty() {
-                                if json_output {
-                                    for line in format_delta_json(&deltas) {
-                                        eprintln!("{line}");
-                                    }
-                                } else {
-                                    for line in format_delta_log(&deltas) {
-                                        info!("{line}");
-                                    }
+            if live_opts.live_metrics
+                && let Some(url) = live_opts.metrics_url
+            {
+                match metrics::fetch_metrics(http, url).await {
+                    Ok(curr) => {
+                        let deltas =
+                            compute_deltas(prev_scrape.as_ref(), &curr, LIVE_METRICS_FILTER);
+                        if !deltas.is_empty() {
+                            if live_opts.json_output {
+                                for line in format_delta_json(&deltas) {
+                                    eprintln!("{line}");
+                                }
+                            } else {
+                                for line in format_delta_log(&deltas) {
+                                    info!("{line}");
                                 }
                             }
-                            prev_scrape = Some(curr);
                         }
-                        Err(e) => {
-                            debug!("live: metrics scrape failed (non-fatal): {e}");
-                        }
+                    }
+                    Err(e) => {
+                        debug!("live: metrics scrape failed (non-fatal): {e}");
                     }
                 }
             }

@@ -60,7 +60,7 @@ pub fn sum_metric(scrape: &Scrape, name: &str, label_filter: Option<(&str, &str)
         .filter(|s| s.metric == name)
         .filter(|s| {
             if let Some((key, val)) = label_filter {
-                s.labels.get(key).map(|v| v.as_ref()) == Some(val)
+                s.labels.get(key) == Some(val)
             } else {
                 true
             }
@@ -85,7 +85,7 @@ pub fn metric_values(scrape: &Scrape, name: &str, label_filter: Option<(&str, &s
         .filter(|s| s.metric == name)
         .filter(|s| {
             if let Some((key, val)) = label_filter {
-                s.labels.get(key).map(|v| v.as_ref()) == Some(val)
+                s.labels.get(key) == Some(val)
             } else {
                 true
             }

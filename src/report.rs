@@ -61,11 +61,12 @@ pub fn print_terminal(report: &VerificationReport) {
         };
         println!("  [{}] {} - {}", tag, c.id, c.detail);
 
-        if c.status == CheckStatus::Fail && !c.data.is_null() {
-            if let serde_json::Value::Object(map) = &c.data {
-                for (k, v) in map {
-                    println!("         {}: {}", k, v);
-                }
+        if c.status == CheckStatus::Fail
+            && !c.data.is_null()
+            && let serde_json::Value::Object(map) = &c.data
+        {
+            for (k, v) in map {
+                println!("         {}: {}", k, v);
             }
         }
     }

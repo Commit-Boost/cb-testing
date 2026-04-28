@@ -77,10 +77,10 @@ impl DeltaRow {
         let mut codes: Vec<&String> = self.deltas.keys().collect();
         codes.sort();
         for code in codes {
-            if let Some(delta) = self.deltas.get(code) {
-                if *delta > 0 {
-                    deltas.push(format!("+{delta} {code}"));
-                }
+            if let Some(delta) = self.deltas.get(code)
+                && *delta > 0
+            {
+                deltas.push(format!("+{delta} {code}"));
             }
         }
         let mut line = label;
