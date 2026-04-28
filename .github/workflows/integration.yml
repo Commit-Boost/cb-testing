@@ -1,0 +1,114 @@
+name: Integration Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      cb_ref:
+        description: 'Commit-Boost branch/commit to test'
+        required: false
+        default: 'main'
+      target_epoch:
+        description: 'Target epoch for verification'
+        required: false
+        default: '7'
+      min_epochs:
+        description: 'Observation window in epochs'
+        required: false
+        default: '2'
+
+env:
+  ENCLAVE: cb-ci-${{ github.run_id }}
+
+jobs:
+  verify:
+    name: devnet + verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build cb-verify
+        run: cargo build --release
+
+      - name: Checkout Commit-Boost
+        uses: actions/checkout@v4
+        with:
+          repository: commit-boost/commit-boost-client
+          ref: ${{ github.event.inputs.cb_ref }}
+          path: commit-boost-client
+
+      - name: Build CB Docker image
+        working-directory: commit-boost-client
+        run: |
+          docker build \
+            -t commit-boost/pbs:kurtosis \
+            -f Dockerfile \
+            --build-arg BIN=pbs \
+            .
+
+      - name: Generate CI config
+        run: |
+          PLAYBOOK_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/assertoor/cb-mev-pipeline.yaml"
+          sed "s|http://host.docker.internal:8888/assertoor/cb-mev-pipeline.yaml|${PLAYBOOK_URL}|" \
+            configs/assertoor-pbs.yml > configs/assertoor-ci.yml
+          echo "Playbook URL: $PLAYBOOK_URL"
+
+      - name: Install Kurtosis
+        run: |
+          echo "deb [trusted=yes] https://apt.fury.io/kurtosis-tech/ /" | \
+            sudo tee /etc/apt/sources.list.d/kurtosis.list
+          sudo apt update
+          sudo apt install -y kurtosis-cli
+
+      - name: Launch devnet
+        timeout-minutes: 60
+        run: |
+          kurtosis run github.com/ethpandaops/ethereum-package \
+            --enclave "$ENCLAVE" \
+            --args-file configs/assertoor-ci.yml \
+            --image-download always \
+            --non-blocking-tasks 2>&1 | tee kurtosis-run.log
+
+      - name: Verify
+        timeout-minutes: 30
+        run: |
+          cargo run --release -- \
+            --enclave "$ENCLAVE" \
+            --target-epoch "${{ github.event.inputs.target_epoch }}" \
+            --min-epochs "${{ github.event.inputs.min_epochs }}" \
+            --timeout 3600 \
+            --json > verify-report.json 2>verify-err.log
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Report
+        if: always()
+        run: |
+          echo "=== Verification Report ==="
+          if [ -f verify-report.json ]; then
+            cat verify-report.json | python3 -m json.tool || cat verify-report.json
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-${{ github.run_id }}
+          path: |
+            verify-report.json
+            verify-err.log
+            kurtosis-run.log
+
+      - name: Teardown
+        if: always()
+        run: |
+          kurtosis enclave rm -f "$ENCLAVE" 2>/dev/null || true
