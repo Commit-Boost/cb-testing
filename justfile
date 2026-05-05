@@ -49,3 +49,18 @@ verify-strict enclave="CB-Testnet" target_epoch="7" min_epochs="2":
         --timeout 3600 \
         --live-metrics \
         --strict
+
+# Generate Kurtosis YAML configs from templates into kurtosis-configs/
+generate-configs:
+    python3 scripts/generate_kurtosis_configs.py --output-dir kurtosis-configs/
+
+# Verify that the generator reproduces ground truth exactly
+verify-configs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TMPDIR=$(mktemp -d)
+    python3 scripts/generate_kurtosis_configs.py --output-dir "$TMPDIR"
+    for f in cb-basic cb-multiple-relays cb-skip-sigverify cb-timing-games cb-extra-validation cb-mux; do
+        diff -q "$TMPDIR/${f}.yml" configs/generated/${f}.yml
+    done
+    echo "All configs match ground truth."
