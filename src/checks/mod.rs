@@ -87,5 +87,6 @@ impl CheckResult {
 
 pub mod cb_metrics;
 pub mod chain_health;
+pub mod mux_routing;
 pub mod payload_matching;
 pub mod relay_pipeline;

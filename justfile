@@ -50,17 +50,58 @@ verify-strict enclave="CB-Testnet" target_epoch="7" min_epochs="2":
         --live-metrics \
         --strict
 
-# Generate Kurtosis YAML configs from templates into kurtosis-configs/
+# Generate Kurtosis YAML configs from templates into configs/generated/
+# Loads optional .env for Docker image overrides (see .env.example).
 generate-configs:
-    python3 scripts/generate_kurtosis_configs.py --output-dir kurtosis-configs/
+    python3 scripts/generate_kurtosis_configs.py
 
-# Verify that the generator reproduces ground truth exactly
-verify-configs:
+# Run kurtosis testnet with verification on target `config`
+testnet config:
+    ./scripts/run-and-verify.sh \
+        --config {{config}} \
+        --json \
+        --live-metrics \
+        --min-epochs 1 \
+        --target-epoch 2
+
+# Run all generated configs sequentially and print a summary.
+#
+# Iterates configs/generated/*.yml, runs each via `testnet` with
+# --json-dir so results are saved. After all complete, aggregates
+# the JSON reports into a summary table.
+test-all:
     #!/usr/bin/env bash
     set -euo pipefail
-    TMPDIR=$(mktemp -d)
-    python3 scripts/generate_kurtosis_configs.py --output-dir "$TMPDIR"
-    for f in cb-basic cb-multiple-relays cb-skip-sigverify cb-timing-games cb-extra-validation cb-mux; do
-        diff -q "$TMPDIR/${f}.yml" configs/generated/${f}.yml
+    RESULTS_DIR="$(mktemp -d)"
+    SCRIPTS_DIR="$(dirname "$0")/scripts"
+    CONFIGS_DIR="$(dirname "$0")/configs/generated"
+    echo "Results dir: $RESULTS_DIR"
+    echo ""
+    for config in "$CONFIGS_DIR"/*.yml; do
+        name="$(basename "$config" .yml)"
+        # Derive a unique enclave name from the config filename
+        enclave="CB-${name#cb-}"
+        echo "[$(date +%H:%M:%S)] Running $name..."
+        "$SCRIPTS_DIR/run-and-verify.sh" \
+            --config "$config" \
+            --enclave "$enclave" \
+            --json-dir "$RESULTS_DIR" \
+            --live-metrics \
+            --min-epochs 2 \
+            --target-epoch 2 \
+            2>&1 | tail -1 || echo "  $name: FAILED (exit code $?)"
     done
-    echo "All configs match ground truth."
+    echo ""
+    echo "========================================"
+    echo "  Batch Summary"
+    echo "========================================"
+    for f in "$RESULTS_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f" .json)"
+        result="$(jq -r '.result // "unknown"' "$f" 2>/dev/null || echo "parse-error")"
+        passed="$(jq '[.checks[] | select(.status == "Pass")] | length' "$f" 2>/dev/null || echo "?")"
+        failed="$(jq '[.checks[] | select(.status == "Fail")] | length' "$f" 2>/dev/null || echo "?")"
+        warn="$(jq '[.checks[] | select(.status == "Warn")] | length' "$f" 2>/dev/null || echo "?")"
+        echo "  $name: $result  (${passed}p / ${failed}f / ${warn}w)"
+    done
+    echo "========================================"

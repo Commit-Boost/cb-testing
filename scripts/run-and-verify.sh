@@ -12,19 +12,20 @@
 set -euo pipefail
 
 # Defaults
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
 ENCLAVE="CB-Testnet"
 CONFIG=""
-PACKAGE="github.com/ethpandaops/ethereum-package"
+PACKAGE="$REPO_DIR/ethereum-package"
 KEEP=false
 JSON_FLAG=""
+JSON_DIR_FLAG=""
 STRICT_FLAG=""
 LIVE_METRICS_FLAG=""
 TIMEOUT=3600
 MIN_EPOCHS=2
 TARGET_EPOCH=7
 VERBOSE=""
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -32,9 +33,10 @@ usage() {
     echo "Options:"
     echo "  --config FILE       Kurtosis config file (default: configs/basic-pbs.yml)"
     echo "  --enclave NAME      Enclave name (default: CB-Testnet)"
-    echo "  --package PATH      ethereum-package path or ref (default: ethpandaops/ethereum-package)"
+    echo "  --package PATH      ethereum-package path or ref (default: ./ethereum-package)"
     echo "  --keep              Don't tear down the enclave on exit"
     echo "  --json              Output JSON report"
+    echo "  --json-dir DIR      Save JSON report to DIR/{enclave}.json (implies --json)"
     echo "  --strict            Promote WARN to FAIL (zero bids, zero deliveries)"
     echo "  --live-metrics      Show counter deltas every 30s during observation"
     echo "  --timeout SECS      Readiness timeout (default: 1500)"
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --package)    PACKAGE="$2"; shift 2;;
         --keep)       KEEP=true; shift;;
         --json)       JSON_FLAG="--json"; shift;;
+        --json-dir)   JSON_DIR_FLAG="--output-dir $2"; JSON_FLAG="--json"; shift 2;;
         --strict)     STRICT_FLAG="--strict"; shift;;
         --live-metrics) LIVE_METRICS_FLAG="--live-metrics"; shift;;
         --timeout)    TIMEOUT="$2"; shift 2;;
@@ -66,6 +69,11 @@ done
 # Default config
 if [[ -z "$CONFIG" ]]; then
     CONFIG="$REPO_DIR/configs/basic-pbs.yml"
+fi
+
+# Default --json implies auto-save to repo root
+if [[ -n "$JSON_FLAG" && -z "$JSON_DIR_FLAG" ]]; then
+    JSON_DIR_FLAG="--output-dir $REPO_DIR"
 fi
 
 # Resolve config path relative to CWD
@@ -112,10 +120,12 @@ echo ""
 # Step 3: Run verification
 cargo run --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
     --enclave "$ENCLAVE" \
+    --cb-config "$CONFIG" \
     --timeout "$TIMEOUT" \
     --min-epochs "$MIN_EPOCHS" \
     --target-epoch "$TARGET_EPOCH" \
     $JSON_FLAG \
+    $JSON_DIR_FLAG \
     $STRICT_FLAG \
     $LIVE_METRICS_FLAG \
     $VERBOSE

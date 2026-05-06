@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Kurtosis YAML configs for Commit-Boost testing scenarios."""
+"""Generate Kurtosis YAML configs for Commit-Boost testing scenarios.
+
+Reads optional .env file from the project root for Docker image overrides.
+See .env.example for all available variables and defaults.
+"""
 
 import argparse
 import json
@@ -8,7 +12,44 @@ import sys
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYS_CONFIGS_DIR = os.path.join(SCRIPT_DIR, "../keys")
+PROJECT_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, ".."))
+KEYS_CONFIGS_DIR = os.path.join(PROJECT_DIR, "keys")
+
+# ---------------------------------------------------------------------------
+# Load .env overrides from cb-testing/.env
+# ---------------------------------------------------------------------------
+
+def load_env():
+    """Load key=value pairs from .env file in the project root.
+
+    Simple parser: no variable expansion, no quoting tricks. Just
+    strips comments and blank lines. Missing file = not an error.
+    Returns a dict of (key, value) pairs.
+    """
+    env_path = os.path.join(PROJECT_DIR, ".env")
+    result = {}
+    if not os.path.isfile(env_path):
+        return result
+    with open(env_path) as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+ENV = load_env()
+
+# Image defaults (overridable via .env)
+HELIX_RELAY_IMAGE = ENV.get("HELIX_RELAY_IMAGE", "helix-relay:kurtosis")
+MEV_RELAY_IMAGE = ENV.get("MEV_RELAY_IMAGE", "ethpandaops/mev-boost-relay:main")
+MEV_BOOST_IMAGE = ENV.get("MEV_BOOST_IMAGE", "commit-boost/pbs:kurtosis")
+BUILDER_CL_IMAGE = ENV.get("BUILDER_CL_IMAGE", "sigp/lighthouse:latest")
+BUILDER_EL_IMAGE = ENV.get("BUILDER_EL_IMAGE", "ethpandaops/reth-rbuilder:develop")
 
 # ---------------------------------------------------------------------------
 # Shared YAML fragments
@@ -223,10 +264,8 @@ def generate_basic():
         "# relay as the only relay endpoint."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
     mev_params = build_mev_params("helix", images, toml)
@@ -250,11 +289,9 @@ def generate_multiple_relays():
         "# aggregating responses and selecting the best bid."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_relay_image": "ethpandaops/mev-boost-relay:main",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_relay_image": MEV_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
     mev_params = build_mev_params(["helix", "flashbots"], images, toml)
@@ -277,10 +314,8 @@ def generate_skip_sigverify():
         "# reachable under load."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000, extra_pbs_lines=["skip_sigverify = true"])
     mev_params = build_mev_params("helix", images, toml)
@@ -303,11 +338,9 @@ def generate_timing_games():
         "# in the slot. Per-relay timing overrides are enabled for all relays."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_relay_image": "ethpandaops/mev-boost-relay:main",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_relay_image": MEV_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_basic(
         400,
@@ -338,10 +371,8 @@ def generate_extra_validation():
         "# parameters before returning a header to the beacon node."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_basic(
         950,
@@ -372,11 +403,9 @@ def generate_mux(pubkeys_node0, pubkeys_node1):
         "# per-mux timeout and relay configurations."
     )
     images = {
-        "helix_relay_image": "helix-relay:kurtosis",
-        "mev_relay_image": "ethpandaops/mev-boost-relay:main",
-        "mev_boost_image": "commit-boost/pbs:kurtosis",
-        "mev_builder_cl_image": "sigp/lighthouse:latest",
-        "mev_builder_image": "ethpandaops/reth-rbuilder:develop",
+        "helix_relay_image": HELIX_RELAY_IMAGE,
+        "mev_relay_image": MEV_RELAY_IMAGE,
+        "mev_boost_image": MEV_BOOST_IMAGE,
     }
     toml = build_cb_toml_mux(pubkeys_node0, pubkeys_node1)
     mev_params = build_mev_params(["helix", "flashbots"], images, toml)

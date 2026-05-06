@@ -24,6 +24,28 @@ Validator -> CB (submit_block) -> Relay -> Payload on chain
 If you're testing a local CB build, you also need:
 - The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned
 
+## Docker image configuration
+
+The generated configs embed Docker images for the relay, PBS sidecar, builder CL,
+and builder EL. These are hardcoded by default but can be overridden via `.env`:
+
+```bash
+# From the cb-testing/ directory:
+cp .env.example .env
+# Edit .env to point at your local images
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HELIX_RELAY_IMAGE` | `helix-relay:kurtosis` | Custom Helix relay |
+| `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | mev-boost relay (multi-relay scenarios) |
+| `MEV_BOOST_IMAGE` | `commit-boost/pbs:kurtosis` | Commit-Boost PBS sidecar |
+| `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
+| `BUILDER_EL_IMAGE` | `ethpandaops/reth-rbuilder:develop` | Builder execution client |
+
+The `.env` file is read automatically by `generate_kurtosis_configs.py`.
+It is gitignored — do not commit it. Use `.env.example` as the reference.
+
 ## Quick start
 
 ```bash
@@ -41,10 +63,10 @@ If you're testing a local CB build, you also need:
 ### Testing a local CB build
 
 ```bash
-# In the commit-boost-client repo, build the PBS Docker image:
+# 1. Configure images in .env (if using custom builds)
+# 2. In the commit-boost-client repo, build the PBS Docker image:
 just build-pbs kurtosis
-
-# Then run the verifier (it uses the commit-boost/pbs:kurtosis image):
+# 3. Run the verifier:
 ./scripts/run-and-verify.sh --config configs/basic-pbs.yml
 ```
 

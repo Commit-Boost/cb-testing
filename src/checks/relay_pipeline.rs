@@ -320,16 +320,90 @@ pub async fn run_relay_checks(
         .map(|r| RelayClient::new(r.base_url()))
         .collect();
 
-    if let Some(first_relay) = live.first() {
-        results.push(check_builder_blocks_received(first_relay, start_slot, end_slot).await);
+    // Check builder blocks received across ALL live relays.
+    // Aggregated: PASS if any relay received blocks, FAIL only if ALL relays got nothing.
+    {
+        let mut bb_results: Vec<CheckResult> = Vec::new();
+        for relay in &live {
+            bb_results.push(check_builder_blocks_received(relay, start_slot, end_slot).await);
+        }
+        let any_pass = bb_results.iter().any(|r| r.status == CheckStatus::Pass);
+        if any_pass {
+            let total: usize = bb_results
+                .iter()
+                .map(|r| r.data.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize)
+                .sum();
+            let details: Vec<&str> = bb_results.iter().map(|r| r.detail.as_str()).collect();
+            results.push(
+                CheckResult::pass(
+                    "relay.builder_blocks_received",
+                    2,
+                    format!("{}", details.join("; ")),
+                )
+                .with_data(serde_json::json!({"count": total})),
+            );
+        } else {
+            let worst = bb_results.into_iter().max_by_key(|r| match r.status {
+                CheckStatus::Fail => 2,
+                CheckStatus::Warn => 1,
+                _ => 0,
+            }).unwrap();
+            results.push(worst);
+        }
     }
 
     results.push(check_payloads_delivered_multi(&live, start_slot, end_slot).await);
 
-    if let Some(first_relay) = live.first() {
-        results.push(
-            check_mev_delivery_rate(first_relay, beacon, start_slot, end_slot, mev_threshold).await,
-        );
+    // Check MEV delivery rate across ALL live relays.
+    // Aggregated: best-of status; reports combined delivery stats.
+    {
+        let mut mv_results: Vec<CheckResult> = Vec::new();
+        for relay in &live {
+            mv_results.push(
+                check_mev_delivery_rate(relay, beacon, start_slot, end_slot, mev_threshold).await,
+            );
+        }
+        let any_pass = mv_results.iter().any(|r| r.status == CheckStatus::Pass);
+        let best_status = if any_pass {
+            CheckStatus::Pass
+        } else if mv_results.iter().any(|r| r.status == CheckStatus::Warn) {
+            CheckStatus::Warn
+        } else {
+            CheckStatus::Fail
+        };
+        let total_mev: u64 = mv_results
+            .iter()
+            .map(|r| r.data.get("mev_blocks").and_then(|c| c.as_u64()).unwrap_or(0))
+            .sum();
+        let total_blocks: u64 = mv_results
+            .iter()
+            .map(|r| r.data.get("total_blocks").and_then(|c| c.as_u64()).unwrap_or(0))
+            .sum();
+        let details: Vec<&str> = mv_results.iter().map(|r| r.detail.as_str()).collect();
+        let data = serde_json::json!({
+            "mev_blocks": total_mev,
+            "total_blocks": total_blocks,
+            "rate": if total_blocks > 0 {
+                (total_mev as f64 / total_blocks as f64 * 10000.0).round() / 10000.0
+            } else { 0.0 },
+        });
+        results.push(match best_status {
+            CheckStatus::Pass => CheckResult::pass(
+                "relay.mev_delivery_rate",
+                2,
+                format!("MEV delivery rate across all relays: {}", details.join("; ")),
+            ),
+            CheckStatus::Warn => CheckResult::warn(
+                "relay.mev_delivery_rate",
+                2,
+                format!("MEV delivery rate below threshold: {}", details.join("; ")),
+            ),
+            _ => CheckResult::fail(
+                "relay.mev_delivery_rate",
+                2,
+                format!("No MEV deliveries across any relay: {}", details.join("; ")),
+            ),
+        }.with_data(data));
     }
 
     // Tier 3: per-relay validator registration, aggregated to the worst status.

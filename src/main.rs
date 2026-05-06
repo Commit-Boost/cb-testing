@@ -79,6 +79,29 @@ struct Cli {
     /// directly accessible.
     #[arg(long)]
     live_metrics: bool,
+
+    /// Path to the Commit-Boost config file (TOML or Kurtosis YAML).
+    ///
+    /// When set, parses the config for [[mux]] sections and automatically
+    /// verifies that all delivered payloads conform to the mux routing
+    /// rules: validator pubkeys are delivered exclusively to their assigned
+    /// relay. Fails if any pubkey appears on the wrong relay.
+    ///
+    /// If no [[mux]] sections are found in the config, the check is skipped.
+    /// Supports .toml (raw CB config) and .yml/.yaml (Kurtosis config with
+    /// embedded mev_params.commit_boost_config).
+    #[arg(long)]
+    cb_config: Option<String>,
+
+    /// Directory to save JSON report files. Requires --json.
+    ///
+    /// When set, writes `{enclave}.json` into this directory after the report
+    /// is printed to stdout. Useful for batch runs (e.g., `just test-all`)
+    /// where each config variant produces its own JSON file.
+    ///
+    /// The directory must exist before the run starts.
+    #[arg(long)]
+    output_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -104,6 +127,13 @@ async fn main() -> Result<()> {
 async fn run_verification(cli: &Cli) -> i32 {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
+    // Helper: save JSON report to file if --output-dir was set.
+    let save_report = |report: &VerificationReport| {
+        if let Some(ref dir) = cli.output_dir {
+            report::save_json_report(report, dir);
+        }
+    };
+
     // Step 1: Discover services
     info!("Discovering services in enclave '{}'...", cli.enclave);
     let services = match discovery::discover(&cli.enclave) {
@@ -112,6 +142,7 @@ async fn run_verification(cli: &Cli) -> i32 {
             error!("Service discovery failed: {e}");
             let report = make_error_report(&cli.enclave, &now, &format!("Discovery failed: {e}"));
             report::print_report(&report, cli.json);
+            save_report(&report);
             return 2;
         }
     };
@@ -120,6 +151,7 @@ async fn run_verification(cli: &Cli) -> i32 {
         error!("No beacon nodes found in enclave");
         let report = make_error_report(&cli.enclave, &now, "No beacon nodes found");
         report::print_report(&report, cli.json);
+        save_report(&report);
         return 2;
     }
 
@@ -143,6 +175,7 @@ async fn run_verification(cli: &Cli) -> i32 {
             &format!("Devnet did not stabilize within {}s", cli.timeout),
         );
         report::print_report(&report, cli.json);
+        save_report(&report);
         return 2;
     }
 
@@ -238,6 +271,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                     ),
                 );
                 report::print_report(&report, cli.json);
+                save_report(&report);
                 return 2;
             }
         } else {
@@ -260,6 +294,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                 ),
             );
             report::print_report(&report, cli.json);
+            save_report(&report);
             return 2;
         }
     }
@@ -300,12 +335,14 @@ async fn run_verification(cli: &Cli) -> i32 {
                 ),
             );
             report::print_report(&report, cli.json);
+            save_report(&report);
             return 2;
         }
         ObserveOutcome::Timeout => {
             let report =
                 make_error_report(&cli.enclave, &now, "Failed to complete observation window");
             report::print_report(&report, cli.json);
+            save_report(&report);
             return 2;
         }
     };
@@ -378,6 +415,40 @@ async fn run_verification(cli: &Cli) -> i32 {
         .await,
     );
 
+    // MUX routing check (optional — requires --cb-config)
+    if let Some(ref cb_path) = cli.cb_config {
+        info!("Checking for [[mux]] sections in CB config: {cb_path}...");
+        match checks::mux_routing::extract_mux_from_config(cb_path) {
+            Ok(Some(mux_entries)) => {
+                info!(
+                    "Found {} [[mux]] section(s) — running MUX routing verification",
+                    mux_entries.len()
+                );
+                all_checks.push(
+                    checks::mux_routing::check_mux_routing(
+                        &relays,
+                        &mux_entries,
+                        window.start_slot,
+                        window.end_slot,
+                    )
+                    .await,
+                );
+            }
+            Ok(None) => {
+                info!("No [[mux]] sections found in CB config — skipping MUX check");
+            }
+            Err(e) => {
+                all_checks.push(CheckResult::fail(
+                    "mux.routing",
+                    1,
+                    format!("Failed to parse CB config '{cb_path}': {e}"),
+                ));
+            }
+        }
+    } else {
+        info!("No --cb-config provided — skipping MUX routing check");
+    }
+
     // Step 5: Report
     let tier1_failed = all_checks
         .iter()
@@ -396,6 +467,7 @@ async fn run_verification(cli: &Cli) -> i32 {
     };
 
     report::print_report(&report, cli.json);
+    save_report(&report);
     report::exit_code(&report)
 }
 
