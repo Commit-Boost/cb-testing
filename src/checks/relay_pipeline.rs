@@ -103,23 +103,42 @@ pub async fn check_payloads_delivered_multi(
 
 /// Check MEV delivery rate: relay payloads vs on-chain blocks.
 pub async fn check_mev_delivery_rate(
-    relay: &RelayClient,
+    relays: &[RelayClient],
     beacon: &BeaconClient,
     start_slot: u64,
     end_slot: u64,
     threshold: f64,
 ) -> CheckResult {
-    // Get delivered payload block hashes
-    let delivered = match relay.get_payloads_delivered(start_slot, end_slot).await {
-        Ok(p) => p,
-        Err(e) => {
-            return CheckResult::fail(
-                "relay.mev_delivery_rate",
-                2,
-                format!("Error querying delivered payloads: {e}"),
-            );
+    // Get delivered payload block hashes — try each relay until one succeeds.
+    // Some relays (e.g., mev-boost-relay) don't expose the data API.
+    let mut delivered = Vec::new();
+    let mut last_error = None;
+    for relay in relays {
+        match relay.get_payloads_delivered(start_slot, end_slot).await {
+            Ok(p) => {
+                delivered = p;
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Relay {} doesn't support data API ({}), trying next...",
+                    relay.base_url(),
+                    e
+                );
+                last_error = Some(e);
+            }
         }
-    };
+    }
+    if delivered.is_empty() && last_error.is_some() {
+        return CheckResult::skip(
+            "relay.mev_delivery_rate",
+            2,
+            format!(
+                "No relay supports the data API. Last error: {}",
+                last_error.unwrap()
+            ),
+        );
+    }
 
     let delivered_hashes: std::collections::HashSet<_> =
         delivered.iter().map(|p| p.block_hash).collect();
@@ -358,11 +377,10 @@ pub async fn run_relay_checks(
     // Aggregated: best-of status; reports combined delivery stats.
     {
         let mut mv_results: Vec<CheckResult> = Vec::new();
-        for relay in &live {
-            mv_results.push(
-                check_mev_delivery_rate(relay, beacon, start_slot, end_slot, mev_threshold).await,
-            );
-        }
+        // Try all relays for delivery data — some may not support the data API
+        mv_results.push(
+            check_mev_delivery_rate(&live, beacon, start_slot, end_slot, mev_threshold).await,
+        );
         let any_pass = mv_results.iter().any(|r| r.status == CheckStatus::Pass);
         let best_status = if any_pass {
             CheckStatus::Pass

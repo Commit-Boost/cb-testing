@@ -56,32 +56,63 @@ impl RelayClient {
     ///
     /// Returns payloads delivered in the given slot range.
     ///
-    /// The relay API's `cursor` param is an opaque pagination token / DB ID, not a slot
-    /// filter — passing a slot number produces unreliable results. Instead we request a
-    /// generous count (no cursor) and let the client-side filter narrow to the window.
+    /// The relay enforces a maximum limit of 200. We paginate using `cursor`
+    /// (which is an opaque DB ID from the last item's `block_number` field) until
+    /// we've fetched all payloads in the slot range or the relay returns no more results.
     pub async fn get_payloads_delivered(
         &self,
         start_slot: u64,
         end_slot: u64,
     ) -> Result<Vec<ProposerPayloadDelivered>> {
-        let resp: Vec<ProposerPayloadDelivered> = self
-            .client
-            .get(format!(
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        let max_pages = 50; // safety: 50 × 200 = 10,000 payloads max
+
+        for _ in 0..max_pages {
+            let url = format!(
                 "{}/relay/v1/data/bidtraces/proposer_payload_delivered",
                 self.base_url
-            ))
-            .query(&[("limit", "10000")])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            );
+            let mut req = self.client.get(&url).query(&[("limit", "200")]);
+            if let Some(ref c) = cursor {
+                req = req.query(&[("cursor", c)]);
+            }
+            let resp: Vec<ProposerPayloadDelivered> = req
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
 
-        // Filter strictly to our slot range
-        Ok(resp
-            .into_iter()
-            .filter(|p| p.slot >= start_slot && p.slot <= end_slot)
-            .collect())
+            if resp.is_empty() {
+                break;
+            }
+
+            // Check if we've gone past our slot range
+            let min_slot = resp.iter().map(|p| p.slot).min().unwrap_or(0);
+            let _max_slot = resp.iter().map(|p| p.slot).max().unwrap_or(0);
+
+            // Filter to our slot range
+            for p in &resp {
+                if p.slot >= start_slot && p.slot <= end_slot {
+                    all.push(p.clone());
+                }
+            }
+
+            // If the oldest result is before our range, we can stop
+            if min_slot < start_slot {
+                break;
+            }
+
+            // Use the last item's block_number as cursor for pagination
+            if let Some(last) = resp.last() {
+                cursor = Some(last.block_number.to_string());
+            } else {
+                break;
+            }
+        }
+
+        Ok(all)
     }
 
     /// GET /relay/v1/data/bidtraces/builder_blocks_received?slot={slot}
