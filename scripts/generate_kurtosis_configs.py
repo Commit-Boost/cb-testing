@@ -266,6 +266,8 @@ def generate_basic():
     images = {
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
     mev_params = build_mev_params("helix", images, toml)
@@ -292,6 +294,8 @@ def generate_multiple_relays():
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_relay_image": MEV_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
     mev_params = build_mev_params(["helix", "flashbots"], images, toml)
@@ -302,6 +306,7 @@ def generate_multiple_relays():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
+        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -316,6 +321,8 @@ def generate_skip_sigverify():
     images = {
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000, extra_pbs_lines=["skip_sigverify = true"])
     mev_params = build_mev_params("helix", images, toml)
@@ -326,6 +333,7 @@ def generate_skip_sigverify():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
+        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -341,6 +349,8 @@ def generate_timing_games():
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_relay_image": MEV_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(
         400,
@@ -359,6 +369,7 @@ def generate_timing_games():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
+        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -373,6 +384,8 @@ def generate_extra_validation():
     images = {
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(
         950,
@@ -390,6 +403,7 @@ def generate_extra_validation():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
+        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -406,6 +420,8 @@ def generate_mux(pubkeys_node0, pubkeys_node1):
         "helix_relay_image": HELIX_RELAY_IMAGE,
         "mev_relay_image": MEV_RELAY_IMAGE,
         "mev_boost_image": MEV_BOOST_IMAGE,
+        "mev_builder_image": BUILDER_EL_IMAGE,
+        "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_mux(pubkeys_node0, pubkeys_node1)
     mev_params = build_mev_params(["helix", "flashbots"], images, toml)
@@ -416,6 +432,7 @@ def generate_mux(pubkeys_node0, pubkeys_node1):
         "mev_type: custom",
         mev_params,
         MUX_NETWORK_PARAMS,
+        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 

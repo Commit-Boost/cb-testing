@@ -118,9 +118,9 @@ echo "Enclave '$ENCLAVE' is up. Starting verification..."
 echo ""
 
 # Step 3: Run verification
-cargo run --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
+cargo run --bin cb-verify --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
     --enclave "$ENCLAVE" \
-    --cb-config "$CONFIG" \
+    --config "$CONFIG" \
     --timeout "$TIMEOUT" \
     --min-epochs "$MIN_EPOCHS" \
     --target-epoch "$TARGET_EPOCH" \

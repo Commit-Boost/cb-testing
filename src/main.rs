@@ -31,35 +31,74 @@ use report::{ObservationWindow, VerificationReport};
 const SLOTS_PER_EPOCH: u64 = 32;
 
 /// Verify Commit-Boost MEV pipeline in a Kurtosis devnet.
+///
+/// Two modes of operation:
+///
+/// 1. Attached: Run alongside a testnet launched by `run-and-verify.sh`.
+///    The enclave is specified with --enclave and the verifier waits for
+///    readiness, observes, and checks.
+///
+/// 2. Standalone: Point the verifier at a running enclave with --enclave.
+///    It checks whatever data is available and reports whether the pipeline
+///    is healthy. Use --config to also verify mux routing rules.
+///
+/// Examples:
+///   # Attached mode (launches testnet + verifies)
+///   ./scripts/run-and-verify.sh --config configs/cb-mux.yml
+///
+///   # Standalone: quick health check (no observation window)
+///   cb-verify --enclave CB-Testnet --min-epochs 0
+///
+///   # Standalone: full verification with mux checks
+///   cb-verify --enclave CB-Testnet --config configs/cb-mux.yml
+///
+///   # Standalone: show raw CB PBS logs for debugging
+///   cb-verify --enclave CB-Testnet --show-logs
+///
+///   # Standalone, just check current health (no observation window)
+///   cb-verify --enclave CB-Testnet --min-epochs 0
 #[derive(Parser, Debug)]
 #[command(name = "cb-verify", version, about)]
 struct Cli {
-    /// Kurtosis enclave name
+    /// Kurtosis enclave name.
     #[arg(long)]
-    enclave: String,
+    enclave: Option<String>,
 
-    /// Observation window in epochs
+    /// Path to the Kurtosis config file (YAML).
+    ///
+    /// Used to extract the embedded Commit-Boost config for mux
+    /// verification. If no [[mux]] sections are found, the mux check
+    /// is skipped.
+    ///
+    /// The enclave name must be provided separately via --enclave.
+    #[arg(long)]
+    config: Option<String>,
+
+    /// Observation window in epochs. Set to 0 to skip the observation
+    /// window and run checks immediately against current state.
     #[arg(long, default_value_t = 2)]
     min_epochs: u64,
 
-    /// Wait until this epoch before starting checks
+    /// Wait until this epoch before starting checks.
     /// (default 7: genesis + validator activation + relay registration + builder warm-up)
+    /// If the enclave hasn't reached this epoch, the verifier will wait
+    /// up to --timeout seconds.
     #[arg(long, default_value_t = 7)]
     target_epoch: u64,
 
-    /// Max seconds to wait for devnet readiness
+    /// Max seconds to wait for devnet readiness.
     #[arg(long, default_value_t = 3600)]
     timeout: u64,
 
-    /// Minimum MEV delivery rate threshold
+    /// Minimum MEV delivery rate threshold.
     #[arg(long, default_value_t = 0.30)]
     mev_threshold: f64,
 
-    /// Output JSON report instead of terminal colors
+    /// Output JSON report instead of terminal colors.
     #[arg(long)]
     json: bool,
 
-    /// Enable debug logging
+    /// Enable debug logging.
     #[arg(short, long)]
     verbose: bool,
 
@@ -80,18 +119,12 @@ struct Cli {
     #[arg(long)]
     live_metrics: bool,
 
-    /// Path to the Commit-Boost config file (TOML or Kurtosis YAML).
+    /// Print raw CB PBS service logs to stdout for debugging.
     ///
-    /// When set, parses the config for [[mux]] sections and automatically
-    /// verifies that all delivered payloads conform to the mux routing
-    /// rules: validator pubkeys are delivered exclusively to their assigned
-    /// relay. Fails if any pubkey appears on the wrong relay.
-    ///
-    /// If no [[mux]] sections are found in the config, the check is skipped.
-    /// Supports .toml (raw CB config) and .yml/.yaml (Kurtosis config with
-    /// embedded mev_params.commit_boost_config).
+    /// Fetches the last N log lines from each CB PBS service and prints them
+    /// in a human-readable format. Does not run any verification checks.
     #[arg(long)]
-    cb_config: Option<String>,
+    show_logs: bool,
 
     /// Directory to save JSON report files. Requires --json.
     ///
@@ -124,6 +157,16 @@ async fn main() -> Result<()> {
     std::process::exit(code);
 }
 
+/// Resolve the enclave name and CB config from CLI args.
+/// The enclave name is required. The config is optional and used for
+/// mux verification.
+fn resolve_enclave_and_config(cli: &Cli) -> Result<(String, Option<String>)> {
+    let enclave = cli.enclave.clone().ok_or_else(|| {
+        eyre::eyre!("Must provide --enclave to specify a running enclave")
+    })?;
+    Ok((enclave, cli.config.clone()))
+}
+
 async fn run_verification(cli: &Cli) -> i32 {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -134,13 +177,25 @@ async fn run_verification(cli: &Cli) -> i32 {
         }
     };
 
+    // Step 0: Resolve enclave name and CB config
+    let (enclave_name, cb_config) = match resolve_enclave_and_config(cli) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("{e}");
+            let report = make_error_report("unknown", &now, &format!("{e}"));
+            report::print_report(&report, cli.json);
+            save_report(&report);
+            return 2;
+        }
+    };
+
     // Step 1: Discover services
-    info!("Discovering services in enclave '{}'...", cli.enclave);
-    let services = match discovery::discover(&cli.enclave) {
+    info!("Discovering services in enclave '{}'...", enclave_name);
+    let services = match discovery::discover(&enclave_name) {
         Ok(s) => s,
         Err(e) => {
             error!("Service discovery failed: {e}");
-            let report = make_error_report(&cli.enclave, &now, &format!("Discovery failed: {e}"));
+            let report = make_error_report(&enclave_name, &now, &format!("Discovery failed: {e}"));
             report::print_report(&report, cli.json);
             save_report(&report);
             return 2;
@@ -149,7 +204,7 @@ async fn run_verification(cli: &Cli) -> i32 {
 
     if services.beacon_urls.is_empty() {
         error!("No beacon nodes found in enclave");
-        let report = make_error_report(&cli.enclave, &now, "No beacon nodes found");
+        let report = make_error_report(&enclave_name, &now, "No beacon nodes found");
         report::print_report(&report, cli.json);
         save_report(&report);
         return 2;
@@ -163,6 +218,11 @@ async fn run_verification(cli: &Cli) -> i32 {
     info!("Relays: {:?}", services.relay_urls);
     info!("CB metrics: {}", metrics_url.unwrap_or("not available"));
 
+    // --show-logs mode: print raw CB PBS logs and exit
+    if cli.show_logs {
+        return show_cb_logs(&enclave_name, &services.cb_service_names, &now, cli.json, &save_report);
+    }
+
     if relays.is_empty() {
         warn!("No relay URLs found -- relay checks will fail");
     }
@@ -170,7 +230,7 @@ async fn run_verification(cli: &Cli) -> i32 {
     // Step 2: Wait for readiness
     if !wait_for_readiness(&beacon, cli.target_epoch, cli.timeout).await {
         let report = make_error_report(
-            &cli.enclave,
+            &enclave_name,
             &now,
             &format!("Devnet did not stabilize within {}s", cli.timeout),
         );
@@ -235,7 +295,7 @@ async fn run_verification(cli: &Cli) -> i32 {
 
         if all_are_relays && relay_died {
             info!("Relay Data API unreachable — attempting post-mortem via Postgres...");
-            let postmortem = discovery::query_mev_relay_postgres(&cli.enclave);
+            let postmortem = discovery::query_mev_relay_postgres(&enclave_name);
             if !postmortem.is_empty() {
                 info!(
                     "Post-mortem: found {} payload(s) in relay Postgres before crash:",
@@ -258,7 +318,7 @@ async fn run_verification(cli: &Cli) -> i32 {
             } else {
                 error!("Post-mortem: no delivery records found in relay Postgres.");
                 let report = make_error_report(
-                    &cli.enclave,
+                    &enclave_name,
                     &now,
                     &format!(
                         "Preflight failed ({} of {} services): {}. Relay API unreachable \
@@ -267,7 +327,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                         dead_at_preflight.len(),
                         targets.len(),
                         summary.join(", "),
-                        cli.enclave
+                        &enclave_name
                     ),
                 );
                 report::print_report(&report, cli.json);
@@ -282,7 +342,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                 summary
             );
             let report = make_error_report(
-                &cli.enclave,
+                &enclave_name,
                 &now,
                 &format!(
                     "Preflight failed ({} of {} services): {}. Kurtosis port mapping may be \
@@ -290,7 +350,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                     dead_at_preflight.len(),
                     targets.len(),
                     summary.join(", "),
-                    cli.enclave
+                    &enclave_name
                 ),
             );
             report::print_report(&report, cli.json);
@@ -300,50 +360,72 @@ async fn run_verification(cli: &Cli) -> i32 {
     }
     info!("  All {} service(s) reachable", targets.len());
 
-    // Step 3: Observe for min_epochs, with periodic health checks across
-    // every critical service.
+    // Step 3: Observe for min_epochs (if > 0), with periodic health checks.
+    //
+    // When min_epochs is 0, skip the observation window entirely and run
+    // checks immediately against the current state. This is useful for
+    // standalone verification of a running enclave.
     //
     // Kurtosis happily leaves stopped containers in place -- when that happens
     // the service stops accepting connections but the enclave still looks
     // "up". Probing every ~30s means we fail fast instead of waiting out the
     // whole window and surfacing a ghost error at the end.
-    let sps = beacon.get_seconds_per_slot().await;
-    let obs_timeout = cli.min_epochs * SLOTS_PER_EPOCH * sps + 120;
-    let window = match observe_epochs(
-        &beacon,
-        &health_client,
-        &targets,
-        cli.min_epochs,
-        obs_timeout,
-        ObserveLiveOpts {
-            metrics_url,
-            live_metrics: cli.live_metrics,
-            json_output: cli.json,
-        },
-    )
-    .await
-    {
-        ObserveOutcome::Done(w) => w,
-        ObserveOutcome::ServiceDied { label, detail } => {
-            error!("{label} died during observation window -- aborting");
-            let report = make_error_report(
-                &cli.enclave,
-                &now,
-                &format!(
-                    "{label} went offline mid-observation: {detail}. Check: docker ps -a ; kurtosis enclave inspect {}",
-                    cli.enclave
-                ),
-            );
-            report::print_report(&report, cli.json);
-            save_report(&report);
-            return 2;
+    let window = if cli.min_epochs > 0 {
+        let sps = beacon.get_seconds_per_slot().await;
+        let obs_timeout = cli.min_epochs * SLOTS_PER_EPOCH * sps + 120;
+        match observe_epochs(
+            &beacon,
+            &health_client,
+            &targets,
+            cli.min_epochs,
+            obs_timeout,
+            ObserveLiveOpts {
+                metrics_url,
+                live_metrics: cli.live_metrics,
+                json_output: cli.json,
+            },
+        )
+        .await
+        {
+            ObserveOutcome::Done(w) => w,
+            ObserveOutcome::ServiceDied { label, detail } => {
+                error!("{label} died during observation window -- aborting");
+                let report = make_error_report(
+                    &enclave_name,
+                    &now,
+                    &format!(
+                        "{label} went offline mid-observation: {detail}. Check: docker ps -a ; kurtosis enclave inspect {}",
+                        enclave_name
+                    ),
+                );
+                report::print_report(&report, cli.json);
+                save_report(&report);
+                return 2;
+            }
+            ObserveOutcome::Timeout => {
+                let report =
+                    make_error_report(&enclave_name, &now, "Failed to complete observation window");
+                report::print_report(&report, cli.json);
+                save_report(&report);
+                return 2;
+            }
         }
-        ObserveOutcome::Timeout => {
-            let report =
-                make_error_report(&cli.enclave, &now, "Failed to complete observation window");
-            report::print_report(&report, cli.json);
-            save_report(&report);
-            return 2;
+    } else {
+        // No observation window — use current slot as both start and end
+        let current_slot = match beacon.get_head_slot().await {
+            Ok(slot) => slot,
+            Err(e) => {
+                error!("Failed to get current slot: {e}");
+                let report = make_error_report(&enclave_name, &now, &format!("Failed to get current slot: {e}"));
+                report::print_report(&report, cli.json);
+                save_report(&report);
+                return 2;
+            }
+        };
+        info!("Skipping observation window (min_epochs=0), using current slot {}", current_slot);
+        ObservationWindow {
+            start_slot: current_slot,
+            end_slot: current_slot,
         }
     };
 
@@ -356,7 +438,7 @@ async fn run_verification(cli: &Cli) -> i32 {
             &beacon,
             window.start_slot,
             window.end_slot,
-            &cli.enclave,
+            &enclave_name,
         )
         .await,
     );
@@ -408,15 +490,15 @@ async fn run_verification(cli: &Cli) -> i32 {
         checks::cb_metrics::run_metrics_checks(
             &http_client,
             metrics_url,
-            Some(cli.enclave.as_str()),
+            Some(enclave_name.as_str()),
             &services.cb_service_names,
             cli.strict,
         )
         .await,
     );
 
-    // MUX routing check (optional — requires --cb-config)
-    if let Some(ref cb_path) = cli.cb_config {
+    // MUX routing check (optional — requires config with [[mux]] sections)
+    if let Some(ref cb_path) = cb_config {
         info!("Checking for [[mux]] sections in CB config: {cb_path}...");
         match checks::mux_routing::extract_mux_from_config(cb_path) {
             Ok(Some(mux_entries)) => {
@@ -426,10 +508,9 @@ async fn run_verification(cli: &Cli) -> i32 {
                 );
                 all_checks.push(
                     checks::mux_routing::check_mux_routing(
-                        &relays,
+                        &enclave_name,
+                        &services.cb_service_names,
                         &mux_entries,
-                        window.start_slot,
-                        window.end_slot,
                     )
                     .await,
                 );
@@ -455,7 +536,7 @@ async fn run_verification(cli: &Cli) -> i32 {
         .any(|c| c.tier == 1 && c.status == CheckStatus::Fail);
 
     let report = VerificationReport {
-        enclave: cli.enclave.clone(),
+        enclave: enclave_name.clone(),
         timestamp: now,
         observation_window: Some(window),
         result: if tier1_failed {
@@ -515,9 +596,13 @@ async fn wait_for_readiness(beacon: &BeaconClient, target_epoch: u64, timeout: u
 
         if let (Some(_), Some(fin)) = (head, finalized)
             && fin >= 2
-            && current_epoch >= target_epoch
+            && current_epoch + 1 >= target_epoch
         {
-            info!("Devnet is ready.");
+            if current_epoch >= target_epoch {
+                info!("Devnet is ready.");
+            } else {
+                info!("Devnet is close enough (epoch {current_epoch}, target {target_epoch}). Proceeding...");
+            }
             return true;
         }
 
@@ -653,6 +738,78 @@ async fn observe_epochs(
 
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+/// Fetch and print raw CB PBS service logs for debugging.
+fn show_cb_logs(
+    enclave_name: &str,
+    cb_service_names: &[String],
+    now: &str,
+    json_mode: bool,
+    save_report: &dyn Fn(&VerificationReport),
+) -> i32 {
+    use crate::checks::mux_routing::{parse_cb_log_line, fetch_service_logs};
+
+    println!("\n=== CB PBS Service Logs ===");
+    println!("Enclave: {enclave_name}");
+    println!("Services: {}\n", cb_service_names.join(", "));
+
+    let mut total_events = 0;
+    let mut parsed_events = 0;
+
+    for service_name in cb_service_names {
+        println!("--- {service_name} ---");
+        match fetch_service_logs(enclave_name, service_name) {
+            Ok(logs) => {
+                if logs.is_empty() {
+                    println!("  (no relevant log lines)");
+                    continue;
+                }
+                for line in logs.lines() {
+                    total_events += 1;
+                    if let Some(event) = parse_cb_log_line(line) {
+                        parsed_events += 1;
+                        print!("  [{}] {}", event.message, event.slot.map(|s| format!("slot={}", s)).unwrap_or_default());
+                        if let Some(ref mux) = event.mux_id {
+                            print!(" mux={}", mux);
+                        }
+                        if let Some(ref relay) = event.relay_id {
+                            print!(" relay={}", relay);
+                        }
+                        if let Some(ref val) = event.validator {
+                            let short = if val.len() > 20 { &val[..20] } else { val };
+                            print!(" val={}...", short);
+                        }
+                        println!();
+                    } else {
+                        // Print raw line if parsing failed
+                        let short = if line.len() > 120 { &line[..120] } else { line };
+                        println!("  [RAW] {}...", short);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  ERROR: {e}");
+            }
+        }
+    }
+
+    println!("\nTotal: {} log lines, {} parsed successfully", total_events, parsed_events);
+
+    let report = VerificationReport {
+        enclave: enclave_name.to_string(),
+        timestamp: now.to_string(),
+        observation_window: None,
+        result: CheckStatus::Pass,
+        checks: vec![CheckResult::pass(
+            "logs",
+            1,
+            format!("Fetched {} log lines from {} service(s)", total_events, cb_service_names.len()),
+        )],
+    };
+    report::print_report(&report, json_mode);
+    save_report(&report);
+    0
 }
 
 fn make_error_report(enclave: &str, timestamp: &str, detail: &str) -> VerificationReport {

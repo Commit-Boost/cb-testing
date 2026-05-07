@@ -20,11 +20,32 @@ pub struct PostMortemRecord {
     pub value: String,
 }
 
+/// Derive a relay identity from the Kurtosis service name.
+///
+/// Returns a short string like "helix", "flashbots", or "mev-rs"
+/// that can be matched against mux entry IDs.
+pub fn relay_identity(service_name: &str) -> Option<String> {
+    let lower = service_name.to_lowercase();
+    if lower.contains("helix") {
+        Some("helix".to_string())
+    } else if lower.contains("mev-rs") {
+        Some("mev-rs".to_string())
+    } else if lower.contains("relay") {
+        // Generic mev-boost relay (used by flashbots)
+        Some("flashbots".to_string())
+    } else {
+        None
+    }
+}
+
 /// Discovered services from a Kurtosis enclave.
 #[derive(Debug, Default)]
 pub struct EnclaveServices {
     pub beacon_urls: Vec<String>,
     pub relay_urls: Vec<String>,
+    /// Parallel to relay_urls: identity string per relay
+    /// ("helix", "flashbots", "mev-rs", etc.)
+    pub relay_identities: Vec<String>,
     pub cb_pbs_urls: Vec<String>,
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
@@ -311,8 +332,10 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
                 .or_else(|| find_port("http"))
                 .or_else(|| find_port("endpoint"));
             if let Some(url) = url {
-                info!("Relay API: {} -> {url}", svc.name);
+                let identity = relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
+                info!("Relay API: {} -> {url} (identity={identity})", svc.name);
                 result.relay_urls.push(url);
+                result.relay_identities.push(identity);
             } else {
                 warn!("Relay '{}': no http/endpoint port", svc.name);
             }
@@ -522,6 +545,19 @@ fn is_relay_api_service(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::relay_identity;
+
+    #[test]
+    fn test_relay_identity() {
+        assert_eq!(relay_identity("helix-relay").as_deref(), Some("helix"));
+        assert_eq!(relay_identity("Helix-Relay").as_deref(), Some("helix"));
+        assert_eq!(relay_identity("mev-relay-api").as_deref(), Some("flashbots"));
+        assert_eq!(relay_identity("mev-rs-relay").as_deref(), Some("mev-rs"));
+        // Non-relay services: function should not be called for these
+        // in practice (is_relay_api_service filters them), but they
+        // won't match anything meaningful.
+        assert_eq!(relay_identity("prometheus"), None);
+    }
     use super::*;
 
     #[test]

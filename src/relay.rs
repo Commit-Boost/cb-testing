@@ -56,33 +56,28 @@ impl RelayClient {
     ///
     /// Returns payloads delivered in the given slot range.
     ///
-    /// The relay API supports a `cursor` param (not in the standard alloy query type)
-    /// which acts as the upper bound slot. We pass it as a raw query param alongside
-    /// the typed query fields.
+    /// The relay API's `cursor` param is an opaque pagination token / DB ID, not a slot
+    /// filter — passing a slot number produces unreliable results. Instead we request a
+    /// generous count (no cursor) and let the client-side filter narrow to the window.
     pub async fn get_payloads_delivered(
         &self,
         start_slot: u64,
         end_slot: u64,
     ) -> Result<Vec<ProposerPayloadDelivered>> {
-        let limit = end_slot.saturating_sub(start_slot) + 1;
-
         let resp: Vec<ProposerPayloadDelivered> = self
             .client
             .get(format!(
                 "{}/relay/v1/data/bidtraces/proposer_payload_delivered",
                 self.base_url
             ))
-            .query(&[
-                ("cursor", end_slot.to_string()),
-                ("limit", limit.to_string()),
-            ])
+            .query(&[("limit", "10000")])
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
 
-        // Filter to our slot range
+        // Filter strictly to our slot range
         Ok(resp
             .into_iter()
             .filter(|p| p.slot >= start_slot && p.slot <= end_slot)
