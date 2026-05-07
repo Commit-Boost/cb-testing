@@ -2,19 +2,6 @@
 
 Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit-boost-client) Kurtosis devnets. Spins up a local Ethereum testnet with Commit-Boost as the MEV sidecar, waits for the MEV pipeline to stabilize, verifies each stage of the pipeline, and reports pass/fail.
 
-## What is this?
-
-When Commit-Boost proxies MEV between validators and relays, several things need to work in sequence: validators register with the relay, the builder submits blocks, the relay serves headers through CB, and the delivered payloads land on chain. If any stage breaks, the rest falls apart silently.
-
-This tool verifies each stage independently and tells you exactly what broke.
-
-```
-Validator -> CB (get_header) -> Relay -> Builder
-Validator -> CB (submit_block) -> Relay -> Payload on chain
-                                            ^
-                                    we verify this whole flow
-```
-
 ## Prerequisites
 
 - [Kurtosis CLI](https://docs.kurtosis.com/install) (>= 0.90)
@@ -37,48 +24,31 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HELIX_RELAY_IMAGE` | `helix-relay:kurtosis` | Custom Helix relay |
+| `HELIX_RELAY_IMAGE` | `helix-relay:kurtosis` | Custom Helix relay image |
 | `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | mev-boost relay (multi-relay scenarios) |
-| `MEV_BOOST_IMAGE` | `commit-boost/pbs:kurtosis` | Commit-Boost PBS sidecar |
+| `MEV_BOOST_IMAGE` | `commit-boost/commit-boost:latest` | Commit-Boost latest image |
 | `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
 | `BUILDER_EL_IMAGE` | `ethpandaops/reth-rbuilder:develop` | Builder execution client |
 
 The `.env` file is read automatically by `generate_kurtosis_configs.py`.
 It is gitignored — do not commit it. Use `.env.example` as the reference.
 
+## Kurtosis setup / gotchas
+The repo contains a forked `ethereum-package` as a submodule (don't forget to call `git submodule update`). The fork generalizes a lot of the hardcoded patterns in the upstream repo, allowing us to run configurations like commit-boost + helix that weren't possible before. Once [this PR](https://github.com/ethpandaops/ethereum-package/pull/1384) is merged we can deprecate the fork but until then the commands use this as the default Kurtosis package.
+
+### Kurtosis configs
+Kurtosis uses a default Commit-Boost config that can be overridden by inlining it into the kurtosis config, see `example-kurtosis-config.yml`. This is how every test is expected to run.
+
+To simplify things, the `generate_kurtosis_configs.py` script generates different test scenarios using the values from your `.env` file. These make good references if you need to adjust your Commit-Boost settings.
+
+```bash
+# Creates pre-generated kurtosis config files from .env params
+just generate-configs
+```
+
 ## Quick start
 
-```bash
-# Run with the default config (2 Lighthouse/Geth nodes)
-# (builds automatically on first run via cargo)
-./scripts/run-and-verify.sh
-
-# Takes ~55 minutes. You'll see:
-#   [PASS] chain_finality - Finalized epoch: 7
-#   [PASS] relay.payloads_delivered_multi - Delivered 64 payload(s)
-#   [PASS] payload_hash_match - 64 matched, 0 mismatched
-#   Result: PASS  (8 passed, 0 failed, 0 warnings)
-```
-
-### Testing a local CB build
-
-```bash
-# 1. Configure images in .env (if using custom builds)
-# 2. In the commit-boost-client repo, build the PBS Docker image:
-just build-pbs kurtosis
-# 3. Run the verifier:
-./scripts/run-and-verify.sh --config configs/basic-pbs.yml
-```
-
-### Testing against a specific ethereum-package
-
-If you have a local checkout of the [ethereum-package](https://github.com/ethpandaops/ethereum-package) (e.g., with the [custom CB config PR](https://github.com/ethpandaops/ethereum-package/pull/1355)):
-
-```bash
-./scripts/run-and-verify.sh --package ../ethereum-package --keep -v
-```
-
-The `--keep` flag leaves the enclave running so you can inspect it after. The `-v` flag enables debug logging.
+REDOOOOO (use just cmds)
 
 ## What it checks
 
@@ -104,201 +74,20 @@ The `--keep` flag leaves the enclave running so you can inspect it after. The `-
 | `cb_header_values` | Relay header bid values | > 0 |
 | `cb_get_header_success` | Successful get_header responses | > 0 |
 
-Tier 2 metric checks (latency, errors, header values, get_header success) require CB metrics. See [Metrics limitations](#metrics-limitations) below.
+Tier 2 metric checks (latency, errors, header values, get_header success) require CB metrics.
 
 ### Tier 3: Extended checks (config-dependent)
+talk about muxes
 
-| Check | When it runs |
-|---|---|
-| `relay.validator_registrations` | When validator pubkeys are provided |
-
-Mux routing, SSZ encoding, and signer health checks are planned but not yet implemented.
-
-## Config presets
-
-The `configs/` directory contains ready-to-use Kurtosis config files:
-
-| Config | Nodes | What it exercises |
-|---|---|---|
-| [`basic-pbs.yml`](configs/basic-pbs.yml) | 2x Lighthouse/Geth | Default PBS pipeline. Header selection, relay fan-out. Start here. |
-| [`pbs-metrics.yml`](configs/pbs-metrics.yml) | 2x Lighthouse/Geth | PBS + `[metrics]` enabled + Prometheus. Exercises Tier 2 checks. |
-| [`pbs-validation-modes.yml`](configs/pbs-validation-modes.yml) | 3x Lighthouse/Geth | Mux with different `header_validation_mode` settings (None vs Standard). |
-| [`assertoor-pbs.yml`](configs/assertoor-pbs.yml) | 2x Lighthouse/Geth | CI integration. Same checks run inside assertoor via `run_shell`. |
-
-Most presets use `commit_boost_config` to inject a full CB config as inline TOML (`basic-pbs.yml` uses the default template). Template variables (`{{ .Network }}`, `{{ .Port }}`, `{{ .Relays }}`, `{{ .Timestamp }}`) are injected by the ethereum-package at launch.
-
-Additional reference configs for SSZ testing, client matrix testing, and mux experiments are in `configs/reference/`.
-
-### Writing your own config
-
-Start from `basic-pbs.yml` and modify the `commit_boost_config` block. The config is standard CB TOML with template variable injection. Key things to know:
-
-- `{{ .Port }}` becomes the PBS listen port (18550)
-- `{{ .Relays }}` is the list of relay URLs discovered by the ethereum-package
-- `{{ .Network }}` is the path to the network config inside the container
-- `{{ .Timestamp }}` is the genesis time
-- `spamoor` in `additional_services` is required (generates transactions so the builder has something to build)
 
 ## CLI reference
 
-### cb-verify
+REDO
 
-```
-cargo run --release -- --enclave CB-Testnet [OPTIONS]
-
-Options:
-  --enclave NAME        Kurtosis enclave name (required)
-  --min-epochs N        Observation window in epochs (default: 2)
-  --target-epoch N      Wait until this epoch before checks (default: 7)
-  --timeout SECS        Readiness timeout in seconds (default: 1500)
-  --mev-threshold PCT   Min MEV delivery rate, 0.0-1.0 (default: 0.30)
-  --json                Output JSON report
-  -v, --verbose         Debug logging
-```
-
-### run-and-verify.sh
-
-```
-./scripts/run-and-verify.sh [OPTIONS]
-
-Options:
-  --config FILE         Kurtosis config (default: configs/basic-pbs.yml)
-  --enclave NAME        Enclave name (default: CB-Testnet)
-  --package PATH        ethereum-package: local path or GitHub ref
-  --keep                Don't tear down the enclave on exit
-  --json                JSON output
-  --timeout SECS        Readiness timeout (default: 1500)
-  --min-epochs N        Observation window (default: 2)
-  -v, --verbose         Debug logging
-```
 
 ## How it works
 
-1. **Discovery**: Finds beacon, relay, and CB services via `kurtosis enclave inspect`
-2. **Readiness**: Polls beacon API until synced, finalizing, and past epoch 7 (no hardcoded sleeps)
-3. **Observation**: Watches 2 more epochs of steady-state activity
-4. **Checks**: Queries beacon API, relay data API, and (optionally) CB metrics
-5. **Report**: Colored terminal output or JSON (`--json`). Exit code 0/1/2.
-
-### Exit codes
-
-- `0` All Tier 1 checks passed
-- `1` One or more Tier 1 checks failed
-- `2` Setup failure (enclave not found, timeout, etc.)
-
-### Timing
-
-With the default `seconds_per_slot: 12` (matching mainnet), expect ~55 minutes total:
-- ~45 min for the devnet to reach epoch 7 and finalize
-- ~8 min for the 2-epoch observation window
-
-## Metrics limitations
-
-CB's metrics server only starts when the `CB_METRICS_PORT` environment variable is set. This env var is normally injected by `cb docker init` when generating docker-compose files, but upstream `ethpandaops/ethereum-package` doesn't set it. The TOML `[metrics]` block in `commit_boost_config` alone is ignored by PBS standalone -- see `crates/metrics/src/provider.rs` in commit-boost-client.
-
-### Fixed in local ethereum-package fork
-
-The `JasonVranek/ethereum-package` fork patches this in `src/mev/commit-boost/mev_boost/mev_boost_launcher.star`:
-- Adds `metrics: 9090/tcp` to `USED_PORTS`
-- Adds `CB_METRICS_PORT: "9090"` to `env_vars`
-
-Run against the local fork to enable metrics:
-
-```bash
-./scripts/run-and-verify.sh --package ../ethereum-package --config configs/assertoor-pbs.yml
-```
-
-With the fork, the `cb_*_matrix` checks populate with per-endpoint, per-relay status code counts, and the `cb_relay_latency` p95 histogram check activates. Using upstream ethereum-package, these tier 2 checks SKIP. All tier 1 checks (chain health, relay pipeline, payload matching) work either way.
-
-## Assertoor integration (CI)
-
-For CI pipelines, the verification checks run inside [assertoor](https://github.com/ethpandaops/assertoor) as an in-enclave service. This avoids the need for a separate verification container or external polling.
-
-The test definition lives at [`assertoor/cb-mev-pipeline.yaml`](assertoor/cb-mev-pipeline.yaml). It uses assertoor's native tasks for chain readiness (finality, sync) and `run_shell` tasks with `curl`+`jq` for relay and payload checks. The assertoor container has both tools installed.
-
-### How it works
-
-1. The kurtosis config (`configs/assertoor-pbs.yml`) adds assertoor to `additional_services`
-2. `assertoor_params.tests` references the test YAML via raw GitHub URL
-3. Assertoor fetches the test at startup and runs it inside the enclave
-4. The [kurtosis-assertoor-github-action](https://github.com/ethpandaops/kurtosis-assertoor-github-action) polls assertoor's API and reports pass/fail
-
-### GitHub Actions example
-
-```yaml
-jobs:
-  cb-mev-pipeline:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ethpandaops/kurtosis-assertoor-github-action@v1
-        with:
-          ethereum_package_args: configs/assertoor-pbs.yml
-```
-
-### Service discovery inside the enclave
-
-The test YAML defaults to standard kurtosis DNS names:
-- Beacon: `http://cl-1-lighthouse-geth:4000`
-- Relay: `http://mev-relay-api:9062`
-
-If your enclave uses different CL/EL types, override via `testConfig` in `assertoor_params.tests`:
-
-```yaml
-assertoor_params:
-  tests:
-    - file: "https://raw.githubusercontent.com/jvranek/cb-testing/main/assertoor/cb-mev-pipeline.yaml"
-      testConfig:
-        beaconUrl: "http://cl-1-prysm-geth:3500"
-```
-
-### Local assertoor testing
-
-To test the assertoor flow locally without pushing to GitHub:
-
-```bash
-# Serve the test YAML locally
-cd assertoor && python3 -m http.server 8888 &
-
-# Point assertoor at the local URL (edit assertoor-pbs.yml temporarily)
-# Change the test URL to: http://host.docker.internal:8888/cb-mev-pipeline.yaml
-kurtosis run github.com/ethpandaops/ethereum-package \
-  --enclave CB-Testnet --args-file configs/assertoor-pbs.yml
-
-# Check assertoor status
-ASSERTOOR=$(kurtosis port print CB-Testnet assertoor http)
-curl -s $ASSERTOOR/api/v1/test_runs | jq '.[0].status'
-```
-
-For iterating on checks locally, the standalone verifier (`./scripts/run-and-verify.sh`) is faster.
+REDOOOOO
 
 ## Project layout
-
-```
-src/
-  main.rs                 CLI entry point and orchestrator (clap)
-  beacon.rs               Beacon API client (alloy types)
-  relay.rs                Relay Data API client (alloy types)
-  discovery.rs            Kurtosis service/port discovery
-  metrics.rs              Prometheus metrics fetching
-  report.rs               Terminal (ANSI) and JSON output formatting
-  checks/
-    mod.rs                CheckResult, CheckStatus types
-    chain_health.rs       Finality, sync, missed slots, CB service status
-    relay_pipeline.rs     Builder blocks, delivered payloads, MEV delivery rate
-    payload_matching.rs   Cross-ref relay payloads with on-chain blocks
-    cb_metrics.rs         CB Prometheus metric assertions
-assertoor/
-  cb-mev-pipeline.yaml    Assertoor test definition for CI
-configs/
-  basic-pbs.yml           Default PBS preset
-  pbs-metrics.yml         PBS + metrics preset
-  pbs-validation-modes.yml  Mux validation mode preset
-  assertoor-pbs.yml       CI preset with assertoor
-  reference/              Additional configs for SSZ, client matrix, etc.
-scripts/
-  run-and-verify.sh       Full lifecycle: launch, verify, tear down
-Cargo.toml                Rust project config
-PLAN.md                   Design doc and roadmap
-```
+REDOOOOOOOOOOOOOOOOO

@@ -64,8 +64,7 @@ COMMON_ADDITIONAL_SERVICES = """\
 additional_services:
   - dora
   - spamoor
-  - prometheus
-  - assertoor"""
+  - prometheus"""
 
 COMMON_NETWORK_PARAMS = (
     "network_params:\n"
@@ -79,14 +78,6 @@ COMMON_NETWORK_PARAMS = (
     '    "giant issue aisle success illegal bike spike\n'
     "    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy\n"
     '    very lucky have athlete"'
-)
-
-ASSERTOOR_PARAMS = (
-    "assertoor_params:\n"
-    '  run_stability_check: false\n'
-    '  run_block_proposal_check: false\n'
-    "  tests:\n"
-    '    file: "http://host.docker.internal:8888/assertoor/cb-mev-pipeline.yaml"'
 )
 
 MUX_NETWORK_PARAMS = (
@@ -278,7 +269,6 @@ def generate_basic():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -306,7 +296,6 @@ def generate_multiple_relays():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -333,7 +322,6 @@ def generate_skip_sigverify():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -369,7 +357,6 @@ def generate_timing_games():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -403,7 +390,6 @@ def generate_extra_validation():
         "mev_type: custom",
         mev_params,
         COMMON_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
@@ -432,7 +418,6 @@ def generate_mux(pubkeys_node0, pubkeys_node1):
         "mev_type: custom",
         mev_params,
         MUX_NETWORK_PARAMS,
-        ASSERTOOR_PARAMS,
     ]) + "\n"
 
 
