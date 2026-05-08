@@ -24,6 +24,8 @@ mev_params:
   mev_boost_image: commit-boost/pbs:kurtosis
   mev_builder_image: ethpandaops/reth-rbuilder:develop
   mev_builder_cl_image: sigp/lighthouse:latest
+  mev_builder_subsidy: 1
+
 
   commit_boost_config: |
     chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }
@@ -62,3 +64,4 @@ network_params:
     "giant issue aisle success illegal bike spike
     question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy
     very lucky have athlete"
+  prefunded_accounts: '{"0xb9e79d19f651a941757b35830232e7efc77e1c79": {"balance": "100000ETH"}}'

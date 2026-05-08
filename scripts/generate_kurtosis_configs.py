@@ -77,7 +77,8 @@ COMMON_NETWORK_PARAMS = (
     "  preregistered_validator_keys_mnemonic:\n"
     '    "giant issue aisle success illegal bike spike\n'
     "    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy\n"
-    '    very lucky have athlete"'
+    '    very lucky have athlete"\n'
+    '  prefunded_accounts: \'{"0xb9e79d19f651a941757b35830232E7EFC77E1c79": {"balance": "100000ETH"}}\'\n'
 )
 
 MUX_NETWORK_PARAMS = (
@@ -91,7 +92,8 @@ MUX_NETWORK_PARAMS = (
     "  preregistered_validator_keys_mnemonic:\n"
     '    "giant issue aisle success illegal bike spike\n'
     "    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy\n"
-    '    very lucky have athlete"'
+    '    very lucky have athlete"\n'
+    "  prefunded_accounts: '{\"0xb9e79d19f651a941757b35830232E7EFC77E1c79\": {\"balance\": \"100000ETH\"}}'\n"
 )
 # ---------------------------------------------------------------------------
 
@@ -242,6 +244,8 @@ def build_mev_params(relays, images, toml_block):
     for key, val in images.items():
         lines.append(f"  {key}: {val}")
 
+    lines.append("")
+    lines.append("  mev_builder_subsidy: 1")
     lines.append("")
     lines.append("  commit_boost_config: |")
     # Indent every non-empty TOML line by 4 spaces; keep blanks truly empty
