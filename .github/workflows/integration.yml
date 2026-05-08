@@ -28,6 +28,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
@@ -45,29 +47,6 @@ jobs:
       - name: Build cb-verify
         run: just build-release
 
-      - name: Checkout Commit-Boost
-        uses: actions/checkout@v6
-        with:
-          repository: commit-boost/commit-boost-client
-          ref: ${{ github.event.inputs.cb_ref }}
-          path: commit-boost-client
-
-      - name: Build CB Docker image
-        working-directory: commit-boost-client
-        run: |
-          docker build \
-            -t commit-boost/pbs:kurtosis \
-            -f Dockerfile \
-            --build-arg BIN=pbs \
-            .
-
-      - name: Generate CI config
-        run: |
-          PLAYBOOK_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/assertoor/cb-mev-pipeline.yaml"
-          sed "s|http://host.docker.internal:8888/assertoor/cb-mev-pipeline.yaml|${PLAYBOOK_URL}|" \
-            configs/assertoor-pbs.yml > configs/assertoor-ci.yml
-          echo "Playbook URL: $PLAYBOOK_URL"
-
       - name: Install Kurtosis
         run: |
           echo "deb [trusted=yes] https://apt.fury.io/kurtosis-tech/ /" | \
@@ -75,33 +54,15 @@ jobs:
           sudo apt update
           sudo apt install -y kurtosis-cli
 
-      - name: Launch devnet
+      - name: Launch devnet + verify
         timeout-minutes: 60
         run: |
-          kurtosis run github.com/ethpandaops/ethereum-package \
-            --enclave "$ENCLAVE" \
-            --args-file configs/assertoor-ci.yml \
-            --image-download always \
-            --non-blocking-tasks 2>&1 | tee kurtosis-run.log
-
-      - name: Verify
-        timeout-minutes: 30
-        run: |
-          cargo run --release -- \
-            --enclave "$ENCLAVE" \
-            --target-epoch "${{ github.event.inputs.target_epoch }}" \
-            --min-epochs "${{ github.event.inputs.min_epochs }}" \
-            --timeout 3600 \
-            --json > verify-report.json 2>verify-err.log
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
-
-      - name: Report
-        if: always()
-        run: |
-          echo "=== Verification Report ==="
-          if [ -f verify-report.json ]; then
-            python3 -m json.tool verify-report.json || cat verify-report.json
-          fi
+          ./scripts/run-and-verify.sh \
+            --config configs/example-kurtosis-config.yml \
+            --json \
+            --live-metrics \
+            --min-epochs 1 \
+            --target-epoch 2
 
       - name: Upload artifacts
         if: always()
@@ -110,7 +71,6 @@ jobs:
           name: verify-${{ github.run_id }}
           path: |
             verify-report.json
-            verify-err.log
             kurtosis-run.log
 
       - name: Teardown

@@ -21,7 +21,7 @@ mev_params:
   mev_builder: flashbots
 
   helix_relay_image: helix-relay:kurtosis
-  mev_boost_image: commit-boost/pbs:kurtosis
+  mev_boost_image: ghcr.io/commit-boost/pbs:latest
   mev_builder_image: ethpandaops/reth-rbuilder:develop
   mev_builder_cl_image: sigp/lighthouse:latest
   mev_builder_subsidy: 1
