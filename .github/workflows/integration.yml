@@ -1,6 +1,9 @@
 name: Integration Test
 
 on:
+  schedule:
+      # Runs every day at 00:00 UTC
+      - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       cb_ref:
@@ -10,11 +13,11 @@ on:
       target_epoch:
         description: 'Target epoch for verification'
         required: false
-        default: '7'
+        default: '2'
       min_epochs:
         description: 'Observation window in epochs'
         required: false
-        default: '2'
+        default: '1'
 
 env:
   ENCLAVE: cb-ci-${{ github.run_id }}
@@ -61,8 +64,8 @@ jobs:
             --config configs/example-kurtosis-config.yml \
             --json \
             --live-metrics \
-            --min-epochs 1 \
-            --target-epoch 2
+            --min-epochs "${{ github.event.inputs.min_epochs }}" \
+            --target-epoch "${{ github.event.inputs.target_epoch }}" \
 
       - name: Upload artifacts
         if: always()
