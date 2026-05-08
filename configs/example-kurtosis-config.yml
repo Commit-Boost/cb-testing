@@ -20,7 +20,7 @@ mev_params:
   mev_sidecar: commit-boost
   mev_builder: flashbots
 
-  helix_relay_image: helix-relay:kurtosis
+  helix_relay_image: ghcr.io/gattaca-com/helix-relay:main
   mev_boost_image: ghcr.io/commit-boost/pbs:latest
   mev_builder_image: ethpandaops/reth-rbuilder:develop
   mev_builder_cl_image: sigp/lighthouse:latest
