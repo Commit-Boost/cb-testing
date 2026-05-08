@@ -143,6 +143,12 @@ def build_cb_toml_basic(timeout_get_header_ms, timeout_get_payload_ms,
             insert_idx += 1
 
     lines.append("")
+    lines.append("")
+    lines.append("[metrics]")
+    lines.append("enabled = true")
+    lines.append('host = "0.0.0.0"')
+    lines.append("start_port = 9090")
+    lines.append("")
     lines.append("{{ range $index, $relay := .Relays }}")
     lines.append("[[relays]]")
     lines.append('id = "mev_relay_{{$index}}"')
@@ -183,6 +189,11 @@ def build_cb_toml_mux(pubkeys_node0, pubkeys_node1):
         'url = "{{ $relay }}"',
         "{{- end }}",
         "",
+        "[metrics]",
+        "enabled = true",
+        'host = "0.0.0.0"',
+        "start_port = 9090",
+        "",
         "[[mux]]",
         'id = "node_0_to_helix"',
         f"validator_pubkeys = {node0_list}",
@@ -199,6 +210,7 @@ def build_cb_toml_mux(pubkeys_node0, pubkeys_node1):
         'id = "mux_flashbots"',
         'url = "{{ index .Relays 1 }}"',
         "",
+
         "[logs.stdout]",
         'level = "debug"',
         "",
