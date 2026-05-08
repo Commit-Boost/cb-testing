@@ -29,10 +29,18 @@ pub async fn check_missed_slots(
     end_slot: u64,
     threshold: f64,
 ) -> CheckResult {
-    let total = end_slot.saturating_sub(start_slot);
-    if total == 0 {
+    if start_slot > end_slot {
         return CheckResult::fail("missed_slots", 2, "Invalid slot range");
     }
+    // Single-slot window: nothing meaningful to check
+    if start_slot == end_slot {
+        return CheckResult::skip(
+            "missed_slots",
+            2,
+            format!("Single-slot window (slot {}), skipping missed slot check", start_slot),
+        );
+    }
+    let total = end_slot - start_slot;
 
     let mut missed = 0u64;
     for slot in start_slot..end_slot {

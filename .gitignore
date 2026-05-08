@@ -2,3 +2,8 @@
 *.swp
 *.swo
 .DS_Store
+configs/generated
+kurtosis-configs/
+scripts/kurtosis-configs/
+.env
+*/__pycache__

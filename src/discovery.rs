@@ -20,11 +20,32 @@ pub struct PostMortemRecord {
     pub value: String,
 }
 
+/// Derive a relay identity from the Kurtosis service name.
+///
+/// Returns a short string like "helix", "flashbots", or "mev-rs"
+/// that can be matched against mux entry IDs.
+pub fn relay_identity(service_name: &str) -> Option<String> {
+    let lower = service_name.to_lowercase();
+    if lower.contains("helix") {
+        Some("helix".to_string())
+    } else if lower.contains("mev-rs") {
+        Some("mev-rs".to_string())
+    } else if lower.contains("relay") {
+        // Generic mev-boost relay (used by flashbots)
+        Some("flashbots".to_string())
+    } else {
+        None
+    }
+}
+
 /// Discovered services from a Kurtosis enclave.
 #[derive(Debug, Default)]
 pub struct EnclaveServices {
     pub beacon_urls: Vec<String>,
     pub relay_urls: Vec<String>,
+    /// Parallel to relay_urls: identity string per relay
+    /// ("helix", "flashbots", "mev-rs", etc.)
+    pub relay_identities: Vec<String>,
     pub cb_pbs_urls: Vec<String>,
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
@@ -298,16 +319,25 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
             }
         }
 
-        // Relay Data API: mev-relay-*-api or mev-relay-api
-        if matches_pattern(&svc.name, "mev-relay-*") && svc.name.ends_with("-api")
-            || svc.name == "mev-relay-api"
-        {
-            let url = port_print(enclave, &svc.name, "http").or_else(|| find_port("http"));
+        // Relay Data API: match any relay service by name heuristics.
+        //
+        // Different relay implementations use different service names and port IDs:
+        //   flashbots: "mev-relay-api"  — port "http" (9067)
+        //   helix:     "helix-relay"     — port "endpoint" (4040)
+        //   mev-rs:    "mev-rs-relay"    — port "http" (28545)
+        // Exclude supporting services (postgres, redis, website, housekeeper).
+        if is_relay_api_service(&svc.name) {
+            let url = port_print(enclave, &svc.name, "http")
+                .or_else(|| port_print(enclave, &svc.name, "endpoint"))
+                .or_else(|| find_port("http"))
+                .or_else(|| find_port("endpoint"));
             if let Some(url) = url {
-                info!("Relay API: {} -> {url}", svc.name);
+                let identity = relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
+                info!("Relay API: {} -> {url} (identity={identity})", svc.name);
                 result.relay_urls.push(url);
+                result.relay_identities.push(identity);
             } else {
-                warn!("Relay '{}': no http port", svc.name);
+                warn!("Relay '{}': no http/endpoint port", svc.name);
             }
         }
 
@@ -499,9 +529,59 @@ fn parse_postmortem_output(output: &str) -> Vec<PostMortemRecord> {
     records
 }
 
+/// Heuristic check: is this service name a relay API endpoint?
+///
+/// Returns true if the name contains "relay" and does not match known
+/// non-API relay services (postgres, redis, website, housekeeper).
+/// This covers flashbots ("mev-relay-api"), helix ("helix-relay"),
+/// mev-rs ("mev-rs-relay"), and any future relay implementations.
+fn is_relay_api_service(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let known_non_api = ["-postgres", "-redis", "-website", "-housekeeper"];
+    let is_relay = lower.contains("relay");
+    let is_non_api = known_non_api.iter().any(|suffix| lower.ends_with(suffix));
+    is_relay && !is_non_api
+}
+
 #[cfg(test)]
 mod tests {
+    use super::relay_identity;
+
+    #[test]
+    fn test_relay_identity() {
+        assert_eq!(relay_identity("helix-relay").as_deref(), Some("helix"));
+        assert_eq!(relay_identity("Helix-Relay").as_deref(), Some("helix"));
+        assert_eq!(relay_identity("mev-relay-api").as_deref(), Some("flashbots"));
+        assert_eq!(relay_identity("mev-rs-relay").as_deref(), Some("mev-rs"));
+        // Non-relay services: function should not be called for these
+        // in practice (is_relay_api_service filters them), but they
+        // won't match anything meaningful.
+        assert_eq!(relay_identity("prometheus"), None);
+    }
     use super::*;
+
+    #[test]
+    fn test_is_relay_api_service() {
+        // Relay API services — should match
+        assert!(is_relay_api_service("mev-relay-api"));
+        assert!(is_relay_api_service("helix-relay"));
+        assert!(is_relay_api_service("mev-rs-relay"));
+        assert!(is_relay_api_service("mev-relay-0-api"));
+        assert!(is_relay_api_service("Helix-Relay")); // case-insensitive
+
+        // Non-API supporting services — should not match
+        assert!(!is_relay_api_service("mev-relay-postgres"));
+        assert!(!is_relay_api_service("mev-relay-redis"));
+        assert!(!is_relay_api_service("mev-relay-website"));
+        assert!(!is_relay_api_service("mev-relay-housekeeper"));
+        assert!(!is_relay_api_service("helix-relay-postgres"));
+
+        // Unrelated services — should not match
+        assert!(!is_relay_api_service("cl-1-lighthouse-geth"));
+        assert!(!is_relay_api_service("prometheus"));
+        assert!(!is_relay_api_service("dora"));
+        assert!(!is_relay_api_service("commit-boost-001"));
+    }
 
     #[test]
     fn test_matches_pattern() {
