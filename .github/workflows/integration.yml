@@ -6,10 +6,6 @@ on:
       - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
-      cb_ref:
-        description: 'Commit-Boost branch/commit to test'
-        required: false
-        default: 'main'
       target_epoch:
         description: 'Target epoch for verification'
         required: false
