@@ -404,6 +404,7 @@ async fn run_verification(cli: &Cli) -> i32 {
         &beacon,
         &health_client,
         &targets,
+        start_slot,
         end_slot,
         cli.timeout,
         WaitLiveOpts {
@@ -561,55 +562,37 @@ struct WaitLiveOpts<'a> {
     json_output: bool,
 }
 
-/// Wait for the beacon chain head to reach `target_slot`.
+/// Wait for the beacon chain head to reach `end_slot`.
 ///
 /// No finalization gate — just wait for head advancement. Interleaves
-/// health probes every ~30s (fail fast if a service dies) and live metrics
-/// scraping if requested. Returns false on timeout.
+/// health probes every ~30s and live metrics scraping if requested.
+/// Live metrics are delayed until head passes `start_slot` so only
+/// observation-window events are captured. Returns false on timeout.
 async fn wait_for_slot(
     beacon: &BeaconClient,
     http: &reqwest::Client,
     targets: &[HealthTarget],
-    target_slot: u64,
+    start_slot: u64,
+    end_slot: u64,
     timeout: u64,
     live_opts: WaitLiveOpts<'_>,
 ) -> bool {
-    info!("Waiting for chain to reach slot {target_slot} (verification starts there, timeout {timeout}s)...");
+    info!("Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)...");
 
-    let start = Instant::now();
+    let wait_start = Instant::now();
     let timeout_dur = Duration::from_secs(timeout);
     let poll_interval = Duration::from_secs(5);
     // Probe services every N poll ticks -- 6 * 5s = 30s.
     const PROBE_EVERY_N_TICKS: u32 = 6;
     let mut tick: u32 = 0;
 
-    // Live metrics setup: initial scrape + state
-    let prev_scrape: Option<prometheus_parse::Scrape> = if live_opts.live_metrics {
-        match live_opts.metrics_url {
-            Some(url) => match metrics::fetch_metrics(http, url).await {
-                Ok(s) => {
-                    info!("live: initial scrape captured, polling every 30s");
-                    Some(s)
-                }
-                Err(e) => {
-                    warn!("live: initial metrics scrape failed: {e}");
-                    None
-                }
-            },
-            None => {
-                warn!(
-                    "--live-metrics requested but metrics not HTTP-reachable; skipping live deltas"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Live metrics: deferred until observation window starts.
+    let mut prev_scrape: Option<prometheus_parse::Scrape> = None;
+    let mut live_started = false;
 
     loop {
-        if start.elapsed() >= timeout_dur {
-            error!("Timeout: chain did not reach slot {target_slot} within {timeout}s");
+        if wait_start.elapsed() >= timeout_dur {
+            error!("Timeout: chain did not reach slot {end_slot} within {timeout}s");
             return false;
         }
 
@@ -633,14 +616,37 @@ async fn wait_for_slot(
         let current_epoch = head.map(|h| h / SLOTS_PER_EPOCH).unwrap_or(0);
 
         info!(
-            "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (waiting for slot {target_slot} to begin verification)",
+            "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (waiting for slot {end_slot} to begin verification)",
             head, finalized
         );
 
-        if let Some(h) = head
-            && h >= target_slot
+        // Start live metrics once observation window begins.
+        if !live_started
+            && live_opts.live_metrics
+            && let Some(h) = head
+            && h >= start_slot
         {
-            info!("Chain reached slot {h} >= {target_slot}. Starting verification...");
+            live_started = true;
+            match live_opts.metrics_url {
+                Some(url) => match metrics::fetch_metrics(http, url).await {
+                    Ok(s) => {
+                        info!("live: observation window started (slot {h}), scraping every 30s");
+                        prev_scrape = Some(s);
+                    }
+                    Err(e) => {
+                        warn!("live: initial metrics scrape failed: {e}");
+                    }
+                },
+                None => {
+                    warn!("--live-metrics requested but metrics not HTTP-reachable; skipping live deltas");
+                }
+            }
+        }
+
+        if let Some(h) = head
+            && h >= end_slot
+        {
+            info!("Chain reached slot {h} >= {end_slot}. Starting verification...");
             return true;
         }
 
@@ -656,7 +662,7 @@ async fn wait_for_slot(
             }
 
             // Live metrics: scrape, compute deltas vs previous, log.
-            if live_opts.live_metrics
+            if live_started
                 && let Some(url) = live_opts.metrics_url
             {
                 match metrics::fetch_metrics(http, url).await {
