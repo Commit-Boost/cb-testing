@@ -227,7 +227,82 @@ def build_cb_toml_mux(pubkeys_node0, pubkeys_node1):
 # MEV params builder
 # ---------------------------------------------------------------------------
 
-def build_mev_params(relays, images, toml_block):
+def build_helix_relay_config():
+    """Return the Helix relay YAML literal block as a string.
+
+    The caller indents each line 4 spaces to fit under mev_params.
+    Includes the simulators block which improves relay reliability.
+    """
+    return """instance_id: "helix-kurtosis-test"
+
+network_config: !Custom
+  dir_path: "{{ .GENESIS_CONFIG_MOUNT_PATH_ON_CONTAINER }}/config.json"
+  genesis_validator_root: "{{ .GENESIS_VALIDATORS_ROOT }}"
+  genesis_time: {{ .GENESIS_TIME }}
+
+postgres:
+  hostname: "{{ .POSTGRES_HOST_NAME }}"
+  port: {{ .POSTGRES_PORT }}
+  db_name: "{{ .POSTGRES_DB }}"
+  user: "{{ .POSTGRES_USER }}"
+  password: "{{ .POSTGRES_PASS }}"
+  region: 0
+  region_name: "LOCAL"
+
+beacon_clients:
+  - url: "{{ .BEACON_URI }}"
+
+gossip_payload_on_header: false
+
+simulators:
+  - url: "{{ .BLOCKSIM_URI }}"
+    namespace: flashbots
+    is_merging_simulator: false
+    max_concurrent_tasks: 32
+
+router_config:
+  enabled_routes:
+    - route: GetValidators
+    - route: SubmitBlock
+    - route: GetTopBid
+    - route: GetHeader
+      rate_limit:
+        replenish_ms: 50
+        burst_size: 20
+    - route: GetPayload
+    - route: RegisterValidators
+    - route: Status
+    - route: ProposerPayloadDelivered
+    - route: BuilderBidsReceived
+    - route: ValidatorRegistration
+  shutdown_delay_ms: 12000
+
+timing_game_config:
+  max_header_delay_ms: 400
+  latest_header_delay_ms_in_slot: 1500
+  default_client_latency_ms: 50
+
+target_get_payload_propagation_duration_ms: 500
+
+is_submission_instance: true
+is_registration_instance: true
+
+admin_token: "test_admin_token"
+
+logging:
+  type: Console
+
+cores:
+  auctioneer: 0
+  sub_workers: [0]
+  reg_workers: [0]
+  tokio: [0]
+  tcp_bid_submissions_tile: 2
+
+is_local_dev: false"""
+
+
+def build_mev_params(relays, images, toml_block, helix_relay_yaml=None):
     lines = ["mev_params:"]
 
     if isinstance(relays, list):
@@ -247,6 +322,16 @@ def build_mev_params(relays, images, toml_block):
     lines.append("")
     lines.append("  mev_builder_subsidy: 1")
     lines.append("")
+
+    if helix_relay_yaml:
+        lines.append("  helix_relay_config: |")
+        for line in helix_relay_yaml.splitlines():
+            if line.strip():
+                lines.append(f"    {line}")
+            else:
+                lines.append("")
+        lines.append("")
+
     lines.append("  commit_boost_config: |")
     # Indent every non-empty TOML line by 4 spaces; keep blanks truly empty
     for line in toml_block.splitlines():
@@ -277,7 +362,7 @@ def generate_basic():
         "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
-    mev_params = build_mev_params("helix", images, toml)
+    mev_params = build_mev_params("helix", images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,
@@ -304,7 +389,7 @@ def generate_multiple_relays():
         "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000)
-    mev_params = build_mev_params(["helix", "flashbots"], images, toml)
+    mev_params = build_mev_params(["helix", "flashbots"], images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,
@@ -330,7 +415,7 @@ def generate_skip_sigverify():
         "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_basic(950, 4000, extra_pbs_lines=["skip_sigverify = true"])
-    mev_params = build_mev_params("helix", images, toml)
+    mev_params = build_mev_params("helix", images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,
@@ -365,7 +450,7 @@ def generate_timing_games():
             "frequency_get_header_ms = 200",
         ],
     )
-    mev_params = build_mev_params(["helix", "flashbots"], images, toml)
+    mev_params = build_mev_params(["helix", "flashbots"], images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,
@@ -398,7 +483,7 @@ def generate_extra_validation():
             'rpc_url = "http://el-1-geth-lighthouse:8545"',
         ],
     )
-    mev_params = build_mev_params("helix", images, toml)
+    mev_params = build_mev_params("helix", images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,
@@ -426,7 +511,7 @@ def generate_mux(pubkeys_node0, pubkeys_node1):
         "mev_builder_cl_image": BUILDER_CL_IMAGE,
     }
     toml = build_cb_toml_mux(pubkeys_node0, pubkeys_node1)
-    mev_params = build_mev_params(["helix", "flashbots"], images, toml)
+    mev_params = build_mev_params(["helix", "flashbots"], images, toml, helix_relay_yaml=build_helix_relay_config())
     return "\n\n".join([
         comment,
         COMMON_PARTICIPANTS,

@@ -157,16 +157,53 @@ pub fn check_cb_running(enclave: &str, service_pattern: &str) -> CheckResult {
 }
 
 /// Run all chain health checks.
+///
+/// Finalization check (`chain_finality`) is included only when:
+/// - `end_slot >= 96` (epoch 3+ — justification cascade has time to finalize epoch 2)
+/// - `skip_finalization` is `false`
+///
+/// Otherwise the check is skipped with a reason.
 pub async fn run_chain_health_checks(
     beacon: &BeaconClient,
     start_slot: u64,
     end_slot: u64,
     enclave: &str,
+    skip_finalization: bool,
 ) -> Vec<CheckResult> {
-    vec![
-        check_finality(beacon).await,
+    // Finalization needs ~3 epochs from genesis for the justification
+    // cascade to finalize epoch 2. Skip if the observation window ends
+    // before slot 96 (end of epoch 3).
+    const FINALITY_POSSIBLE_AFTER_SLOT: u64 = 96;
+
+    let mut checks = vec![
         check_missed_slots(beacon, start_slot, end_slot, 0.10).await,
         check_sync_status(beacon).await,
         check_cb_running(enclave, "commit-boost"),
-    ]
+    ];
+
+    if skip_finalization {
+        checks.insert(
+            0,
+            CheckResult::skip(
+                "chain_finality",
+                1,
+                "Finalization check skipped (--skip-finalization-check)",
+            ),
+        );
+    } else if end_slot < FINALITY_POSSIBLE_AFTER_SLOT {
+        checks.insert(
+            0,
+            CheckResult::skip(
+                "chain_finality",
+                1,
+                format!(
+                    "Finalization not expected yet (observation ends at slot {end_slot}, need >= {FINALITY_POSSIBLE_AFTER_SLOT})"
+                ),
+            ),
+        );
+    } else {
+        checks.insert(0, check_finality(beacon).await);
+    }
+
+    checks
 }

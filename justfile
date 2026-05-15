@@ -84,15 +84,18 @@ test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
 generate-configs:
     python3 scripts/generate_kurtosis_configs.py
 
-# Run kurtosis testnet with verification on target `config`
+# Run kurtosis testnet with verification on target `config`.
+# Observes 1 epoch starting at target_epoch. Chain just needs to reach
+# end slot; checks query historical relay/beacon data (no real-time loop).
 testnet config:
     ./scripts/run-and-verify.sh \
         --config {{config}} \
         --json \
         --live-metrics \
         --min-epochs 1 \
-        --target-epoch 2 \
+        --target-epoch 1 \
         --keep \
+        --skip-finalization \
         -v
 
 # Run a single config with verbose logging (for debugging)

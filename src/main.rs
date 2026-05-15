@@ -74,15 +74,20 @@ struct Cli {
     #[arg(long)]
     config: Option<String>,
 
-    /// Observation window in epochs. Set to 0 to skip the observation
-    /// window and run checks immediately against current state.
+    /// Observation window width in epochs. Combined with --target-epoch:
+    /// window = [target_epoch, target_epoch + min_epochs).
+    /// Set to 0 to skip observation and run checks against current slot.
     #[arg(long, default_value_t = 2)]
     min_epochs: u64,
 
-    /// Wait until this epoch before starting checks.
+    /// Epoch at which the observation window starts.
+    ///
+    /// Combined with --min-epochs to define the slot range for checks.
+    /// e.g. --target-epoch 2 --min-epochs 1 → observe slots 64-96 (epoch 2).
+    /// The verifier waits for the chain to reach the end slot, then queries
+    /// historical relay/beacon data. No real-time slot-watching loop.
+    ///
     /// (default 7: genesis + validator activation + relay registration + builder warm-up)
-    /// If the enclave hasn't reached this epoch, the verifier will wait
-    /// up to --timeout seconds.
     #[arg(long, default_value_t = 7)]
     target_epoch: u64,
 
@@ -125,6 +130,14 @@ struct Cli {
     /// in a human-readable format. Does not run any verification checks.
     #[arg(long)]
     show_logs: bool,
+
+    /// Skip finalization check entirely.
+    ///
+    /// By default, chain finality (finalized epoch >= 2) is checked only when
+    /// the observation window ends at epoch 3+ (slot 96), where finalization
+    /// is expected to have occurred. Use this flag to force-skip even then.
+    #[arg(long)]
+    skip_finalization_check: bool,
 
     /// Directory to save JSON report files. Requires --json.
     ///
@@ -227,17 +240,36 @@ async fn run_verification(cli: &Cli) -> i32 {
         warn!("No relay URLs found -- relay checks will fail");
     }
 
-    // Step 2: Wait for readiness
-    if !wait_for_readiness(&beacon, cli.target_epoch, cli.timeout).await {
-        let report = make_error_report(
-            &enclave_name,
-            &now,
-            &format!("Devnet did not stabilize within {}s", cli.timeout),
+    // Step 2: Compute observation window from target_epoch + min_epochs.
+    //
+    // Observation is anchored to the target epoch, not to the current slot.
+    // e.g. --target-epoch 2 --min-epochs 1 → observe slots 64-96 (epoch 2).
+    // This means checks query historical relay/beacon data for those slots,
+    // and we only need the chain to have reached the end of the window.
+    let (start_slot, end_slot) = if cli.min_epochs > 0 {
+        let s = cli.target_epoch * SLOTS_PER_EPOCH;
+        let e = (cli.target_epoch + cli.min_epochs) * SLOTS_PER_EPOCH;
+        info!(
+            "Observation window: epoch {} → {} (slots {s} → {e})",
+            cli.target_epoch,
+            cli.target_epoch + cli.min_epochs,
         );
-        report::print_report(&report, cli.json);
-        save_report(&report);
-        return 2;
-    }
+        (s, e)
+    } else {
+        // min_epochs=0: use current slot as both start and end
+        let slot = match beacon.get_head_slot().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to get current slot: {e}");
+                let report = make_error_report(&enclave_name, &now, &format!("Failed to get current slot: {e}"));
+                report::print_report(&report, cli.json);
+                save_report(&report);
+                return 2;
+            }
+        };
+        info!("Skipping observation window (min_epochs=0), using current slot {slot}");
+        (slot, slot)
+    };
 
     // Build the health-monitoring set -- anything whose disappearance would
     // invalidate the run. We track every beacon node, every relay, and every
@@ -272,8 +304,8 @@ async fn run_verification(cli: &Cli) -> i32 {
     // Step 2b: Tier 0 connectivity preflight.
     //
     // Fail loud, fail once. Probe every service we care about; if anything
-    // that *should* be reachable isn't, bail before the observation window
-    // instead of emitting confusing errors for each downstream check.
+    // that *should* be reachable isn't, bail before the wait instead of
+    // emitting confusing errors for each downstream check.
     info!("Running preflight on {} target(s)...", targets.len());
     let dead_at_preflight = health::probe_all(&health_client, &targets).await;
     if !dead_at_preflight.is_empty() {
@@ -313,7 +345,7 @@ async fn run_verification(cli: &Cli) -> i32 {
                     "Pipeline worked before relay crash. Proceeding with non-relay checks \
                      (relay API checks will SKIP)."
                 );
-                // Fall through to Step 3 — observation window. Relay checks
+                // Fall through to Step 3 — wait for window. Relay checks
                 // will naturally SKIP because the relay URLs are unreachable.
             } else {
                 error!("Post-mortem: no delivery records found in relay Postgres.");
@@ -360,73 +392,41 @@ async fn run_verification(cli: &Cli) -> i32 {
     }
     info!("  All {} service(s) reachable", targets.len());
 
-    // Step 3: Observe for min_epochs (if > 0), with periodic health checks.
+    // Step 3: Wait for chain to reach end of observation window.
     //
-    // When min_epochs is 0, skip the observation window entirely and run
-    // checks immediately against the current state. This is useful for
-    // standalone verification of a running enclave.
+    // No real-time slot-watching loop — the window is pre-computed from
+    // target_epoch + min_epochs. We just wait until the head passes end_slot,
+    // then query historical relay/beacon data for those slots. Live metrics
+    // are polled during the wait if --live-metrics is set.
     //
-    // Kurtosis happily leaves stopped containers in place -- when that happens
-    // the service stops accepting connections but the enclave still looks
-    // "up". Probing every ~30s means we fail fast instead of waiting out the
-    // whole window and surfacing a ghost error at the end.
-    let window = if cli.min_epochs > 0 {
-        let sps = beacon.get_seconds_per_slot().await;
-        let obs_timeout = cli.min_epochs * SLOTS_PER_EPOCH * sps + 120;
-        match observe_epochs(
-            &beacon,
-            &health_client,
-            &targets,
-            cli.min_epochs,
-            obs_timeout,
-            ObserveLiveOpts {
-                metrics_url,
-                live_metrics: cli.live_metrics,
-                json_output: cli.json,
-            },
-        )
-        .await
-        {
-            ObserveOutcome::Done(w) => w,
-            ObserveOutcome::ServiceDied { label, detail } => {
-                error!("{label} died during observation window -- aborting");
-                let report = make_error_report(
-                    &enclave_name,
-                    &now,
-                    &format!(
-                        "{label} went offline mid-observation: {detail}. Check: docker ps -a ; kurtosis enclave inspect {}",
-                        enclave_name
-                    ),
-                );
-                report::print_report(&report, cli.json);
-                save_report(&report);
-                return 2;
-            }
-            ObserveOutcome::Timeout => {
-                let report =
-                    make_error_report(&enclave_name, &now, "Failed to complete observation window");
-                report::print_report(&report, cli.json);
-                save_report(&report);
-                return 2;
-            }
-        }
-    } else {
-        // No observation window — use current slot as both start and end
-        let current_slot = match beacon.get_head_slot().await {
-            Ok(slot) => slot,
-            Err(e) => {
-                error!("Failed to get current slot: {e}");
-                let report = make_error_report(&enclave_name, &now, &format!("Failed to get current slot: {e}"));
-                report::print_report(&report, cli.json);
-                save_report(&report);
-                return 2;
-            }
-        };
-        info!("Skipping observation window (min_epochs=0), using current slot {}", current_slot);
-        ObservationWindow {
-            start_slot: current_slot,
-            end_slot: current_slot,
-        }
+    // When min_epochs is 0, skip the wait entirely.
+    if !wait_for_slot(
+        &beacon,
+        &health_client,
+        &targets,
+        end_slot,
+        cli.timeout,
+        WaitLiveOpts {
+            metrics_url,
+            live_metrics: cli.live_metrics,
+            json_output: cli.json,
+        },
+    )
+    .await
+    {
+        let report = make_error_report(
+            &enclave_name,
+            &now,
+            &format!("Chain did not reach slot {end_slot} within {}s", cli.timeout),
+        );
+        report::print_report(&report, cli.json);
+        save_report(&report);
+        return 2;
+    }
+
+    let window = ObservationWindow {
+        start_slot,
+        end_slot,
     };
 
     // Step 4: Run all checks
@@ -439,6 +439,7 @@ async fn run_verification(cli: &Cli) -> i32 {
             window.start_slot,
             window.end_slot,
             &enclave_name,
+            cli.skip_finalization_check,
         )
         .await,
     );
@@ -553,100 +554,27 @@ async fn run_verification(cli: &Cli) -> i32 {
 }
 
 /// Poll the beacon node until the devnet is ready for verification.
-async fn wait_for_readiness(beacon: &BeaconClient, target_epoch: u64, timeout: u64) -> bool {
-    let sps = beacon.get_seconds_per_slot().await;
-    info!(
-        "Waiting for readiness (target epoch {target_epoch}, slot {}, timeout {timeout}s, {sps}s slots)...",
-        target_epoch * SLOTS_PER_EPOCH
-    );
-
-    let start = Instant::now();
-    let timeout_dur = Duration::from_secs(timeout);
-    let poll_interval = Duration::from_secs(10);
-
-    loop {
-        if start.elapsed() >= timeout_dur {
-            error!("Timeout: devnet did not stabilize within {timeout}s");
-            return false;
-        }
-
-        // Check syncing
-        match beacon.is_syncing().await {
-            Err(_) => {
-                info!("  Beacon node not reachable yet...");
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
-            Ok(true) => {
-                info!("  Beacon node still syncing...");
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
-            Ok(false) => {}
-        }
-
-        let head = beacon.get_head_slot().await.ok();
-        let finalized = beacon.get_finalized_epoch().await.ok();
-        let current_epoch = head.map(|h| h / SLOTS_PER_EPOCH).unwrap_or(0);
-
-        info!(
-            "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (target: epoch>={target_epoch}, finalized>=2)",
-            head, finalized
-        );
-
-        if let (Some(_), Some(fin)) = (head, finalized)
-            && fin >= 2
-            && current_epoch + 1 >= target_epoch
-        {
-            if current_epoch >= target_epoch {
-                info!("Devnet is ready.");
-            } else {
-                info!("Devnet is close enough (epoch {current_epoch}, target {target_epoch}). Proceeding...");
-            }
-            return true;
-        }
-
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-/// Outcome of the observation window.
-enum ObserveOutcome {
-    /// Completed normally.
-    Done(ObservationWindow),
-    /// A monitored service stopped responding mid-window. Fail fast so the
-    /// user isn't waiting 20+ minutes for an obviously-broken run.
-    ServiceDied { label: String, detail: String },
-    /// Window didn't complete before the timeout.
-    Timeout,
-}
-
-/// Live-metrics options for the observation window.
-struct ObserveLiveOpts<'a> {
+/// Live-metrics options for the wait phase.
+struct WaitLiveOpts<'a> {
     metrics_url: Option<&'a str>,
     live_metrics: bool,
     json_output: bool,
 }
 
-/// Wait for num_epochs to pass and return the observation window.
+/// Wait for the beacon chain head to reach `target_slot`.
 ///
-/// Interleaves a lightweight health probe across every tracked service every
-/// ~30s. If anything that was reachable at preflight stops responding, abort
-/// the window immediately.
-async fn observe_epochs(
+/// No finalization gate — just wait for head advancement. Interleaves
+/// health probes every ~30s (fail fast if a service dies) and live metrics
+/// scraping if requested. Returns false on timeout.
+async fn wait_for_slot(
     beacon: &BeaconClient,
     http: &reqwest::Client,
     targets: &[HealthTarget],
-    num_epochs: u64,
+    target_slot: u64,
     timeout: u64,
-    live_opts: ObserveLiveOpts<'_>,
-) -> ObserveOutcome {
-    let Ok(start_slot) = beacon.get_head_slot().await else {
-        return ObserveOutcome::Timeout;
-    };
-    let target_slot = start_slot + (num_epochs * SLOTS_PER_EPOCH);
-
-    info!("Observing {num_epochs} epochs: slot {start_slot} -> {target_slot}");
+    live_opts: WaitLiveOpts<'_>,
+) -> bool {
+    info!("Waiting for chain to reach slot {target_slot} (verification starts there, timeout {timeout}s)...");
 
     let start = Instant::now();
     let timeout_dur = Duration::from_secs(timeout);
@@ -656,8 +584,7 @@ async fn observe_epochs(
     let mut tick: u32 = 0;
 
     // Live metrics setup: initial scrape + state
-    #[allow(unused_mut)]
-    let mut prev_scrape: Option<prometheus_parse::Scrape> = if live_opts.live_metrics {
+    let prev_scrape: Option<prometheus_parse::Scrape> = if live_opts.live_metrics {
         match live_opts.metrics_url {
             Some(url) => match metrics::fetch_metrics(http, url).await {
                 Ok(s) => {
@@ -682,18 +609,39 @@ async fn observe_epochs(
 
     loop {
         if start.elapsed() >= timeout_dur {
-            error!("Timeout waiting for observation window");
-            return ObserveOutcome::Timeout;
+            error!("Timeout: chain did not reach slot {target_slot} within {timeout}s");
+            return false;
         }
 
-        if let Ok(head) = beacon.get_head_slot().await
-            && head >= target_slot
+        // Check syncing
+        match beacon.is_syncing().await {
+            Err(_) => {
+                info!("  Beacon node not reachable yet...");
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            Ok(true) => {
+                info!("  Beacon node still syncing...");
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+            Ok(false) => {}
+        }
+
+        let head = beacon.get_head_slot().await.ok();
+        let finalized = beacon.get_finalized_epoch().await.ok();
+        let current_epoch = head.map(|h| h / SLOTS_PER_EPOCH).unwrap_or(0);
+
+        info!(
+            "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (waiting for slot {target_slot} to begin verification)",
+            head, finalized
+        );
+
+        if let Some(h) = head
+            && h >= target_slot
         {
-            info!("Observation window complete: slot {start_slot} -> {head}");
-            return ObserveOutcome::Done(ObservationWindow {
-                start_slot,
-                end_slot: head,
-            });
+            info!("Chain reached slot {h} >= {target_slot}. Starting verification...");
+            return true;
         }
 
         // Periodic service liveness check. A stopped container doesn't refuse
@@ -702,11 +650,9 @@ async fn observe_epochs(
         if tick.is_multiple_of(PROBE_EVERY_N_TICKS) {
             let dead = health::probe_all(http, targets).await;
             if let Some((label, err)) = dead.into_iter().next() {
-                warn!("  {label} health probe failed mid-observation: {err}");
-                return ObserveOutcome::ServiceDied {
-                    label,
-                    detail: err.to_string(),
-                };
+                warn!("  {label} health probe failed mid-wait: {err}");
+                // Don't abort — single probe failure could be transient.
+                // If it stays dead, downstream checks will catch it.
             }
 
             // Live metrics: scrape, compute deltas vs previous, log.

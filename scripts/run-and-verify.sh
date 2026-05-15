@@ -22,6 +22,7 @@ JSON_FLAG=""
 JSON_DIR_FLAG=""
 STRICT_FLAG=""
 LIVE_METRICS_FLAG=""
+SKIP_FINALIZATION_FLAG=""
 TIMEOUT=3600
 MIN_EPOCHS=2
 TARGET_EPOCH=7
@@ -39,9 +40,10 @@ usage() {
     echo "  --json-dir DIR      Save JSON report to DIR/{enclave}.json (implies --json)"
     echo "  --strict            Promote WARN to FAIL (zero bids, zero deliveries)"
     echo "  --live-metrics      Show counter deltas every 30s during observation"
+    echo "  --skip-finalization Skip chain finality check (use when observing early epochs)"
     echo "  --timeout SECS      Readiness timeout (default: 1500)"
     echo "  --min-epochs N      Observation window in epochs (default: 2)"
-    echo "  --target-epoch N    Wait until this epoch before checks (default: 5)"
+    echo "  --target-epoch N    Observation window starts at this epoch (default: 5)"
     echo "  -v, --verbose       Verbose logging"
     echo "  -h, --help          Show this help"
     exit 0
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --json-dir)   JSON_DIR_FLAG="--output-dir $2"; JSON_FLAG="--json"; shift 2;;
         --strict)     STRICT_FLAG="--strict"; shift;;
         --live-metrics) LIVE_METRICS_FLAG="--live-metrics"; shift;;
+        --skip-finalization) SKIP_FINALIZATION_FLAG="--skip-finalization-check"; shift;;
         --timeout)    TIMEOUT="$2"; shift 2;;
         --min-epochs) MIN_EPOCHS="$2"; shift 2;;
         --target-epoch) TARGET_EPOCH="$2"; shift 2;;
@@ -128,4 +131,5 @@ cargo run --bin cb-verify --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
     $JSON_DIR_FLAG \
     $STRICT_FLAG \
     $LIVE_METRICS_FLAG \
+    $SKIP_FINALIZATION_FLAG \
     $VERBOSE
