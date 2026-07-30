@@ -235,10 +235,13 @@ def build_helix_relay_config():
     """
     return """instance_id: "helix-kurtosis-test"
 
-network_config: !Custom
-  dir_path: "{{ .GENESIS_CONFIG_MOUNT_PATH_ON_CONTAINER }}/config.json"
-  genesis_validator_root: "{{ .GENESIS_VALIDATORS_ROOT }}"
-  genesis_time: {{ .GENESIS_TIME }}
+# NOTE: no network/genesis section. Current helix-relay:main removed the old
+# `network_config: !Custom {dir_path, genesis_validator_root, genesis_time}`
+# field entirely; the relay now fetches the chain spec + genesis from the
+# beacon node at startup (GET eth/v1/config/spec + eth/v1/beacon/genesis, see
+# beacon_client.get_chain_info -> main.rs load_chain_info). A `!Custom` YAML
+# tag on that now-unknown key makes serde_yaml panic with
+# "untagged and internally tagged enums do not support enum input".
 
 postgres:
   hostname: "{{ .POSTGRES_HOST_NAME }}"
@@ -292,12 +295,25 @@ admin_token: "test_admin_token"
 logging:
   type: Console
 
+# CoresConfig (helix_common::config CoresConfig, 10 fields in current
+# :main). The old block used `sub_workers: [0]` and omitted the per-tile
+# core assignments; current :main removed sub_workers and added
+# decoder/simulator/top_bid/data_gatherer/block_merging/housekeeper. The
+# outer RelayConfigExt flattens RelayConfig, so a wrong/missing cores field
+# surfaces as a top-level "missing field `decoder`" / "invalid type ...
+# expected usize|sequence" serde error. Verified against the binary:
+# `decoder` is Vec<usize> ([0]); the other five new tile fields are usize.
 cores:
   auctioneer: 0
-  sub_workers: [0]
-  reg_workers: [0]
   tokio: [0]
+  reg_workers: [0]
   tcp_bid_submissions_tile: 2
+  decoder: [0]
+  simulator: 0
+  top_bid: 0
+  data_gatherer: 0
+  block_merging: 0
+  housekeeper: 0
 
 is_local_dev: false"""
 
