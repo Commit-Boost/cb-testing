@@ -100,6 +100,42 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Advisory: report host memory before a ~10-min run and warn if the box is
+# genuinely tight (a truly exhausted host can stall the kurtosis launch or thrash
+# the whole run). NOTE: this is NOT what killed the relays in the 2026-07-31 run —
+# that was a PER-CONTAINER cgroup OOM (CONSTRAINT_MEMCG) at the relays' own
+# RELAY_MAX_MEMORY cap, fixed by raising that cap in the ethereum-package
+# launchers, independent of host memory. Non-blocking; set LOW_MEM_ABORT=1 to abort.
+check_host_memory() {
+    local need_mb=24000  # ~2x8GB relays + ~10 services + headroom
+    local avail_mb swap_total_mb swap_free_mb swap_used_mb
+    avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    swap_total_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
+    swap_free_mb=$(awk '/SwapFree/ {print int($2/1024)}' /proc/meminfo)
+    swap_used_mb=$(( swap_total_mb - swap_free_mb ))
+    echo "Host memory: ${avail_mb}MB available; swap ${swap_used_mb}/${swap_total_mb}MB used."
+    if (( avail_mb < need_mb )); then
+        echo "" >&2
+        echo "⚠️  HOST MEMORY LOW — a devnet wants ~${need_mb}MB available; the launch may stall" >&2
+        echo "    or the run may thrash. Top memory consumers to consider freeing:" >&2
+        ps -eo rss,comm --sort=-rss 2>/dev/null | awk 'NR>1 && NR<=6 {printf "      %5.1f GB  %s\n", $1/1024/1024, $2}' >&2
+        if [[ "${LOW_MEM_ABORT:-0}" == "1" ]]; then
+            echo "    Aborting (LOW_MEM_ABORT=1)." >&2
+            exit 2
+        fi
+        echo "    Proceeding anyway (set LOW_MEM_ABORT=1 to abort instead)." >&2
+        echo "" >&2
+    fi
+}
+
+# Step 0: Pre-build the verifier BEFORE the devnet is up — a `cargo run --release`
+# on cb-verify is a multi-GB compile; keeping it off the critical path (it used to
+# run mid-devnet) means the box isn't compiling while 10 services are live. Compile
+# while idle, then invoke the built binary.
+echo "Building cb-verify (release) before launch..."
+cargo build --release --bin cb-verify --manifest-path "$REPO_DIR/Cargo.toml"
+CB_VERIFY_BIN="$REPO_DIR/target/release/cb-verify"
+
 # Step 1: Clean any stale enclave with the same name
 echo "Cleaning stale enclave '$ENCLAVE' (if any)..."
 kurtosis enclave rm -f "$ENCLAVE" 2>/dev/null || true
@@ -124,6 +160,10 @@ else
 fi
 echo ""
 
+# Step 1c: Host memory check (warn before spending ~10min on a run the OOM-killer
+# would wreck).
+check_host_memory
+
 # Step 2: Launch the devnet
 echo "Launching devnet..."
 echo "  Package: $PACKAGE"
@@ -146,8 +186,8 @@ echo ""
 echo "Enclave '$ENCLAVE' is up. Starting verification..."
 echo ""
 
-# Step 3: Run verification
-cargo run --bin cb-verify --manifest-path "$REPO_DIR/Cargo.toml" --release -- \
+# Step 3: Run verification (pre-built binary from Step 0 — no mid-devnet compile).
+"$CB_VERIFY_BIN" \
     --enclave "$ENCLAVE" \
     --config "$CONFIG" \
     --timeout "$TIMEOUT" \
