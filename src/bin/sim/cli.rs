@@ -48,5 +48,9 @@ pub enum Command {
         /// Directory to write the generated `<scenario>.yml` files into.
         #[arg(long, default_value = "configs/generated")]
         out_dir: PathBuf,
+        /// Don't write; instead verify the on-disk configs already match what the
+        /// generator would produce, and exit nonzero on any drift (CI / agent gate).
+        #[arg(long)]
+        check: bool,
     },
 }

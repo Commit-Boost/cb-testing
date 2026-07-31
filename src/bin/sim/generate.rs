@@ -26,17 +26,7 @@ pub fn run(scenario: Option<&str>, out_dir: &Path) -> Result<()> {
 /// the Python's pre-write `load_pubkeys` + `sys.exit(1)` all-or-nothing contract.
 fn run_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Path) -> Result<()> {
     let images = images_from_env(env_path);
-
-    let scenarios: Vec<Scenario> = match scenario {
-        Some(name) => vec![Scenario::from_name(name)
-            .ok_or_else(|| eyre!("unknown scenario {name:?}; expected one of {:?}", names()))?],
-        None => Scenario::ALL.to_vec(),
-    };
-
-    let outputs: Vec<(String, String)> = scenarios
-        .iter()
-        .map(|s| Ok((s.name().to_string(), s.args_file_in(&images, keys_dir)?)))
-        .collect::<Result<Vec<_>>>()?;
+    let outputs = assemble(scenario, &images, keys_dir)?;
 
     fs::create_dir_all(out_dir)
         .wrap_err_with(|| format!("creating output dir {}", out_dir.display()))?;
@@ -49,6 +39,52 @@ fn run_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Pa
     }
 
     Ok(())
+}
+
+/// Verify the on-disk configs already match what the generator would produce,
+/// WITHOUT writing (CI / agent drift gate). Errors (nonzero exit) on any drift.
+pub fn check(scenario: Option<&str>, out_dir: &Path) -> Result<()> {
+    check_in(scenario, out_dir, Path::new("keys"), Path::new(".env"))
+}
+
+fn check_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Path) -> Result<()> {
+    let images = images_from_env(env_path);
+    let outputs = assemble(scenario, &images, keys_dir)?;
+
+    let mut drift: Vec<String> = Vec::new();
+    for (name, body) in &outputs {
+        let path = out_dir.join(format!("{name}.yml"));
+        match fs::read_to_string(&path) {
+            Ok(on_disk) if &on_disk == body => println!("ok    {}", path.display()),
+            Ok(_) => drift.push(format!("{} differs from `sim generate`", path.display())),
+            Err(_) => drift.push(format!("{} missing (would be created)", path.display())),
+        }
+    }
+
+    if drift.is_empty() {
+        Ok(())
+    } else {
+        Err(eyre!(
+            "{} config(s) out of date — run `just generate-configs`:\n  {}",
+            drift.len(),
+            drift.join("\n  ")
+        ))
+    }
+}
+
+/// Select scenarios and assemble each `(name, body)`. Reads mux key files (the
+/// only fallible step) — shared by `run` and `check` so both fail identically
+/// before touching the filesystem.
+fn assemble(scenario: Option<&str>, images: &Images, keys_dir: &Path) -> Result<Vec<(String, String)>> {
+    let scenarios: Vec<Scenario> = match scenario {
+        Some(name) => vec![Scenario::from_name(name)
+            .ok_or_else(|| eyre!("unknown scenario {name:?}; expected one of {:?}", names()))?],
+        None => Scenario::ALL.to_vec(),
+    };
+    scenarios
+        .iter()
+        .map(|s| Ok((s.name().to_string(), s.args_file_in(images, keys_dir)?)))
+        .collect()
 }
 
 fn names() -> Vec<&'static str> {
@@ -130,6 +166,26 @@ mod tests {
             let expected = s.args_file_in(&images, Path::new("keys")).unwrap();
             assert_eq!(produced, expected, "{} on-disk body", s.name());
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--check` passes when on-disk configs match the generator, and fails
+    /// (Err → nonzero exit) when one has drifted.
+    #[test]
+    fn check_passes_when_current_and_fails_on_drift() {
+        let dir = std::env::temp_dir().join(format!("sim-check-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        run(None, &dir).expect("seed");
+        // Fresh output → check is clean.
+        check(None, &dir).expect("check should pass on freshly-generated configs");
+        // Mutate one file → check must fail.
+        let f = dir.join("cb-basic.yml");
+        let mut body = fs::read_to_string(&f).unwrap();
+        body.push_str("\n# hand-edit\n");
+        fs::write(&f, body).unwrap();
+        let err = check(None, &dir).unwrap_err();
+        assert!(err.to_string().contains("out of date"), "got: {err}");
+        assert!(err.to_string().contains("cb-basic.yml"), "names the drifted file: {err}");
         let _ = fs::remove_dir_all(&dir);
     }
 

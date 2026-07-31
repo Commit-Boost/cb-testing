@@ -28,13 +28,21 @@ fn main() {
     match cli.command {
         Command::Preflight { args_file } => preflight(&args_file),
         Command::Triage { enclave } => triage(&enclave),
-        Command::Generate { scenario, out_dir } => generate(scenario.as_deref(), &out_dir),
+        Command::Generate { scenario, out_dir, check } => {
+            generate(scenario.as_deref(), &out_dir, check)
+        }
     }
 }
 
-/// Generate Kurtosis args-files (Task 1). Implemented in `generate::run`.
-fn generate(scenario: Option<&str>, out_dir: &Path) {
-    if let Err(e) = generate::run(scenario, out_dir) {
+/// Generate Kurtosis args-files (Task 1), or `--check` them (P2 drift gate).
+/// Implemented in `generate::run` / `generate::check`.
+fn generate(scenario: Option<&str>, out_dir: &Path, check: bool) {
+    let result = if check {
+        generate::check(scenario, out_dir)
+    } else {
+        generate::run(scenario, out_dir)
+    };
+    if let Err(e) = result {
         tracing::error!(error = %e, "sim generate failed");
         eprintln!("generate error: {e:?}");
         std::process::exit(1);
