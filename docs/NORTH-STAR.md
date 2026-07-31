@@ -127,9 +127,17 @@ P1 verbs (`preflight`, `triage`) directly as Rust so they are the first slices o
 - **P1 — the agent loop (highest leverage, independent):** `sim preflight <config>` (render + real-image
   parse, ~1s) and auto-triage (dump every non-RUNNING service's logs + root panic into the JSON report
   on any failure, including launch-phase). Wraps the EXISTING setup; unblocks everything else. Do first.
-- **P2 — typed config gen:** build CB config from `cb_common` structs; owned helix mirror; delete the
-  Python generator. P1's preflight guards the migration. Collapses smells 1+2 and shrinks the fork's
-  template duplication.
+- **P2 — LANDED (as consolidation, NOT typed mirrors):** three adversarial grills + a direct diff killed
+  the "build CB config from `cb_common` structs / owned typed helix mirror" plan — the "6 duplicated
+  templates" premise was false (helix is byte-identical across all 6 scenarios; CB varies <=7 lines), a
+  helix mirror gains no compile guard (types aren't importable), and the serde mechanism is fragile
+  (sentinel collisions). Instead the Python generator was PORTED VERBATIM into `sim generate` (const
+  templates; the `{{ }}` runtime holes the ethereum-package fills at launch stay literal), with typing
+  only at the assembly layer (a `Scenario` enum + one `Images` map that fixed the live-wrong
+  `commit-boost/pbs` default). Byte-identity to golden is the oracle. Details +the grill trail:
+  `docs/plans/P2-consolidate-config-gen.md`. **NOTE for J:** this outcome tensions with Law 1's premise
+  ("built from `cb_common` structs ... a renamed field is a compile error") — a hand-written mirror is
+  still hand-mirrored and preflight stays the only real guard; consider revising Law 1's mechanism claim.
 - **P3 — coverage as assertions + TDD:** every scenario asserts its feature fired (Law 3); unit-test the
   verdict math (Law 4); add one alternate EL/CL pair (Law 7). Each new CB feature ships with its sim
   scenario, like a unit test.
