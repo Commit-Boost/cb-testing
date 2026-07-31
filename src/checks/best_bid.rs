@@ -9,8 +9,9 @@
 //! offered to the proposer (that source over-stated the bid and false-alarmed).
 //! These log events are full-coverage (every getHeader is logged), so there is no
 //! slot sampling. The delivered value comes from the relay data API (the actually
-//! delivered payload). Values are compared in GWEI so sub-gwei rounding between
-//! the two sources can't produce spurious "value left on the table" warnings.
+//! delivered payload). Both `value_eth` (parsed decimal->wei, exactly, no float)
+//! and the delivered U256 are exact wei of the same quantity, so they compare
+//! directly — a correct selection delivers the winning bid's exact value.
 
 use std::collections::BTreeMap;
 
@@ -19,8 +20,6 @@ use alloy_primitives::U256;
 use crate::checks::CheckResult;
 use crate::checks::mux_routing::{fetch_service_logs, parse_cb_log_line};
 use crate::relay::RelayClient;
-
-const WEI_PER_GWEI: u128 = 1_000_000_000;
 
 /// Parse a `value_eth` decimal string (e.g. "0.050439063999832000") to integer
 /// wei, WITHOUT floating point (exact). Returns None on a malformed value.
@@ -44,6 +43,8 @@ pub fn value_eth_to_wei(s: &str) -> Option<u128> {
         frac18.push('0');
     }
     let combined = format!("{whole}{frac18}");
+    // Genuine zero and (physically impossible) u128 overflow both collapse to 0,
+    // which understates a bid — the safe direction (never a false shortfall).
     combined
         .trim_start_matches('0')
         .parse::<u128>()
@@ -51,14 +52,8 @@ pub fn value_eth_to_wei(s: &str) -> Option<u128> {
         .or(Some(0))
 }
 
-fn wei_to_gwei(wei: u128) -> u128 {
-    wei / WEI_PER_GWEI
-}
-
-fn u256_wei_to_gwei(v: U256) -> u128 {
-    (v / U256::from(WEI_PER_GWEI))
-        .try_into()
-        .unwrap_or(u128::MAX)
+fn u256_wei_to_u128(v: U256) -> u128 {
+    v.try_into().unwrap_or(u128::MAX)
 }
 
 /// Verify aggregated bidding for a multi-relay run. SKIPs single-relay runs (no
@@ -79,7 +74,8 @@ pub async fn check_best_bid_selection(
         );
     }
 
-    // Per-relay offered bids, in gwei, from CB "received new header" getHeader logs.
+    // Per-relay offered bids (wei) from CB "received new header" getHeader logs,
+    // restricted to the observation window so they line up with delivered data.
     let mut bids_by_slot: BTreeMap<u64, Vec<(String, u128)>> = BTreeMap::new();
     for service in cb_service_names {
         let logs = match fetch_service_logs(enclave, service) {
@@ -96,25 +92,28 @@ pub async fn check_best_bid_selection(
             let (Some(slot), Some(relay_id)) = (ev.slot, ev.relay_id.as_ref()) else {
                 continue;
             };
+            if slot < start_slot || slot > end_slot {
+                continue;
+            }
             let Some(wei) = ev.fields.get("value_eth").and_then(|v| value_eth_to_wei(v)) else {
                 continue;
             };
             bids_by_slot
                 .entry(slot)
                 .or_default()
-                .push((relay_id.clone(), wei_to_gwei(wei)));
+                .push((relay_id.clone(), wei));
         }
     }
 
-    // Delivered (winning) value per slot, in gwei, from the relay data API.
+    // Delivered (winning) value per slot (wei) from the relay data API.
     let mut delivered_by_slot: BTreeMap<u64, u128> = BTreeMap::new();
     for relay in relays {
         if let Ok(payloads) = relay.get_payloads_delivered(start_slot, end_slot).await {
             for p in payloads {
-                let g = u256_wei_to_gwei(p.value);
-                let e = delivered_by_slot.entry(p.slot).or_insert(g);
-                if g > *e {
-                    *e = g;
+                let w = u256_wei_to_u128(p.value);
+                let e = delivered_by_slot.entry(p.slot).or_insert(w);
+                if w > *e {
+                    *e = w;
                 }
             }
         }
@@ -125,11 +124,14 @@ pub async fn check_best_bid_selection(
 
 /// Pure verdict logic (Law 4 seam; generic over the value type so tests use a
 /// trivial `V`). Contract:
-/// - NO slot had >=2 relays offering bids → WARN: aggregation was never exercised,
-///   so we do NOT green "aggregated bidding verified".
-/// - a competitive slot where the delivered value < the best OFFERED bid →
-///   suboptimal selection (value left on the table) → recorded, verdict WARN.
-/// - otherwise → PASS.
+/// - NO slot had >=2 relays offering bids → WARN: aggregation was never exercised.
+/// - competitive slots exist but NONE had a delivered payload to compare against →
+///   WARN: nothing was actually verified (a competitive slot only counts as
+///   verified when we have a delivered value for it — otherwise we'd green having
+///   compared nothing, the Law 3 false-green).
+/// - a VERIFIED competitive slot where delivered < the best OFFERED bid →
+///   suboptimal selection → recorded, verdict WARN.
+/// - otherwise → PASS, over the verified competitive slots.
 pub fn classify_best_bid<V>(
     bids_by_slot: &BTreeMap<u64, Vec<(String, V)>>,
     delivered_by_slot: &BTreeMap<u64, V>,
@@ -165,12 +167,16 @@ where
         );
     }
 
+    // Only a competitive slot WITH a delivered value can actually be verified.
+    let mut verified = 0usize;
     let mut suboptimal = Vec::new();
     for (slot, bids) in &competitive {
+        let Some(delivered) = delivered_by_slot.get(slot) else {
+            continue;
+        };
+        verified += 1;
         let best = bids.iter().map(|(_, v)| *v).max().unwrap(); // competitive => non-empty
-        if let Some(delivered) = delivered_by_slot.get(slot)
-            && *delivered < best
-        {
+        if *delivered < best {
             suboptimal.push(serde_json::json!({
                 "slot": slot,
                 "best_offered_bid": best.to_string(),
@@ -182,17 +188,30 @@ where
     let n = competitive.len();
     let data = serde_json::json!({
         "competitive_slots": n,
+        "verified_slots": verified,
+        "unverified_slots": n - verified,
         "suboptimal_count": suboptimal.len(),
         "suboptimal": suboptimal,
     });
 
-    if suboptimal.is_empty() {
+    if verified == 0 {
+        CheckResult::warn(
+            "relay.best_bid",
+            2,
+            format!(
+                "{n} competitive slot(s) had multi-relay bids but NONE had a delivered payload to \
+                 compare against (out of window, or the slot was missed) — best-bid selection was \
+                 not actually verified."
+            ),
+        )
+        .with_data(data)
+    } else if suboptimal.is_empty() {
         CheckResult::pass(
             "relay.best_bid",
             2,
             format!(
-                "Aggregated bidding verified across {n} competitive slot(s): CB delivered >= the \
-                 best offered per-relay bid."
+                "Aggregated bidding verified across {verified} competitive slot(s) with delivered \
+                 payloads: CB delivered >= the best offered per-relay bid."
             ),
         )
         .with_data(data)
@@ -201,8 +220,8 @@ where
             "relay.best_bid",
             2,
             format!(
-                "{} of {n} competitive slot(s) delivered LESS than the best offered bid (value left \
-                 on the table — possible misrouting or a late/withdrawn bid).",
+                "{} of {verified} verified competitive slot(s) delivered LESS than the best offered \
+                 bid (may be a late, rejected, or ineligible header — value left on the table).",
                 suboptimal.len()
             ),
         )
@@ -252,6 +271,7 @@ mod tests {
         let d = delivered(&[(5, 150)]);
         let r = classify_best_bid(&b, &d);
         assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["verified_slots"], 1);
         assert_eq!(r.data["suboptimal_count"], 0);
     }
 
@@ -262,5 +282,21 @@ mod tests {
         let r = classify_best_bid(&b, &d);
         assert_eq!(r.status, CheckStatus::Warn);
         assert_eq!(r.data["suboptimal_count"], 1);
+    }
+
+    #[test]
+    fn best_bid_warn_when_competitive_but_nothing_delivered_to_compare() {
+        // The Law 3 guard: a competitive slot with NO delivered payload (out of
+        // window / missed) must NOT count as verified → WARN, never PASS.
+        let b = bids(&[(5, &[("relay-a", 100), ("relay-b", 150)])]);
+        let d = delivered(&[(9999, 100)]); // different slot; slot 5 has no delivery
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(
+            r.status,
+            CheckStatus::Warn,
+            "must not PASS having verified nothing"
+        );
+        assert_eq!(r.data["verified_slots"], 0);
+        assert_eq!(r.data["unverified_slots"], 1);
     }
 }
