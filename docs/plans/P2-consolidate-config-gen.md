@@ -145,10 +145,29 @@ Note: the helix block is byte-identical in every scenario (do not add per-scenar
 - **Typed serde config mirrors** — refuted above (no duplication to kill, no guard gained, fragile). If CB
   config ever actually drifts (it hasn't; helix is the drifter), revisit — but only behind a real CB-image
   preflight, not golden-equivalence.
-- **CB-image preflight** (fill P1's `Inconclusive` stub) — needs the real CB image to parse the TOML, whose
-  `chain` deserialize reads a spec file off disk (needs a mounted dummy spec). Its own slice (P2.5). Until
-  then CB parity rests on byte-identity to the known-good golden. Also note: mux's `{{ index .Relays N }}`
-  has no dummy in `render.rs`, so the mux CB block is not preflightable today (document, don't paper over).
+- **CB-image preflight** (fill P1's `Inconclusive` stub) — **PROBED 2026-07-30; deferred to J as a
+  trust-model call, NOT built.** Empirical findings from `commit-boost/commit-boost:kurtosis` (entrypoint
+  `commit-boost pbs`, reads `CB_CONFIG`):
+  - CB parses the TOML EAGERLY and errors fast + structured (like helix). A config with a valid dummy relay
+    (use `DEFAULT_MEV_PUBKEY` for the RelayEntry) deserializes, then hits `Unable to find chain spec file:
+    "mainnet"` at `crates/common/src/types.rs:442` — that post-deserialize chain-file boundary is the clean
+    PASS marker (no spec-file mount needed; the earlier "needs a mounted spec" worry was wrong — the chain
+    file loads AFTER structural validation).
+  - **BUT the coverage is PARTIAL and would FALSE-PASS the most likely drift.** `[[relays]]`/`[[mux]]` have
+    `deny_unknown_fields` so an unknown/renamed field there fails at deserialize (catchable → Fail). But
+    `[pbs]` is `#[serde(flatten)]` + const-default fields, so a RENAMED/misspelled pbs field
+    (`timeout_get_header_ms` → `timeout_get_header_XX`) is **silently ignored (default used) and reaches the
+    PASS marker** — verified. A CB preflight would thus report `commit_boost: pass` for a drifted-pbs config
+    and an exit-0 gate would let it through. That is an instrument that lies for the pbs-field drift class
+    ([[pilot-breaks-the-instrument]]). So this is NOT a clean autonomous build.
+  - **Decision for J:** (a) keep the honest `Inconclusive` stub (validates nothing but claims nothing), or
+    (b) ship a PARTIAL CB preflight that catches relay/mux/required-field drift but false-passes pbs-field
+    drift — only acceptable if the Pass is scoped honestly AND we accept the exit-0 gate can pass pbs drift.
+    Given CB is our own byte-verified-generated config (our port can't drift silently — the golden test
+    guards it), the marginal value of (b) is low and the false-pass risk is real; recommendation leans (a)
+    until CB config is actually authored by hand somewhere. Fixtures for (b) are captured if J wants it.
+  - Also: mux's `{{ index .Relays N }}` has no dummy in `render.rs`, so the mux CB block needs its own
+    dummy-relay substitution (not the strip-the-loop path) before it could be preflighted.
 
 ## Flagged for J (higher-value-than-typing, per the scope grill — do NOT start without a nod)
 The scope grill argued P3's false greens outrank config-gen ergonomics: the mux pass-gate keys on
