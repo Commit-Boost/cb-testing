@@ -56,11 +56,21 @@ jobs:
           kurtosis analytics disable
           echo "$(dirname $(which kurtosis))" >> $GITHUB_PATH
 
+      - name: Generate cb-basic config
+        # The Python generator + its checked-in example config were retired (P2);
+        # `sim generate` is now the source. The nightly builds no commit-boost
+        # image, so pin the public CB image the old example config used.
+        # NOTE (for review): confirm ghcr.io/commit-boost/pbs:latest is current
+        # enough for the SSZ-era cb-verify checks, or switch to building the image.
+        run: |
+          echo "MEV_BOOST_IMAGE=ghcr.io/commit-boost/pbs:latest" > .env
+          cargo run --bin sim -- generate cb-basic
+
       - name: Launch devnet + verify
         timeout-minutes: 60
         run: |
           ./scripts/run-and-verify.sh \
-            --config configs/example-kurtosis-config.yml \
+            --config configs/generated/cb-basic.yml \
             --json \
             --live-metrics \
             --min-epochs "${{ github.event.inputs.min_epochs }}" \
