@@ -330,6 +330,24 @@ mod tests {
     }
 
     #[test]
+    fn tracked_cb_basic_config_stays_in_sync_with_sim_generate() {
+        // configs/generated/cb-basic.yml is TRACKED (render.rs's fixture + what
+        // `sim preflight` validates). Guard it against silently drifting from the
+        // generator — the staleness class that rotted the old example config.
+        let tracked = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/configs/generated/cb-basic.yml"
+        ));
+        let produced = Scenario::Basic
+            .args_file_in(&Images::default(), Path::new("keys"))
+            .unwrap();
+        assert_eq!(
+            produced, tracked,
+            "configs/generated/cb-basic.yml is stale — run `just generate-configs`"
+        );
+    }
+
+    #[test]
     fn mux_with_missing_keys_is_a_clean_error_not_a_panic() {
         // The mux scenario reads keys/*.json; a missing dir must surface as an
         // Err (which `run` turns into a clean exit), never a panic mid-generation.
