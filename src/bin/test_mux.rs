@@ -159,16 +159,16 @@ fn main() {
             for entry in &entries {
                 if entry.validator_pubkeys.iter().any(|e| e.to_lowercase() == pk_norm) {
                     checked += 1;
-                    if let Some(ref actual_mux) = event.mux_id {
-                        if actual_mux != &entry.id {
-                            violations += 1;
-                            println!(
-                                "  VIOLATION: pubkey {} should route to '{}' but routed to '{}'",
-                                &pk[..20.min(pk.len())],
-                                entry.id,
-                                actual_mux
-                            );
-                        }
+                    if let Some(ref actual_mux) = event.mux_id
+                        && actual_mux != &entry.id
+                    {
+                        violations += 1;
+                        println!(
+                            "  VIOLATION: pubkey {} should route to '{}' but routed to '{}'",
+                            &pk[..20.min(pk.len())],
+                            entry.id,
+                            actual_mux
+                        );
                     }
                 }
             }
@@ -293,8 +293,7 @@ fn parse_mux_section<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>) -
 fn parse_pubkey_array(rest: &str, lines: &mut std::iter::Peekable<std::str::Lines>) -> Vec<String> {
     let mut accum = rest.to_string();
     if !accum.trim_end().ends_with(']') {
-        loop {
-            let Some(next) = lines.next() else { break };
+        for next in lines.by_ref() {
             accum.push('\n');
             accum.push_str(next);
             if next.trim().ends_with(']') { break; }
@@ -406,7 +405,7 @@ fn parse_line(line: &str) -> Option<CbEvent> {
     } else { line };
 
     // Strip ANSI escape codes
-    let line = strip_ansi_codes(&line);
+    let line = strip_ansi_codes(line);
 
     // Find message after "LEVEL : " or "LEVEL "
     let after_level: String = if let Some(pos) = line.find(" : ") {
@@ -419,8 +418,8 @@ fn parse_line(line: &str) -> Option<CbEvent> {
                 found = line[pos + lvl.len() + 2..].to_string();
                 break;
             }
-            if line.starts_with(lvl) {
-                found = line[lvl.len()..].trim_start().to_string();
+            if let Some(stripped) = line.strip_prefix(lvl) {
+                found = stripped.trim_start().to_string();
                 break;
             }
         }
@@ -435,15 +434,15 @@ fn parse_line(line: &str) -> Option<CbEvent> {
             let rest = &after_level[i + 1..];
             if rest.is_empty() { continue; }
             let first = rest.as_bytes()[0];
-            if first.is_ascii_alphabetic() || first == b'_' {
-                if let Some(eq_pos) = rest.find('=') {
-                    let key = &rest[..eq_pos];
-                    if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        let after_eq = &rest[eq_pos + 1..];
-                        if !after_eq.is_empty() {
-                            message_end = i;
-                            break;
-                        }
+            if (first.is_ascii_alphabetic() || first == b'_')
+                && let Some(eq_pos) = rest.find('=')
+            {
+                let key = &rest[..eq_pos];
+                if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    let after_eq = &rest[eq_pos + 1..];
+                    if !after_eq.is_empty() {
+                        message_end = i;
+                        break;
                     }
                 }
             }

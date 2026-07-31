@@ -129,14 +129,13 @@ pub async fn check_mev_delivery_rate(
             }
         }
     }
-    if delivered.is_empty() && last_error.is_some() {
+    if delivered.is_empty()
+        && let Some(err) = last_error
+    {
         return CheckResult::skip(
             "relay.mev_delivery_rate",
             2,
-            format!(
-                "No relay supports the data API. Last error: {}",
-                last_error.unwrap()
-            ),
+            format!("No relay supports the data API. Last error: {err}"),
         );
     }
 
@@ -357,7 +356,7 @@ pub async fn run_relay_checks(
                 CheckResult::pass(
                     "relay.builder_blocks_received",
                     2,
-                    format!("{}", details.join("; ")),
+                    details.join("; "),
                 )
                 .with_data(serde_json::json!({"count": total})),
             );

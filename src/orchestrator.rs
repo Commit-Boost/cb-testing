@@ -345,6 +345,9 @@ async fn main() -> Result<()> {
 // Per-enclave pipeline
 // ---------------------------------------------------------------------------
 
+// Launcher fn: threading these as individual params reads clearer than a
+// bespoke options struct that exists only for this one call site.
+#[allow(clippy::too_many_arguments)]
 async fn run_enclave_pipeline(
     mut enc: EnclaveStatus,
     package: &str,
@@ -502,24 +505,23 @@ async fn wait_for_enclave_readiness(
         let url = format!("{beacon_url}/eth/v1/beacon/headers/head");
         match client.get(&url).send().await {
             Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(slot) = json
+                if let Ok(json) = resp.json::<serde_json::Value>().await
+                    && let Some(slot) = json
                         .get("data")
                         .and_then(|d| d.get("header"))
                         .and_then(|h| h.get("message"))
                         .and_then(|m| m.get("slot"))
                         .and_then(|s| s.as_str())
                         .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        let epoch = slot / 32;
-                        if epoch >= target_epoch {
-                            return Ok(());
-                        }
-                        tracing::debug!(
-                            "[{}] Beacon at epoch {epoch}, waiting for {target_epoch}...",
-                            name
-                        );
+                {
+                    let epoch = slot / 32;
+                    if epoch >= target_epoch {
+                        return Ok(());
                     }
+                    tracing::debug!(
+                        "[{}] Beacon at epoch {epoch}, waiting for {target_epoch}...",
+                        name
+                    );
                 }
             }
             Err(e) => {
@@ -561,20 +563,18 @@ async fn observe_enclave(name: &str, min_epochs: u64, target_epoch: u64) -> Resu
         let url = format!("{beacon_url}/eth/v1/beacon/headers/head");
         match client.get(&url).send().await {
             Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(slot) = json
+                if let Ok(json) = resp.json::<serde_json::Value>().await
+                    && let Some(slot) = json
                         .get("data")
                         .and_then(|d| d.get("header"))
                         .and_then(|h| h.get("message"))
                         .and_then(|m| m.get("slot"))
                         .and_then(|s| s.as_str())
                         .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        if slot >= target_slot {
-                            info!("[{}] Observation complete: slot {start_slot} -> {slot}", name);
-                            return Ok(());
-                        }
-                    }
+                    && slot >= target_slot
+                {
+                    info!("[{}] Observation complete: slot {start_slot} -> {slot}", name);
+                    return Ok(());
                 }
             }
             Err(e) => {

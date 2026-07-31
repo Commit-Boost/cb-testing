@@ -173,6 +173,9 @@ async fn send<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) -> R
     resp.json::<T>().await.map_err(|e| format!("JSON error: {e}"))
 }
 
+// Mirrors the relay `proposer/delivered` data-API JSON schema; several fields
+// are deserialized to document the response shape but not yet read.
+#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
 struct PayloadDelivered {
     slot: String,
@@ -196,6 +199,9 @@ struct PayloadDelivered {
     num_tx: String,
 }
 
+// Mirrors the relay `builder/blocks` data-API JSON schema; several fields are
+// deserialized to document the response shape but not yet read.
+#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug, Clone)]
 struct BuilderBlock {
     slot: String,

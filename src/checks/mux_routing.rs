@@ -221,11 +221,11 @@ fn parse_mux_relay_body(
             continue;
         }
 
-        if let Some((key, raw_val)) = parse_key_value(trimmed) {
-            if key == "url" {
-                let val = raw_val.trim_matches('"');
-                return Ok(parse_relay_index_from_template(val));
-            }
+        if let Some((key, raw_val)) = parse_key_value(trimmed)
+            && key == "url"
+        {
+            let val = raw_val.trim_matches('"');
+            return Ok(parse_relay_index_from_template(val));
         }
     }
 
@@ -260,10 +260,7 @@ fn parse_pubkey_array(
     let mut accum = rest.to_string();
 
     if !accum.trim_end().ends_with(']') {
-        loop {
-            let Some(next) = lines.next() else {
-                break;
-            };
+        for next in lines.by_ref() {
             accum.push('\n');
             accum.push_str(next);
             if next.trim().ends_with(']') {
@@ -368,8 +365,8 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
                 found = line[pos + lvl.len() + 2..].to_string();
                 break;
             }
-            if line.starts_with(lvl) {
-                found = line[lvl.len()..].trim_start().to_string();
+            if let Some(stripped) = line.strip_prefix(lvl) {
+                found = stripped.trim_start().to_string();
                 break;
             }
         }
@@ -622,36 +619,35 @@ pub async fn check_mux_routing(
         if let Some(ref pk_norm) = event.validator {
             pubkeys_verified.insert(pk_norm.clone());
 
-            if let Some(expected_mux_id) = expected_mux.get(pk_norm) {
-                if let Some(ref actual_mux_id) = event.mux_id {
-                    if actual_mux_id != expected_mux_id {
-                        let expected_relay = entries
-                            .iter()
-                            .find(|e| e.id == *expected_mux_id)
-                            .map(|e| e.relay_identity.as_str())
-                            .unwrap_or("?");
-                        let actual_relay = entries
-                            .iter()
-                            .find(|e| e.id == *actual_mux_id)
-                            .map(|e| e.relay_identity.as_str())
-                            .unwrap_or("?");
+            if let Some(expected_mux_id) = expected_mux.get(pk_norm)
+                && let Some(ref actual_mux_id) = event.mux_id
+                && actual_mux_id != expected_mux_id
+            {
+                let expected_relay = entries
+                    .iter()
+                    .find(|e| e.id == *expected_mux_id)
+                    .map(|e| e.relay_identity.as_str())
+                    .unwrap_or("?");
+                let actual_relay = entries
+                    .iter()
+                    .find(|e| e.id == *actual_mux_id)
+                    .map(|e| e.relay_identity.as_str())
+                    .unwrap_or("?");
 
-                        violations.push(serde_json::json!({
-                            "slot": event.slot,
-                            "proposer_pubkey": format!("0x{pk_norm}"),
-                            "routed_to_mux": actual_mux_id,
-                            "routed_to_relay": actual_relay,
-                            "expected_mux": expected_mux_id,
-                            "expected_relay": expected_relay,
-                        }));
+                violations.push(serde_json::json!({
+                    "slot": event.slot,
+                    "proposer_pubkey": format!("0x{pk_norm}"),
+                    "routed_to_mux": actual_mux_id,
+                    "routed_to_relay": actual_relay,
+                    "expected_mux": expected_mux_id,
+                    "expected_relay": expected_relay,
+                }));
 
-                        warn!(
-                            "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
-                             '{expected_mux_id}' ({expected_relay}) but was routed to \
-                             '{actual_mux_id}' ({actual_relay})"
-                        );
-                    }
-                }
+                warn!(
+                    "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
+                     '{expected_mux_id}' ({expected_relay}) but was routed to \
+                     '{actual_mux_id}' ({actual_relay})"
+                );
             }
         }
     }
@@ -918,7 +914,8 @@ mod log_file_tests {
         ];
 
         for line in &lines {
-            let event = parse_cb_log_line(line).expect(&format!("should parse: {}", &line[..80]));
+            let event = parse_cb_log_line(line)
+                .unwrap_or_else(|| panic!("should parse: {}", &line[..80]));
             assert!(event.message.starts_with("using mux"), "message should start with 'using mux', got: {:?}", event.message);
             assert!(event.mux_id.is_some(), "mux_id should be Some");
             assert!(event.slot.is_some(), "slot should be Some");
@@ -953,7 +950,7 @@ mod log_file_tests {
     #[test]
     fn test_mux_event_filter() {
         // Test that the filter used in check_mux_routing matches parsed events
-        let lines = vec![
+        let lines = [
             "2026-05-07T04:28:26.004744Z DEBUG : using mux config mux_id=\"node_1_to_flashbots\" relays=1 pubkey=0x8ca49f0c slot=2 validator=0x8ca49f0c",
             "2026-05-07T04:28:26.009013Z INFO : received new header relay_id=\"mux_helix\" header_size_bytes=2891 slot=521 validator=0x98213294",
             "2026-05-07T04:28:26.011040Z INFO : auction winner relay_id=\"mux_helix\" value_eth=\"0.050439063999832000\" block_hash=0x15cd5f31 slot=521",
