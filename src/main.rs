@@ -12,14 +12,11 @@ use clap::Parser;
 use eyre::Result;
 use tracing::{debug, error, info, warn};
 
-mod beacon;
-mod checks;
-mod discovery;
+// Shared modules now live in the library crate; health/live are private to this bin.
+use cb_testnet_verifier::{beacon, checks, discovery, metrics, relay, report};
+
 mod health;
 mod live;
-mod metrics;
-mod relay;
-mod report;
 
 use beacon::BeaconClient;
 use checks::{CheckResult, CheckStatus};

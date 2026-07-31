@@ -104,6 +104,26 @@ trap cleanup EXIT
 echo "Cleaning stale enclave '$ENCLAVE' (if any)..."
 kurtosis enclave rm -f "$ENCLAVE" 2>/dev/null || true
 
+# Step 1b: Preflight gate — validate the config against the real images (~1s) BEFORE the ~10-min run.
+# `sim preflight` exits nonzero ONLY on a genuine config-drift Fail (Inconclusive/Pass proceed), so a
+# schema drift is caught here as a labeled failure instead of a masked runtime panic minutes into launch.
+# Best-effort: if the `sim` bin can't be built/run, warn and proceed (don't block the run on tooling).
+# LIMITATION (P1): preflight parses with whatever `:main` image is cached LOCALLY, while the run below pulls
+# with `--image-download always` — a `:main` that drifts between the two is a false-green window. Closing it
+# needs pull-then-pin-by-digest, which belongs to `sim run` (P2) that owns the pull.
+echo "Preflighting config against real images..."
+if cargo run --quiet --bin sim --manifest-path "$REPO_DIR/Cargo.toml" -- preflight "$CONFIG"; then
+    echo "Preflight OK (no config drift)."
+else
+    pf_rc=$?
+    if [[ $pf_rc -eq 1 ]]; then
+        echo "PREFLIGHT FAILED: config drift detected (see the Fail{field} above). Aborting launch." >&2
+        exit 1
+    fi
+    echo "Preflight could not run (rc=$pf_rc); proceeding without the gate." >&2
+fi
+echo ""
+
 # Step 2: Launch the devnet
 echo "Launching devnet..."
 echo "  Package: $PACKAGE"
@@ -111,10 +131,16 @@ echo "  Config:  $CONFIG"
 echo "  Enclave: $ENCLAVE"
 echo ""
 
-kurtosis run "$PACKAGE" \
+# On any launch failure, auto-fire triage (root-cause capture as a run property) before exiting.
+if ! kurtosis run "$PACKAGE" \
     --enclave "$ENCLAVE" \
     --args-file "$CONFIG" \
-    --image-download always
+    --image-download always; then
+    echo ""
+    echo "LAUNCH FAILED — triaging crashed services (structured root-cause capture)..." >&2
+    cargo run --quiet --bin sim --manifest-path "$REPO_DIR/Cargo.toml" -- triage "$ENCLAVE" || true
+    exit 1
+fi
 
 echo ""
 echo "Enclave '$ENCLAVE' is up. Starting verification..."

@@ -1,0 +1,8 @@
+2026-07-30T11:00:00.000Z INFO some-service: booting
+2026-07-30T11:00:00.050Z INFO some-service: loading configuration
+thread 'main' panicked at /app/crates/common/src/config.rs:203:51:
+failed to parse config file: Error("missing field `foobar`", line: 4, column: 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic_fmt

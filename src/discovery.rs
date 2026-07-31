@@ -157,7 +157,10 @@ fn parse_services(inspect_output: &str) -> Vec<ParsedService> {
 }
 
 /// Split a string on runs of 2+ whitespace characters.
-fn split_on_multi_space(s: &str) -> Vec<&str> {
+///
+/// Public so other bins (e.g. `sim triage`) can reuse the exact column split
+/// used to read the kurtosis `User Services` table, rather than re-deriving it.
+pub fn split_on_multi_space(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut start = None;
     let mut space_count = 0;
