@@ -67,6 +67,15 @@ Six scenarios are generated:
 ## Quick start
 
 ```bash
+# ONE-TIME: build the Commit-Boost image the devnet runs (from the sibling repo)
+just build-cb-image                 # -> commit-boost/commit-boost:kurtosis
+
+# From scratch: generate configs, pull public images, launch + verify
+just e2e                            # cb-basic
+just e2e configs/generated/cb-mux.yml
+
+# --- or the individual steps ---
+
 # Generate configs from .env
 just generate-configs
 

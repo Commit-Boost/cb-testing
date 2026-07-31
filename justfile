@@ -84,6 +84,26 @@ test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
 generate-configs:
     cargo run --quiet --bin sim -- generate
 
+# Build the Commit-Boost image the devnet runs, from the sibling commit-boost repo
+# (default ../commit-boost-client). Produces commit-boost/commit-boost:{{tag}};
+# keep it in sync with MEV_BOOST_IMAGE in .env. Helix is a PUBLIC image (not built).
+build-cb-image tag="kurtosis" cb_dir="../commit-boost-client":
+    cd {{cb_dir}} && just build-all {{tag}}
+
+# Pre-pull the public images the devnet needs so `kurtosis run` doesn't stall.
+# (The CB sidecar image is built locally — see build-cb-image.)
+pull-images:
+    docker pull ghcr.io/gattaca-com/helix-relay:main
+    docker pull ethpandaops/reth-rbuilder:develop
+    docker pull sigp/lighthouse:latest
+
+# One-command e2e: (re)generate configs, pull public images, launch + verify.
+# PREREQ (once): `just build-cb-image` — the CB image must exist locally.
+# Usage: just e2e            (cb-basic)
+#        just e2e configs/generated/cb-mux.yml
+e2e config="configs/generated/cb-basic.yml": generate-configs pull-images
+    just testnet {{config}}
+
 # Run kurtosis testnet with verification on target `config`.
 # Observes 1 epoch starting at target_epoch. Chain just needs to reach
 # end slot; checks query historical relay/beacon data (no real-time loop).
