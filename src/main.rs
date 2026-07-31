@@ -171,9 +171,10 @@ async fn main() -> Result<()> {
 /// The enclave name is required. The config is optional and used for
 /// mux verification.
 fn resolve_enclave_and_config(cli: &Cli) -> Result<(String, Option<String>)> {
-    let enclave = cli.enclave.clone().ok_or_else(|| {
-        eyre::eyre!("Must provide --enclave to specify a running enclave")
-    })?;
+    let enclave = cli
+        .enclave
+        .clone()
+        .ok_or_else(|| eyre::eyre!("Must provide --enclave to specify a running enclave"))?;
     Ok((enclave, cli.config.clone()))
 }
 
@@ -230,7 +231,13 @@ async fn run_verification(cli: &Cli) -> i32 {
 
     // --show-logs mode: print raw CB PBS logs and exit
     if cli.show_logs {
-        return show_cb_logs(&enclave_name, &services.cb_service_names, &now, cli.json, &save_report);
+        return show_cb_logs(
+            &enclave_name,
+            &services.cb_service_names,
+            &now,
+            cli.json,
+            &save_report,
+        );
     }
 
     if relays.is_empty() {
@@ -258,7 +265,11 @@ async fn run_verification(cli: &Cli) -> i32 {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to get current slot: {e}");
-                let report = make_error_report(&enclave_name, &now, &format!("Failed to get current slot: {e}"));
+                let report = make_error_report(
+                    &enclave_name,
+                    &now,
+                    &format!("Failed to get current slot: {e}"),
+                );
                 report::print_report(&report, cli.json);
                 save_report(&report);
                 return 2;
@@ -415,7 +426,10 @@ async fn run_verification(cli: &Cli) -> i32 {
         let report = make_error_report(
             &enclave_name,
             &now,
-            &format!("Chain did not reach slot {end_slot} within {}s", cli.timeout),
+            &format!(
+                "Chain did not reach slot {end_slot} within {}s",
+                cli.timeout
+            ),
         );
         report::print_report(&report, cli.json);
         save_report(&report);
@@ -574,7 +588,9 @@ async fn wait_for_slot(
     timeout: u64,
     live_opts: WaitLiveOpts<'_>,
 ) -> bool {
-    info!("Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)...");
+    info!(
+        "Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)..."
+    );
 
     let wait_start = Instant::now();
     let timeout_dur = Duration::from_secs(timeout);
@@ -635,7 +651,9 @@ async fn wait_for_slot(
                     }
                 },
                 None => {
-                    warn!("--live-metrics requested but metrics not HTTP-reachable; skipping live deltas");
+                    warn!(
+                        "--live-metrics requested but metrics not HTTP-reachable; skipping live deltas"
+                    );
                 }
             }
         }
@@ -659,9 +677,7 @@ async fn wait_for_slot(
             }
 
             // Live metrics: scrape, compute deltas vs previous, log.
-            if live_started
-                && let Some(url) = live_opts.metrics_url
-            {
+            if live_started && let Some(url) = live_opts.metrics_url {
                 match metrics::fetch_metrics(http, url).await {
                     Ok(curr) => {
                         let deltas =
@@ -697,7 +713,7 @@ fn show_cb_logs(
     json_mode: bool,
     save_report: &dyn Fn(&VerificationReport),
 ) -> i32 {
-    use crate::checks::mux_routing::{parse_cb_log_line, fetch_service_logs};
+    use crate::checks::mux_routing::{fetch_service_logs, parse_cb_log_line};
 
     println!("\n=== CB PBS Service Logs ===");
     println!("Enclave: {enclave_name}");
@@ -718,7 +734,14 @@ fn show_cb_logs(
                     total_events += 1;
                     if let Some(event) = parse_cb_log_line(line) {
                         parsed_events += 1;
-                        print!("  [{}] {}", event.message, event.slot.map(|s| format!("slot={}", s)).unwrap_or_default());
+                        print!(
+                            "  [{}] {}",
+                            event.message,
+                            event
+                                .slot
+                                .map(|s| format!("slot={}", s))
+                                .unwrap_or_default()
+                        );
                         if let Some(ref mux) = event.mux_id {
                             print!(" mux={}", mux);
                         }
@@ -743,7 +766,10 @@ fn show_cb_logs(
         }
     }
 
-    println!("\nTotal: {} log lines, {} parsed successfully", total_events, parsed_events);
+    println!(
+        "\nTotal: {} log lines, {} parsed successfully",
+        total_events, parsed_events
+    );
 
     let report = VerificationReport {
         enclave: enclave_name.to_string(),
@@ -753,7 +779,11 @@ fn show_cb_logs(
         checks: vec![CheckResult::pass(
             "logs",
             1,
-            format!("Fetched {} log lines from {} service(s)", total_events, cb_service_names.len()),
+            format!(
+                "Fetched {} log lines from {} service(s)",
+                total_events,
+                cb_service_names.len()
+            ),
         )],
     };
     report::print_report(&report, json_mode);

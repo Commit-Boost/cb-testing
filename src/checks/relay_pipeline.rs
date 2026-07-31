@@ -353,19 +353,18 @@ pub async fn run_relay_checks(
                 .sum();
             let details: Vec<&str> = bb_results.iter().map(|r| r.detail.as_str()).collect();
             results.push(
-                CheckResult::pass(
-                    "relay.builder_blocks_received",
-                    2,
-                    details.join("; "),
-                )
-                .with_data(serde_json::json!({"count": total})),
+                CheckResult::pass("relay.builder_blocks_received", 2, details.join("; "))
+                    .with_data(serde_json::json!({"count": total})),
             );
         } else {
-            let worst = bb_results.into_iter().max_by_key(|r| match r.status {
-                CheckStatus::Fail => 2,
-                CheckStatus::Warn => 1,
-                _ => 0,
-            }).unwrap();
+            let worst = bb_results
+                .into_iter()
+                .max_by_key(|r| match r.status {
+                    CheckStatus::Fail => 2,
+                    CheckStatus::Warn => 1,
+                    _ => 0,
+                })
+                .unwrap();
             results.push(worst);
         }
     }
@@ -390,11 +389,21 @@ pub async fn run_relay_checks(
         };
         let total_mev: u64 = mv_results
             .iter()
-            .map(|r| r.data.get("mev_blocks").and_then(|c| c.as_u64()).unwrap_or(0))
+            .map(|r| {
+                r.data
+                    .get("mev_blocks")
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0)
+            })
             .sum();
         let total_blocks: u64 = mv_results
             .iter()
-            .map(|r| r.data.get("total_blocks").and_then(|c| c.as_u64()).unwrap_or(0))
+            .map(|r| {
+                r.data
+                    .get("total_blocks")
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0)
+            })
             .sum();
         let details: Vec<&str> = mv_results.iter().map(|r| r.detail.as_str()).collect();
         let data = serde_json::json!({
@@ -404,23 +413,29 @@ pub async fn run_relay_checks(
                 (total_mev as f64 / total_blocks as f64 * 10000.0).round() / 10000.0
             } else { 0.0 },
         });
-        results.push(match best_status {
-            CheckStatus::Pass => CheckResult::pass(
-                "relay.mev_delivery_rate",
-                2,
-                format!("MEV delivery rate across all relays: {}", details.join("; ")),
-            ),
-            CheckStatus::Warn => CheckResult::warn(
-                "relay.mev_delivery_rate",
-                2,
-                format!("MEV delivery rate below threshold: {}", details.join("; ")),
-            ),
-            _ => CheckResult::fail(
-                "relay.mev_delivery_rate",
-                2,
-                format!("No MEV deliveries across any relay: {}", details.join("; ")),
-            ),
-        }.with_data(data));
+        results.push(
+            match best_status {
+                CheckStatus::Pass => CheckResult::pass(
+                    "relay.mev_delivery_rate",
+                    2,
+                    format!(
+                        "MEV delivery rate across all relays: {}",
+                        details.join("; ")
+                    ),
+                ),
+                CheckStatus::Warn => CheckResult::warn(
+                    "relay.mev_delivery_rate",
+                    2,
+                    format!("MEV delivery rate below threshold: {}", details.join("; ")),
+                ),
+                _ => CheckResult::fail(
+                    "relay.mev_delivery_rate",
+                    2,
+                    format!("No MEV deliveries across any relay: {}", details.join("; ")),
+                ),
+            }
+            .with_data(data),
+        );
     }
 
     // Tier 3: per-relay validator registration, aggregated to the worst status.

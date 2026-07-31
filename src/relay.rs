@@ -77,12 +77,8 @@ impl RelayClient {
             if let Some(ref c) = cursor {
                 req = req.query(&[("cursor", c)]);
             }
-            let resp: Vec<ProposerPayloadDelivered> = req
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let resp: Vec<ProposerPayloadDelivered> =
+                req.send().await?.error_for_status()?.json().await?;
 
             if resp.is_empty() {
                 break;

@@ -106,7 +106,11 @@ pub fn print_report(report: &VerificationReport, json_mode: bool) {
 /// Logs a warning on failure but does not return an error — the
 /// verification itself has already completed.
 pub fn save_json_report(report: &VerificationReport, output_dir: &str) {
-    let report_path = format!("{}/{}.json", output_dir.trim_end_matches('/'), report.enclave);
+    let report_path = format!(
+        "{}/{}.json",
+        output_dir.trim_end_matches('/'),
+        report.enclave
+    );
     match serde_json::to_string_pretty(report) {
         Ok(json) => match std::fs::write(&report_path, &json) {
             Ok(_) => {

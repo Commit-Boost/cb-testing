@@ -151,7 +151,10 @@ mod tests {
         // Images::defaults() must reproduce exactly these.
         let basic = golden("cb-basic");
         assert!(basic.contains("mev_boost_image: commit-boost/commit-boost:kurtosis"));
-        assert!(!basic.contains("commit-boost/pbs:kurtosis"), "the pbs bug must be gone");
+        assert!(
+            !basic.contains("commit-boost/pbs:kurtosis"),
+            "the pbs bug must be gone"
+        );
         assert!(basic.contains("helix_relay_image: ghcr.io/gattaca-com/helix-relay:main"));
     }
 }

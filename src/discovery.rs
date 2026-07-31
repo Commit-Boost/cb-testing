@@ -554,7 +554,10 @@ mod tests {
     fn test_relay_identity() {
         assert_eq!(relay_identity("helix-relay").as_deref(), Some("helix"));
         assert_eq!(relay_identity("Helix-Relay").as_deref(), Some("helix"));
-        assert_eq!(relay_identity("mev-relay-api").as_deref(), Some("flashbots"));
+        assert_eq!(
+            relay_identity("mev-relay-api").as_deref(),
+            Some("flashbots")
+        );
         assert_eq!(relay_identity("mev-rs-relay").as_deref(), Some("mev-rs"));
         // Non-relay services: function should not be called for these
         // in practice (is_relay_api_service filters them), but they

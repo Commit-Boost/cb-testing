@@ -227,7 +227,8 @@ fn log_tail(lines: &[&str]) -> String {
 mod tests {
     use super::*;
 
-    const SERDE_MISSING: &str = include_str!("../../../tests/fixtures/helix_serde_missing_field.log");
+    const SERDE_MISSING: &str =
+        include_str!("../../../tests/fixtures/helix_serde_missing_field.log");
     const PREGENESIS: &str = include_str!("../../../tests/fixtures/helix_pregenesis_unwrap.log");
     const INVENTED: &str = include_str!("../../../tests/fixtures/invented_field.log");
     const MULTI_MASKED: &str = include_str!("../../../tests/fixtures/multi_masked.log");

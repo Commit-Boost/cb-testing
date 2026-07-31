@@ -16,7 +16,10 @@ use std::time::Duration;
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: {} <relay_url> <start_slot> <end_slot> [pubkey]", args[0]);
+        eprintln!(
+            "Usage: {} <relay_url> <start_slot> <end_slot> [pubkey]",
+            args[0]
+        );
         eprintln!("Example: {} http://127.0.0.1:59945 128 160", args[0]);
         std::process::exit(1);
     }
@@ -42,7 +45,12 @@ async fn main() {
             Ok(payloads) => {
                 println!("  Total payloads available: {}", payloads.len());
                 for p in &payloads {
-                    println!("    slot={} value={} proposer={}...", p.slot, p.value, &p.proposer_pubkey[..20.min(p.proposer_pubkey.len())]);
+                    println!(
+                        "    slot={} value={} proposer={}...",
+                        p.slot,
+                        p.value,
+                        &p.proposer_pubkey[..20.min(p.proposer_pubkey.len())]
+                    );
                 }
             }
             Err(e) => println!("  FAIL: {e}"),
@@ -76,31 +84,57 @@ async fn main() {
                         println!("  Page {page}: empty, done");
                         break;
                     }
-                    let min_slot = payloads.iter().filter_map(|p| p.slot.parse::<u64>().ok()).min().unwrap_or(0);
-                    let max_slot = payloads.iter().filter_map(|p| p.slot.parse::<u64>().ok()).max().unwrap_or(0);
+                    let min_slot = payloads
+                        .iter()
+                        .filter_map(|p| p.slot.parse::<u64>().ok())
+                        .min()
+                        .unwrap_or(0);
+                    let max_slot = payloads
+                        .iter()
+                        .filter_map(|p| p.slot.parse::<u64>().ok())
+                        .max()
+                        .unwrap_or(0);
                     let page_len = payloads.len();
-                    let in_range: Vec<_> = payloads.into_iter().filter(|p| {
-                        let s: u64 = p.slot.parse().unwrap_or(0);
-                        s >= start_slot && s <= end_slot
-                    }).collect();
+                    let in_range: Vec<_> = payloads
+                        .into_iter()
+                        .filter(|p| {
+                            let s: u64 = p.slot.parse().unwrap_or(0);
+                            s >= start_slot && s <= end_slot
+                        })
+                        .collect();
                     let count = in_range.len();
                     all.extend(in_range);
-                    println!("  Page {page}: {page_len} payloads (slots {min_slot}..={max_slot}), {count} in range, {} total",
-                        all.len());
-                    if min_slot < start_slot { break; }
-                    cursor = all.last().map(|p: &PayloadDelivered| p.block_number.clone());
+                    println!(
+                        "  Page {page}: {page_len} payloads (slots {min_slot}..={max_slot}), {count} in range, {} total",
+                        all.len()
+                    );
+                    if min_slot < start_slot {
+                        break;
+                    }
+                    cursor = all
+                        .last()
+                        .map(|p: &PayloadDelivered| p.block_number.clone());
                 }
                 Err(e) => {
                     println!("  FAIL: {e}");
                     break;
                 }
             }
-            if page >= 50 { break; }
+            if page >= 50 {
+                break;
+            }
         }
         println!("  Total delivered in range: {}", all.len());
         for p in all.iter().take(5) {
-            let pk_short = if p.proposer_pubkey.len() > 20 { &p.proposer_pubkey[..20] } else { &p.proposer_pubkey };
-            println!("    slot={} value={} proposer={}...", p.slot, p.value, pk_short);
+            let pk_short = if p.proposer_pubkey.len() > 20 {
+                &p.proposer_pubkey[..20]
+            } else {
+                &p.proposer_pubkey
+            };
+            println!(
+                "    slot={} value={} proposer={}...",
+                p.slot, p.value, pk_short
+            );
         }
     }
 
@@ -114,14 +148,23 @@ async fn main() {
         for slot in start_slot..=end_slot {
             let slot_str = slot.to_string();
             let limit_str = "200".to_string();
-            let req = client.get(&url).query(&[("slot", &slot_str), ("limit", &limit_str)]);
+            let req = client
+                .get(&url)
+                .query(&[("slot", &slot_str), ("limit", &limit_str)]);
             match send::<Vec<BuilderBlock>>(req).await {
                 Ok(blocks) => {
                     if !blocks.is_empty() {
                         println!("  Slot {slot}: {} blocks", blocks.len());
                         for b in &blocks {
-                            let val_short = if b.value.len() > 12 { &b.value[..12] } else { &b.value };
-                            println!("    builder={}... value={val_short}", &b.builder_pubkey[..20.min(b.builder_pubkey.len())]);
+                            let val_short = if b.value.len() > 12 {
+                                &b.value[..12]
+                            } else {
+                                &b.value
+                            };
+                            println!(
+                                "    builder={}... value={val_short}",
+                                &b.builder_pubkey[..20.min(b.builder_pubkey.len())]
+                            );
                         }
                         all.extend(blocks);
                     }
@@ -143,9 +186,20 @@ async fn main() {
             Ok(reg) => {
                 println!("  Registered: YES");
                 if let Some(msg) = reg.get("message") {
-                    println!("  Fee recipient: {}", msg.get("fee_recipient").and_then(|v| v.as_str()).unwrap_or("?"));
-                    println!("  Gas limit: {}", msg.get("gas_limit").and_then(|v| v.as_str()).unwrap_or("?"));
-                    println!("  Timestamp: {}", msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?"));
+                    println!(
+                        "  Fee recipient: {}",
+                        msg.get("fee_recipient")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                    );
+                    println!(
+                        "  Gas limit: {}",
+                        msg.get("gas_limit").and_then(|v| v.as_str()).unwrap_or("?")
+                    );
+                    println!(
+                        "  Timestamp: {}",
+                        msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("?")
+                    );
                 }
             }
             Err(e) => {
@@ -159,7 +213,10 @@ async fn main() {
     // === 4. Summary ===
     println!("\n=== Summary ===");
     println!("Relay: {base}");
-    println!("Slot range: {start_slot}..={end_slot} ({} slots)", end_slot - start_slot + 1);
+    println!(
+        "Slot range: {start_slot}..={end_slot} ({} slots)",
+        end_slot - start_slot + 1
+    );
     println!("All queries completed successfully");
 }
 
@@ -170,7 +227,9 @@ async fn send<T: serde::de::DeserializeOwned>(req: reqwest::RequestBuilder) -> R
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("HTTP {}: {}", status, body));
     }
-    resp.json::<T>().await.map_err(|e| format!("JSON error: {e}"))
+    resp.json::<T>()
+        .await
+        .map_err(|e| format!("JSON error: {e}"))
 }
 
 // Mirrors the relay `proposer/delivered` data-API JSON schema; several fields

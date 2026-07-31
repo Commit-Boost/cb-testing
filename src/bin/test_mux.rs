@@ -16,7 +16,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
         eprintln!("Usage: {} <enclave> <config>", args[0]);
-        eprintln!("Example: {} CB-Testnet configs/generated/cb-mux.yml", args[0]);
+        eprintln!(
+            "Example: {} CB-Testnet configs/generated/cb-mux.yml",
+            args[0]
+        );
         std::process::exit(1);
     }
 
@@ -29,7 +32,12 @@ fn main() {
         Ok(Some(e)) => {
             println!("Found {} mux entries:", e.len());
             for entry in &e {
-                println!("  {} → relay={} pubkeys={}", entry.id, entry.relay_identity, entry.validator_pubkeys.len());
+                println!(
+                    "  {} → relay={} pubkeys={}",
+                    entry.id,
+                    entry.relay_identity,
+                    entry.validator_pubkeys.len()
+                );
             }
             e
         }
@@ -73,7 +81,11 @@ fn main() {
                     continue;
                 }
                 // Write raw logs to file for debugging
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_file)
+                {
                     use std::io::Write;
                     let _ = writeln!(f, "=== {service} ===");
                     let _ = writeln!(f, "{}", logs);
@@ -108,7 +120,10 @@ fn main() {
     let mut all_messages: Vec<String> = all_events.iter().map(|e| e.message.clone()).collect();
     all_messages.sort();
     all_messages.dedup();
-    println!("\n=== Unique messages found ({} total) ===", all_messages.len());
+    println!(
+        "\n=== Unique messages found ({} total) ===",
+        all_messages.len()
+    );
     for msg in &all_messages {
         let count = all_events.iter().filter(|e| &e.message == msg).count();
         println!("  ({}) {}", count, msg);
@@ -116,9 +131,14 @@ fn main() {
 
     println!("\n=== Sample of all parsed events (first 10) ===");
     for (i, event) in all_events.iter().take(10).enumerate() {
-        let pk_short = event.validator.as_ref().map(|v| if v.len() > 16 { &v[..16] } else { v });
-        println!("  #{} msg={:?} slot={:?} mux={:?} relay={:?} val={:?}",
-            i, event.message, event.slot, event.mux_id, event.relay_id, pk_short);
+        let pk_short = event
+            .validator
+            .as_ref()
+            .map(|v| if v.len() > 16 { &v[..16] } else { v });
+        println!(
+            "  #{} msg={:?} slot={:?} mux={:?} relay={:?} val={:?}",
+            i, event.message, event.slot, event.mux_id, event.relay_id, pk_short
+        );
     }
     if all_events.len() > 10 {
         println!("  ... and {} more", all_events.len() - 10);
@@ -137,14 +157,13 @@ fn main() {
 
     println!("Total mux events: {}", mux_events.len());
     for event in &mux_events {
-        let pk_short = event.validator.as_ref().map(|v| if v.len() > 20 { &v[..20] } else { v });
+        let pk_short = event
+            .validator
+            .as_ref()
+            .map(|v| if v.len() > 20 { &v[..20] } else { v });
         println!(
             "  [{}] slot={:?} mux={:?} relay={:?} val={:?}",
-            event.message,
-            event.slot,
-            event.mux_id,
-            event.relay_id,
-            pk_short
+            event.message, event.slot, event.mux_id, event.relay_id, pk_short
         );
     }
 
@@ -157,7 +176,11 @@ fn main() {
         if let Some(ref pk) = event.validator {
             let pk_norm = pk.to_lowercase();
             for entry in &entries {
-                if entry.validator_pubkeys.iter().any(|e| e.to_lowercase() == pk_norm) {
+                if entry
+                    .validator_pubkeys
+                    .iter()
+                    .any(|e| e.to_lowercase() == pk_norm)
+                {
                     checked += 1;
                     if let Some(ref actual_mux) = event.mux_id
                         && actual_mux != &entry.id
@@ -180,7 +203,9 @@ fn main() {
         println!("FAIL: {violations} routing violation(s) out of {checked} checked");
         std::process::exit(1);
     } else if checked == 0 {
-        println!("WARN: No mux events matched to config pubkeys. Events may not have proposer_pubkey fields.");
+        println!(
+            "WARN: No mux events matched to config pubkeys. Events may not have proposer_pubkey fields."
+        );
         std::process::exit(0);
     } else {
         println!("PASS: All {checked} mux routing decisions are correct");
@@ -251,7 +276,10 @@ fn parse_mux_section<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>) -
     let mut pubkeys = None;
 
     loop {
-        let is_header = lines.peek().map(|l| l.trim().starts_with("[[")).unwrap_or(false);
+        let is_header = lines
+            .peek()
+            .map(|l| l.trim().starts_with("[["))
+            .unwrap_or(false);
         if is_header {
             let header = lines.peek().unwrap().trim().to_string();
             if header.starts_with("[[mux.relays]]") {
@@ -287,7 +315,11 @@ fn parse_mux_section<'a>(lines: &mut std::iter::Peekable<std::str::Lines<'a>>) -
     };
     let pubkeys = pubkeys.unwrap_or_default();
 
-    MuxEntry { id, relay_identity, validator_pubkeys: pubkeys }
+    MuxEntry {
+        id,
+        relay_identity,
+        validator_pubkeys: pubkeys,
+    }
 }
 
 fn parse_pubkey_array(rest: &str, lines: &mut std::iter::Peekable<std::str::Lines>) -> Vec<String> {
@@ -296,7 +328,9 @@ fn parse_pubkey_array(rest: &str, lines: &mut std::iter::Peekable<std::str::Line
         for next in lines.by_ref() {
             accum.push('\n');
             accum.push_str(next);
-            if next.trim().ends_with(']') { break; }
+            if next.trim().ends_with(']') {
+                break;
+            }
         }
     }
     let raw = accum.trim();
@@ -383,7 +417,9 @@ fn strip_ansi_codes(s: &str) -> String {
                 chars.next();
                 while let Some(&ch) = chars.peek() {
                     chars.next();
-                    if ch.is_ascii_alphabetic() { break; }
+                    if ch.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
         } else {
@@ -395,14 +431,20 @@ fn strip_ansi_codes(s: &str) -> String {
 
 fn parse_line(line: &str) -> Option<CbEvent> {
     let line = line.trim();
-    if line.is_empty() { return None; }
+    if line.is_empty() {
+        return None;
+    }
 
     // Strip kurtosis prefix: "[service-name] rest"
     let line = if line.starts_with('[') {
         if let Some(pos) = line.find(']') {
             line[pos + 1..].trim_start()
-        } else { line }
-    } else { line };
+        } else {
+            line
+        }
+    } else {
+        line
+    };
 
     // Strip ANSI escape codes
     let line = strip_ansi_codes(line);
@@ -432,7 +474,9 @@ fn parse_line(line: &str) -> Option<CbEvent> {
     for i in 0..bytes.len() {
         if bytes[i] == b' ' {
             let rest = &after_level[i + 1..];
-            if rest.is_empty() { continue; }
+            if rest.is_empty() {
+                continue;
+            }
             let first = rest.as_bytes()[0];
             if (first.is_ascii_alphabetic() || first == b'_')
                 && let Some(eq_pos) = rest.find('=')
@@ -461,14 +505,28 @@ fn parse_line(line: &str) -> Option<CbEvent> {
         if let Some((key, val)) = kv.split_once('=') {
             let val = val.trim_matches('"');
             match key {
-                "slot" => { slot = val.parse().ok(); }
-                "validator" | "pubkey" => { validator = Some(val.to_string()); }
-                "relay_id" => { relay_id = Some(val.to_string()); }
-                "mux_id" => { mux_id = Some(val.to_string()); }
+                "slot" => {
+                    slot = val.parse().ok();
+                }
+                "validator" | "pubkey" => {
+                    validator = Some(val.to_string());
+                }
+                "relay_id" => {
+                    relay_id = Some(val.to_string());
+                }
+                "mux_id" => {
+                    mux_id = Some(val.to_string());
+                }
                 _ => {}
             }
         }
     }
 
-    Some(CbEvent { message, slot, validator, relay_id, mux_id })
+    Some(CbEvent {
+        message,
+        slot,
+        validator,
+        relay_id,
+        mux_id,
+    })
 }

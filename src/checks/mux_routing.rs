@@ -92,9 +92,7 @@ fn extract_commit_boost_config_from_yaml(raw: &str) -> eyre::Result<String> {
         .and_then(|p| p.get("commit_boost_config"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| {
-            eyre::eyre!(
-                "No mev_params.commit_boost_config found in Kurtosis YAML config"
-            )
+            eyre::eyre!("No mev_params.commit_boost_config found in Kurtosis YAML config")
         })?;
 
     Ok(template.to_string())
@@ -190,8 +188,8 @@ fn parse_one_mux_section<'a>(
 
     let id = id.ok_or_else(|| eyre::eyre!("[[mux]] section missing 'id' field"))?;
     let relay_identity = relay_identity_from_mux_id(&id);
-    let pubkeys = pubkeys
-        .ok_or_else(|| eyre::eyre!("[[mux]] section '{id}' missing 'validator_pubkeys'"))?;
+    let pubkeys =
+        pubkeys.ok_or_else(|| eyre::eyre!("[[mux]] section '{id}' missing 'validator_pubkeys'"))?;
 
     Ok(Some(MuxEntry {
         id,
@@ -234,10 +232,7 @@ fn parse_mux_relay_body(
 
 fn parse_relay_index_from_template(val: &str) -> Option<usize> {
     let val = val.trim();
-    let stripped = val
-        .trim_start_matches("{{")
-        .trim_end_matches("}}")
-        .trim();
+    let stripped = val.trim_start_matches("{{").trim_end_matches("}}").trim();
     let parts: Vec<&str> = stripped.split_whitespace().collect();
     if parts.len() >= 3 && parts[0] == "index" && parts[1] == ".Relays" {
         parts[2].parse::<usize>().ok()
@@ -270,12 +265,12 @@ fn parse_pubkey_array(
     }
 
     let raw = accum.trim();
-    let start = raw.find('[').ok_or_else(|| {
-        eyre::eyre!("Could not find opening '[' in pubkey array: {raw:.50}...")
-    })?;
-    let end = raw.rfind(']').ok_or_else(|| {
-        eyre::eyre!("Could not find closing ']' in pubkey array: {raw:.50}...")
-    })?;
+    let start = raw
+        .find('[')
+        .ok_or_else(|| eyre::eyre!("Could not find opening '[' in pubkey array: {raw:.50}..."))?;
+    let end = raw
+        .rfind(']')
+        .ok_or_else(|| eyre::eyre!("Could not find closing ']' in pubkey array: {raw:.50}..."))?;
 
     let inner = &raw[start + 1..end];
     let mut pubkeys = Vec::new();
@@ -419,10 +414,18 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
             fields.insert(key.to_string(), val.clone());
 
             match key {
-                "slot" => { slot = val.parse().ok(); }
-                "validator" | "pubkey" => { validator = Some(normalize_pubkey(&val)); }
-                "relay_id" => { relay_id = Some(val); }
-                "mux_id" => { mux_id = Some(val); }
+                "slot" => {
+                    slot = val.parse().ok();
+                }
+                "validator" | "pubkey" => {
+                    validator = Some(normalize_pubkey(&val));
+                }
+                "relay_id" => {
+                    relay_id = Some(val);
+                }
+                "mux_id" => {
+                    mux_id = Some(val);
+                }
                 _ => {}
             }
         }
@@ -438,8 +441,6 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
     })
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Log fetching
 // ---------------------------------------------------------------------------
@@ -449,15 +450,10 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
 /// Fetches all logs and filters client-side. The `--regex-match` flag is
 /// tried first as an optimization, but some kurtosis versions ignore it.
 pub fn fetch_service_logs(enclave: &str, service: &str) -> eyre::Result<String> {
-    info!(
-        "mux check: fetching logs from service '{service}' (enclave={enclave})..."
-    );
+    info!("mux check: fetching logs from service '{service}' (enclave={enclave})...");
 
     let output = std::process::Command::new("kurtosis")
-        .args([
-            "service", "logs", enclave, service,
-            "-n", "200000",
-        ])
+        .args(["service", "logs", enclave, service, "-n", "200000"])
         .output()
         .map_err(|e| eyre::eyre!("Failed to run 'kurtosis service logs': {e}"))?;
 
@@ -601,9 +597,14 @@ pub async fn check_mux_routing(
                 "No mux-related log lines found in any CB PBS service. \
                  No getHeader requests were recorded — mux config is valid \
                  but routing could not be verified at runtime. muxes=[{}]",
-                entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(", ")
+                entries
+                    .iter()
+                    .map(|e| e.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-        ).with_data(data);
+        )
+        .with_data(data);
     }
 
     // Verify: for each "using mux config" event, does the pubkey match?
@@ -682,8 +683,7 @@ pub async fn check_mux_routing(
             format!(
                 "All {} mux routing decision(s) verified ✓ CB PBS correctly routed \
                  every getHeader request according to mux config. {}",
-                total_events,
-                mux_detail,
+                total_events, mux_detail,
             ),
         )
         .with_data(data)
@@ -701,7 +701,10 @@ mod tests {
     #[test]
     fn test_relay_identity_from_mux_id() {
         assert_eq!(relay_identity_from_mux_id("node_0_to_helix"), "helix");
-        assert_eq!(relay_identity_from_mux_id("node_1_to_flashbots"), "flashbots");
+        assert_eq!(
+            relay_identity_from_mux_id("node_1_to_flashbots"),
+            "flashbots"
+        );
         assert_eq!(relay_identity_from_mux_id("my_mux_entry"), "my_mux_entry");
         assert_eq!(relay_identity_from_mux_id("to_"), "to_");
     }
@@ -835,7 +838,10 @@ additional_services:
         assert_eq!(event.mux_id, Some("node_1_to_flashbots".to_string()));
         assert_eq!(event.slot, Some(160));
         assert!(event.validator.is_some());
-        assert_eq!(event.validator.unwrap(), "b2ad1574eaca33f1555308e24b27a095d24aed8f4af5302ea2c6ba2e50936d25ffea7047be94065eac630693c7f86757");
+        assert_eq!(
+            event.validator.unwrap(),
+            "b2ad1574eaca33f1555308e24b27a095d24aed8f4af5302ea2c6ba2e50936d25ffea7047be94065eac630693c7f86757"
+        );
     }
 
     #[test]
@@ -859,8 +865,14 @@ additional_services:
         assert_eq!(event.message, "received new header");
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(521));
-        assert_eq!(event.fields.get("header_size_bytes"), Some(&"2891".to_string()));
-        assert_eq!(event.fields.get("value_eth"), Some(&"0.050439063999832000".to_string()));
+        assert_eq!(
+            event.fields.get("header_size_bytes"),
+            Some(&"2891".to_string())
+        );
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.050439063999832000".to_string())
+        );
     }
 
     #[test]
@@ -872,8 +884,14 @@ additional_services:
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(34));
         assert!(event.validator.is_some());
-        assert_eq!(event.fields.get("header_size_bytes"), Some(&"3099".to_string()));
-        assert_eq!(event.fields.get("value_eth"), Some(&"0.042701386561497000".to_string()));
+        assert_eq!(
+            event.fields.get("header_size_bytes"),
+            Some(&"3099".to_string())
+        );
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.042701386561497000".to_string())
+        );
     }
 
     #[test]
@@ -914,9 +932,13 @@ mod log_file_tests {
         ];
 
         for line in &lines {
-            let event = parse_cb_log_line(line)
-                .unwrap_or_else(|| panic!("should parse: {}", &line[..80]));
-            assert!(event.message.starts_with("using mux"), "message should start with 'using mux', got: {:?}", event.message);
+            let event =
+                parse_cb_log_line(line).unwrap_or_else(|| panic!("should parse: {}", &line[..80]));
+            assert!(
+                event.message.starts_with("using mux"),
+                "message should start with 'using mux', got: {:?}",
+                event.message
+            );
             assert!(event.mux_id.is_some(), "mux_id should be Some");
             assert!(event.slot.is_some(), "slot should be Some");
             assert!(event.validator.is_some(), "validator should be Some");
@@ -930,7 +952,11 @@ mod log_file_tests {
 
         let event = parse_cb_log_line(line).expect("should parse line with ANSI codes");
         // The message should contain "using mux" (may have trailing ANSI codes)
-        assert!(event.message.contains("using mux"), "message should contain 'using mux', got: {:?}", event.message);
+        assert!(
+            event.message.contains("using mux"),
+            "message should contain 'using mux', got: {:?}",
+            event.message
+        );
         // mux_id should be parsed correctly despite ANSI codes
         assert_eq!(event.mux_id, Some("node_1_to_flashbots".to_string()));
         assert_eq!(event.slot, Some(2));
@@ -942,7 +968,11 @@ mod log_file_tests {
         let line = "[16eac416a3014ec191173b9e95cc11a6] \x1b[2m2026-05-07T04:28:26.009013Z\x1b[0m \x1b[32mINFO\x1b[0m \x1b[1m\x1b[0m: received new header \x1b[3mrelay_id\x1b[0m\x1b[2m=\x1b[0m\"mux_helix\" \x1b[3mheader_size_bytes\x1b[0m\x1b[2m=\x1b[0m2891 \x1b[3mlatency\x1b[0m\x1b[2m=\x1b[0m6.1415ms \x1b[3mversion\x1b[0m\x1b[2m=\x1b[0mFulu \x1b[3mvalue_eth\x1b[0m\x1b[2m=\x1b[0m\"0.050439063999832000\" \x1b[2m\x1b[3mmethod\x1b[0m\x1b[2m=\x1b[0m/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey} \x1b[3mreq_id\x1b[0m\x1b[2m=\x1b[0m8e5020cb \x1b[3mslot\x1b[0m\x1b[2m=\x1b[0m521 \x1b[3mparent_hash\x1b[0m\x1b[2m=\x1b[0m0x969f22b3 \x1b[3mvalidator\x1b[0m\x1b[2m=\x1b[0m0x98213294\x1b[0m";
 
         let event = parse_cb_log_line(line).expect("should parse");
-        assert!(event.message.contains("received new header"), "message: {:?}", event.message);
+        assert!(
+            event.message.contains("received new header"),
+            "message: {:?}",
+            event.message
+        );
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(521));
     }
@@ -969,6 +999,10 @@ mod log_file_tests {
             })
             .collect();
 
-        assert_eq!(mux_events.len(), 3, "3 of 4 events should be mux-related (not 'received header')");
+        assert_eq!(
+            mux_events.len(),
+            3,
+            "3 of 4 events should be mux-related (not 'received header')"
+        );
     }
 }

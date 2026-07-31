@@ -199,7 +199,10 @@ mod tests {
         let blocks = extract_config_blocks(ARGS_FILE).expect("extract");
         let dummies = default_dummies();
 
-        for (name, block) in [("helix", &blocks.helix), ("commit_boost", &blocks.commit_boost)] {
+        for (name, block) in [
+            ("helix", &blocks.helix),
+            ("commit_boost", &blocks.commit_boost),
+        ] {
             let rendered = substitute_runtime_vars(block, &dummies);
             assert!(
                 !rendered.contains("{{"),
@@ -233,8 +236,9 @@ mod tests {
         let blocks = extract_config_blocks(ARGS_FILE).expect("extract");
         let rendered = substitute_runtime_vars(&blocks.helix, &default_dummies());
 
-        serde_yaml::from_str::<serde_yaml::Value>(&rendered)
-            .unwrap_or_else(|e| panic!("substituted helix is not valid YAML: {e}\n---\n{rendered}"));
+        serde_yaml::from_str::<serde_yaml::Value>(&rendered).unwrap_or_else(|e| {
+            panic!("substituted helix is not valid YAML: {e}\n---\n{rendered}")
+        });
     }
 
     #[test]

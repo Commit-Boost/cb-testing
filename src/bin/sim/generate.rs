@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::Path;
 
-use eyre::{eyre, Result, WrapErr};
+use eyre::{Result, WrapErr, eyre};
 
 use crate::genmodel::scenario::{Images, Scenario};
 
@@ -47,7 +47,12 @@ pub fn check(scenario: Option<&str>, out_dir: &Path) -> Result<()> {
     check_in(scenario, out_dir, Path::new("keys"), Path::new(".env"))
 }
 
-fn check_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Path) -> Result<()> {
+fn check_in(
+    scenario: Option<&str>,
+    out_dir: &Path,
+    keys_dir: &Path,
+    env_path: &Path,
+) -> Result<()> {
     let images = images_from_env(env_path);
     let outputs = assemble(scenario, &images, keys_dir)?;
 
@@ -75,10 +80,16 @@ fn check_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &
 /// Select scenarios and assemble each `(name, body)`. Reads mux key files (the
 /// only fallible step) — shared by `run` and `check` so both fail identically
 /// before touching the filesystem.
-fn assemble(scenario: Option<&str>, images: &Images, keys_dir: &Path) -> Result<Vec<(String, String)>> {
+fn assemble(
+    scenario: Option<&str>,
+    images: &Images,
+    keys_dir: &Path,
+) -> Result<Vec<(String, String)>> {
     let scenarios: Vec<Scenario> = match scenario {
-        Some(name) => vec![Scenario::from_name(name)
-            .ok_or_else(|| eyre!("unknown scenario {name:?}; expected one of {:?}", names()))?],
+        Some(name) => vec![
+            Scenario::from_name(name)
+                .ok_or_else(|| eyre!("unknown scenario {name:?}; expected one of {:?}", names()))?,
+        ],
         None => Scenario::ALL.to_vec(),
     };
     scenarios
@@ -136,8 +147,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sim-env-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let env = dir.join(".env");
-        fs::write(&env, "# c\nHELIX_RELAY_IMAGE=custom/helix:dev\n\nMEV_BOOST_IMAGE=x/y:z\n")
-            .unwrap();
+        fs::write(
+            &env,
+            "# c\nHELIX_RELAY_IMAGE=custom/helix:dev\n\nMEV_BOOST_IMAGE=x/y:z\n",
+        )
+        .unwrap();
         let images = images_from_env(&env);
         assert_eq!(images.helix_relay, "custom/helix:dev");
         assert_eq!(images.mev_boost, "x/y:z");
@@ -185,7 +199,10 @@ mod tests {
         fs::write(&f, body).unwrap();
         let err = check(None, &dir).unwrap_err();
         assert!(err.to_string().contains("out of date"), "got: {err}");
-        assert!(err.to_string().contains("cb-basic.yml"), "names the drifted file: {err}");
+        assert!(
+            err.to_string().contains("cb-basic.yml"),
+            "names the drifted file: {err}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -195,8 +212,13 @@ mod tests {
     fn run_is_atomic_on_missing_keys() {
         let dir = std::env::temp_dir().join(format!("sim-atomic-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let err = run_in(None, &dir, Path::new("/no/such/keys"), Path::new("/no/such/.env"))
-            .unwrap_err();
+        let err = run_in(
+            None,
+            &dir,
+            Path::new("/no/such/keys"),
+            Path::new("/no/such/.env"),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("pubkey file"), "got: {err}");
         assert!(!dir.exists(), "no output dir should be created on failure");
     }

@@ -28,9 +28,11 @@ fn main() {
     match cli.command {
         Command::Preflight { args_file } => preflight(&args_file),
         Command::Triage { enclave } => triage(&enclave),
-        Command::Generate { scenario, out_dir, check } => {
-            generate(scenario.as_deref(), &out_dir, check)
-        }
+        Command::Generate {
+            scenario,
+            out_dir,
+            check,
+        } => generate(scenario.as_deref(), &out_dir, check),
     }
 }
 

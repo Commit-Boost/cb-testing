@@ -10,7 +10,7 @@ use std::path::Path;
 
 use eyre::{Result, WrapErr};
 
-use super::cb::{cb_toml, cb_toml_mux, CbParams};
+use super::cb::{CbParams, cb_toml, cb_toml_mux};
 use super::helix::HELIX_RELAY_CONFIG;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
@@ -300,8 +300,7 @@ fn load_pubkeys(keys_dir: &Path, node: u8) -> Result<Vec<String>> {
     let path = keys_dir.join(format!("node-{node}-pubkeys.json"));
     let raw = std::fs::read_to_string(&path)
         .wrap_err_with(|| format!("reading pubkey file {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .wrap_err_with(|| format!("parsing pubkey JSON {}", path.display()))
+    serde_json::from_str(&raw).wrap_err_with(|| format!("parsing pubkey JSON {}", path.display()))
 }
 
 #[cfg(test)]
@@ -364,7 +363,10 @@ mod tests {
             if s == Scenario::Mux {
                 continue;
             }
-            assert!(s.args_file_in(&Images::default(), Path::new("/no/such/keys")).is_ok());
+            assert!(
+                s.args_file_in(&Images::default(), Path::new("/no/such/keys"))
+                    .is_ok()
+            );
         }
     }
 }

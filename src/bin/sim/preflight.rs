@@ -151,7 +151,12 @@ pub fn classify_helix_probe(exit_status: Option<i32>, logs: &str) -> ConfigVerdi
 /// should be set: NotPresent`)? Such reads live inside `config.rs` but are a
 /// runtime prerequisite, not config-schema drift.
 fn is_env_missing(message: &str) -> bool {
-    const NEEDLES: [&str; 4] = ["NotPresent", "should be set", "environment variable", "VarError"];
+    const NEEDLES: [&str; 4] = [
+        "NotPresent",
+        "should be set",
+        "environment variable",
+        "VarError",
+    ];
     NEEDLES.iter().any(|n| message.contains(n))
 }
 
@@ -170,7 +175,8 @@ fn is_serde_parse_error(message: &str) -> bool {
 /// True if the extracted cause is a config-parse panic (used to guard `Pass`).
 fn is_config_panic(cause: &Option<crate::diagnose::RootCause>) -> bool {
     cause.as_ref().is_some_and(|rc| {
-        rc.location.as_deref().unwrap_or("").contains("config.rs") || is_serde_parse_error(&rc.message)
+        rc.location.as_deref().unwrap_or("").contains("config.rs")
+            || is_serde_parse_error(&rc.message)
     })
 }
 
@@ -192,7 +198,11 @@ fn capture_field(message: &str) -> String {
 
 /// Did the relay reach the beacon-fetch stage (proving config parsed)?
 fn reached_fetch(logs: &str) -> bool {
-    const NEEDLES: [&str; 3] = ["get_chain_info", "failed fetching chain info", "starting metrics server"];
+    const NEEDLES: [&str; 3] = [
+        "get_chain_info",
+        "failed fetching chain info",
+        "starting metrics server",
+    ];
     NEEDLES.iter().any(|n| logs.contains(n))
 }
 
@@ -200,11 +210,26 @@ fn reached_fetch(logs: &str) -> bool {
 fn infra_signal(logs: &str) -> Option<String> {
     let lower = logs.to_ascii_lowercase();
     const NEEDLES: [(&str, &str); 6] = [
-        ("manifest unknown", "image not available in registry (manifest unknown)"),
-        ("no such image", "image not present locally / pull failed (no such image)"),
-        ("unable to find image", "image not present locally / pull in progress"),
-        ("cannot connect to the docker daemon", "docker daemon not reachable"),
-        ("is the docker daemon running", "docker daemon not reachable"),
+        (
+            "manifest unknown",
+            "image not available in registry (manifest unknown)",
+        ),
+        (
+            "no such image",
+            "image not present locally / pull failed (no such image)",
+        ),
+        (
+            "unable to find image",
+            "image not present locally / pull in progress",
+        ),
+        (
+            "cannot connect to the docker daemon",
+            "docker daemon not reachable",
+        ),
+        (
+            "is the docker daemon running",
+            "docker daemon not reachable",
+        ),
         ("__sim_probe_timeout__", "probe hit the wall-clock timeout"),
     ];
     NEEDLES
@@ -235,7 +260,9 @@ pub fn preflight_helix(image: &str, yaml_block: &str) -> Result<ConfigVerdict> {
     // Best-effort cleanup of the tmp file and any orphan container.
     let _ = fs::remove_file(&cfg_path);
     let _ = fs::remove_dir(&tmp);
-    let _ = Command::new("docker").args(["rm", "-f", &container]).output();
+    let _ = Command::new("docker")
+        .args(["rm", "-f", &container])
+        .output();
 
     verdict
 }
@@ -247,7 +274,10 @@ pub fn preflight_helix(image: &str, yaml_block: &str) -> Result<ConfigVerdict> {
 /// a past `GENESIS_TIME` lets the relay compute `current_slot()` and reach the
 /// beacon-fetch stage instead of the pre-genesis unwrap.
 const PROBE_ENV: [(&str, &str); 4] = [
-    ("RELAY_KEY", "0x607a11b45a7219cc61a3d9c5fd08c7eebd602a6a19a977f8d3771d5711a550f2"),
+    (
+        "RELAY_KEY",
+        "0x607a11b45a7219cc61a3d9c5fd08c7eebd602a6a19a977f8d3771d5711a550f2",
+    ),
     ("POSTGRES_PASSWORD", "postgres"),
     ("ADMIN_TOKEN", "admin_token"),
     ("GENESIS_TIME", "1700000000"),
@@ -256,7 +286,9 @@ const PROBE_ENV: [(&str, &str); 4] = [
 /// Run the bounded docker probe and classify its combined output.
 fn run_probe(image: &str, cfg_dir: &Path, container: &str) -> Result<ConfigVerdict> {
     let mount = format!("{}:/cfg:ro", cfg_dir.display());
-    let secs = Duration::from_secs(PROBE_TIMEOUT_SECS).as_secs().to_string();
+    let secs = Duration::from_secs(PROBE_TIMEOUT_SECS)
+        .as_secs()
+        .to_string();
 
     // `timeout` bounds the shell (sync std has no wait-with-timeout), matching
     // `triage`. `--signal=KILL` because helix ignores SIGTERM; on the kill it
@@ -319,7 +351,10 @@ pub fn run(args_file: &Path) -> Result<()> {
         reason: "typed validation lands in P2".to_string(),
     };
 
-    let report = PreflightReport { helix, commit_boost };
+    let report = PreflightReport {
+        helix,
+        commit_boost,
+    };
     let json = serde_json::to_string_pretty(&report).wrap_err("serialize preflight report")?;
     println!("{json}");
 
@@ -346,7 +381,8 @@ fn helix_image(args_file_contents: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    const SERDE_MISSING: &str = include_str!("../../../tests/fixtures/helix_serde_missing_field.log");
+    const SERDE_MISSING: &str =
+        include_str!("../../../tests/fixtures/helix_serde_missing_field.log");
     const PREGENESIS: &str = include_str!("../../../tests/fixtures/helix_pregenesis_unwrap.log");
     const INVENTED: &str = include_str!("../../../tests/fixtures/invented_field.log");
     const REACHED_FETCH: &str = include_str!("../../../tests/fixtures/helix_reached_fetch.log");

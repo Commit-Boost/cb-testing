@@ -37,7 +37,10 @@ pub async fn check_missed_slots(
         return CheckResult::skip(
             "missed_slots",
             2,
-            format!("Single-slot window (slot {}), skipping missed slot check", start_slot),
+            format!(
+                "Single-slot window (slot {}), skipping missed slot check",
+                start_slot
+            ),
         );
     }
     let total = end_slot - start_slot;

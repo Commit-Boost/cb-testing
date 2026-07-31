@@ -234,19 +234,28 @@ impl ShellOutput {
 /// the style of `discovery::run_kurtosis`, a missing tool is wrapped with a
 /// clear "is it installed / on PATH?" message rather than a raw OS error.
 fn sh_capture(program: &str, args: &[&str]) -> Result<ShellOutput> {
-    let secs = Duration::from_secs(SHELL_TIMEOUT_SECS).as_secs().to_string();
+    let secs = Duration::from_secs(SHELL_TIMEOUT_SECS)
+        .as_secs()
+        .to_string();
     let output = Command::new("timeout")
         .arg(&secs)
         .arg(program)
         .args(args)
         .output()
         .wrap_err_with(|| {
-            format!("failed to spawn `{program}` (via `timeout`). Is `{program}` installed and on PATH?")
+            format!(
+                "failed to spawn `{program}` (via `timeout`). Is `{program}` installed and on PATH?"
+            )
         })?;
 
     // `timeout` exits 124 on timeout, 127 when the inner tool is not found.
     match output.status.code() {
-        Some(124) => return Err(eyre!("`{program} {}` timed out after {secs}s", args.join(" "))),
+        Some(124) => {
+            return Err(eyre!(
+                "`{program} {}` timed out after {secs}s",
+                args.join(" ")
+            ));
+        }
         Some(127) => {
             return Err(eyre!(
                 "`{program}` not found on PATH (needed by `sim triage`)"
