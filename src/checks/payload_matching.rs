@@ -96,3 +96,24 @@ pub async fn run_payload_checks(
 ) -> Vec<CheckResult> {
     vec![check_payload_hash_match(relays, beacon, start_slot, end_slot).await]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::CheckStatus;
+
+    // Contract: with no relays there are no delivered payloads to cross-check,
+    // so the check must SKIP (it explicitly defers this signal to an upstream
+    // check) rather than PASS on zero comparisons. With an empty relay slice the
+    // collection loop never runs and the beacon is never queried, so this is a
+    // pure, network-free assertion of the empty-input contract.
+    #[tokio::test]
+    async fn no_relays_skips_not_passes() {
+        let beacon = BeaconClient::new("http://127.0.0.1:0");
+        let relays: [RelayClient; 0] = [];
+        let r = check_payload_hash_match(&relays, &beacon, 0, 10).await;
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(r.id, "payload_hash_match");
+        assert_eq!(r.tier, 1);
+    }
+}

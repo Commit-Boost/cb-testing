@@ -207,3 +207,41 @@ pub async fn run_chain_health_checks(
 
     checks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checks::CheckStatus;
+
+    // A BeaconClient constructor is pure (it only builds a reqwest::Client, no
+    // I/O). The check_missed_slots guard branches below return BEFORE any await,
+    // so this client is never used for a request — the tests exercise pure
+    // decision logic, no devnet required.
+    fn dummy_beacon() -> BeaconClient {
+        BeaconClient::new("http://127.0.0.1:0")
+    }
+
+    // Contract: an inverted slot range (start > end) is nonsense input and must
+    // FAIL fast without consulting the beacon.
+    #[tokio::test]
+    async fn missed_slots_inverted_range_fails() {
+        let beacon = dummy_beacon();
+        let r = check_missed_slots(&beacon, 10, 5, 0.10).await;
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.id, "missed_slots");
+        assert_eq!(r.tier, 2);
+    }
+
+    // Contract: a single-slot window (start == end) has no interior slots to
+    // measure a miss rate over, so it must SKIP (not silently PASS on zero
+    // data — that would be a false green).
+    #[tokio::test]
+    async fn missed_slots_single_slot_window_skips() {
+        let beacon = dummy_beacon();
+        let r = check_missed_slots(&beacon, 5, 5, 0.10).await;
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert_eq!(r.id, "missed_slots");
+        assert_eq!(r.tier, 2);
+        assert!(r.detail.contains("Single-slot"));
+    }
+}
