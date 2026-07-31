@@ -566,6 +566,27 @@ pub async fn check_mux_routing(
         }
     }
 
+    classify_mux_routing(entries, &expected_mux, &all_events)
+}
+
+/// Pure verdict logic for mux routing (the Law 4 test seam; the async wrapper
+/// above only gathers the logs). Contract:
+/// - no `[[mux]]` entries → SKIP
+/// - no mux-related log events at all → WARN (couldn't observe routing)
+/// - events seen but ZERO routing DECISIONS actually checked (no "using mux
+///   config" DEBUG event for a known pubkey) → WARN, NOT pass. This is the Law 3
+///   fix: we no longer report "verified" having verified nothing when CB debug
+///   logging is off. `[logs.stdout] level = "debug"` is required for mux scenarios.
+/// - a checked decision routed to the wrong mux → FAIL
+/// - otherwise → PASS, counting the routing decisions actually verified.
+pub fn classify_mux_routing(
+    entries: &[MuxEntry],
+    expected_mux: &HashMap<String, String>,
+    all_events: &[CbEvent],
+) -> CheckResult {
+    let mux_ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    let mux_detail = format!("muxes=[{}]", mux_ids.join(", "));
+
     // Filter to events relevant to mux verification.
     let mux_events: Vec<&CbEvent> = all_events
         .iter()
@@ -580,37 +601,34 @@ pub async fn check_mux_routing(
 
     let total_events = mux_events.len();
 
-    let data = serde_json::json!({
-        "total_mux_entries": entries.len(),
-        "total_log_events": total_events,
-        "pubkeys_verified": 0,
-        "violations": [],
-        "violation_count": 0,
-        "mux_entries_seen": [],
-    });
-
     if total_events == 0 {
         return CheckResult::warn(
             "mux.routing",
             1,
             format!(
-                "No mux-related log lines found in any CB PBS service. \
-                 No getHeader requests were recorded — mux config is valid \
-                 but routing could not be verified at runtime. muxes=[{}]",
-                entries
-                    .iter()
-                    .map(|e| e.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "No mux-related log lines found in any CB PBS service — routing could not be \
+                 verified at runtime (mux config parsed fine). {mux_detail}"
             ),
         )
-        .with_data(data);
+        .with_data(serde_json::json!({
+            "total_mux_entries": entries.len(),
+            "total_log_events": 0,
+            "pubkeys_verified": 0,
+            "routing_decisions_verified": 0,
+            "violations": [],
+            "violation_count": 0,
+            "mux_entries_seen": [],
+        }));
     }
 
-    // Verify: for each "using mux config" event, does the pubkey match?
+    // Verify: for each "using mux config" event for a KNOWN pubkey, does the
+    // routed mux match the expected mux? Count how many such decisions we
+    // actually checked — a match OR a violation both count; an event without a
+    // mux_id (e.g. "received new header") is NOT a verified routing decision.
     let mut violations: Vec<serde_json::Value> = Vec::new();
     let mut pubkeys_verified: HashSet<String> = HashSet::new();
     let mut mux_entries_seen: HashSet<String> = HashSet::new();
+    let mut routing_decisions_verified: usize = 0;
 
     for event in &mux_events {
         if let Some(ref mux_id) = event.mux_id {
@@ -622,33 +640,36 @@ pub async fn check_mux_routing(
 
             if let Some(expected_mux_id) = expected_mux.get(pk_norm)
                 && let Some(ref actual_mux_id) = event.mux_id
-                && actual_mux_id != expected_mux_id
             {
-                let expected_relay = entries
-                    .iter()
-                    .find(|e| e.id == *expected_mux_id)
-                    .map(|e| e.relay_identity.as_str())
-                    .unwrap_or("?");
-                let actual_relay = entries
-                    .iter()
-                    .find(|e| e.id == *actual_mux_id)
-                    .map(|e| e.relay_identity.as_str())
-                    .unwrap_or("?");
+                routing_decisions_verified += 1;
 
-                violations.push(serde_json::json!({
-                    "slot": event.slot,
-                    "proposer_pubkey": format!("0x{pk_norm}"),
-                    "routed_to_mux": actual_mux_id,
-                    "routed_to_relay": actual_relay,
-                    "expected_mux": expected_mux_id,
-                    "expected_relay": expected_relay,
-                }));
+                if actual_mux_id != expected_mux_id {
+                    let expected_relay = entries
+                        .iter()
+                        .find(|e| e.id == *expected_mux_id)
+                        .map(|e| e.relay_identity.as_str())
+                        .unwrap_or("?");
+                    let actual_relay = entries
+                        .iter()
+                        .find(|e| e.id == *actual_mux_id)
+                        .map(|e| e.relay_identity.as_str())
+                        .unwrap_or("?");
 
-                warn!(
-                    "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
-                     '{expected_mux_id}' ({expected_relay}) but was routed to \
-                     '{actual_mux_id}' ({actual_relay})"
-                );
+                    violations.push(serde_json::json!({
+                        "slot": event.slot,
+                        "proposer_pubkey": format!("0x{pk_norm}"),
+                        "routed_to_mux": actual_mux_id,
+                        "routed_to_relay": actual_relay,
+                        "expected_mux": expected_mux_id,
+                        "expected_relay": expected_relay,
+                    }));
+
+                    warn!(
+                        "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
+                         '{expected_mux_id}' ({expected_relay}) but was routed to \
+                         '{actual_mux_id}' ({actual_relay})"
+                    );
+                }
             }
         }
     }
@@ -657,13 +678,11 @@ pub async fn check_mux_routing(
         "total_mux_entries": entries.len(),
         "total_log_events": total_events,
         "pubkeys_verified": pubkeys_verified.len(),
+        "routing_decisions_verified": routing_decisions_verified,
         "violations": violations,
         "violation_count": violations.len(),
         "mux_entries_seen": mux_entries_seen.iter().cloned().collect::<Vec<_>>(),
     });
-
-    let mux_ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-    let mux_detail = format!("muxes=[{}]", mux_ids.join(", "));
 
     if !violations.is_empty() {
         CheckResult::fail(
@@ -676,14 +695,25 @@ pub async fn check_mux_routing(
             ),
         )
         .with_data(data)
+    } else if routing_decisions_verified == 0 {
+        CheckResult::warn(
+            "mux.routing",
+            1,
+            format!(
+                "{total_events} mux log event(s) seen but ZERO routing decisions could be \
+                 verified — need CB \"using mux config\" DEBUG logs (is `[logs.stdout] level = \
+                 \"debug\"` set, and are proposer pubkeys covered by the mux config?). NOT \
+                 asserting routing correctness. {mux_detail}"
+            ),
+        )
+        .with_data(data)
     } else {
         CheckResult::pass(
             "mux.routing",
             1,
             format!(
-                "All {} mux routing decision(s) verified ✓ CB PBS correctly routed \
-                 every getHeader request according to mux config. {}",
-                total_events, mux_detail,
+                "All {routing_decisions_verified} mux routing decision(s) verified ✓ CB PBS routed \
+                 every checked getHeader request per mux config. {mux_detail}"
             ),
         )
         .with_data(data)
@@ -697,6 +727,87 @@ pub async fn check_mux_routing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::CheckStatus;
+
+    // --- classify_mux_routing verdict tests (Law 3/4: no false green) --------
+
+    fn entry(id: &str, relay: &str, pubkeys: &[&str]) -> MuxEntry {
+        MuxEntry {
+            id: id.to_string(),
+            relay_identity: relay.to_string(),
+            validator_pubkeys: pubkeys.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    fn event(message: &str, validator: Option<&str>, mux_id: Option<&str>) -> CbEvent {
+        CbEvent {
+            message: message.to_string(),
+            fields: HashMap::new(),
+            slot: Some(1),
+            validator: validator.map(|v| v.to_string()),
+            relay_id: None,
+            mux_id: mux_id.map(|m| m.to_string()),
+        }
+    }
+
+    fn expected(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(pk, mux)| (pk.to_string(), mux.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn mux_pass_when_a_routing_decision_is_verified() {
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        // A "using mux config" event: known pubkey routed to its expected mux.
+        let events = [event("using mux config", Some("aa"), Some("mux_0"))];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["routing_decisions_verified"], 1);
+    }
+
+    #[test]
+    fn mux_warn_when_events_seen_but_no_decision_verifiable() {
+        // The false-green case: log events exist ("received new header" has a
+        // validator but no mux_id), so NO routing decision is actually checked.
+        // Old code PASSed here; the fix WARNs.
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        let events = [event("received new header", Some("aa"), None)];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(
+            r.status,
+            CheckStatus::Warn,
+            "must NOT pass on zero verified decisions"
+        );
+        assert_eq!(r.data["routing_decisions_verified"], 0);
+        assert!(r.detail.contains("DEBUG"));
+    }
+
+    #[test]
+    fn mux_warn_when_no_events_at_all() {
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        let r = classify_mux_routing(&entries, &exp, &[]);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert_eq!(r.data["total_log_events"], 0);
+    }
+
+    #[test]
+    fn mux_fail_on_misroute() {
+        let entries = [
+            entry("mux_0", "helix", &["aa"]),
+            entry("mux_1", "flashbots", &["bb"]),
+        ];
+        let exp = expected(&[("aa", "mux_0"), ("bb", "mux_1")]);
+        // pubkey aa expected at mux_0 but routed to mux_1 → violation.
+        let events = [event("using mux config", Some("aa"), Some("mux_1"))];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.data["violation_count"], 1);
+    }
 
     #[test]
     fn test_relay_identity_from_mux_id() {
