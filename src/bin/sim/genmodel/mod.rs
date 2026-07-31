@@ -12,6 +12,40 @@
 //! Task 0 lands only the golden-fixture regression harness; the generator bodies
 //! (`helix`, `cb`, `scenario` submodules) land in Task 1.
 
+pub mod cb;
+pub mod helix;
+pub mod scenario;
+
+/// Extract a YAML `|` block scalar (named `key`, at 2-space indent) from `yaml`,
+/// de-indented 4 spaces, with trailing blank lines removed. Test-only oracle
+/// helper: it recovers the raw body the generator embeds so a body port can be
+/// byte-compared against the golden independent of the surrounding assembly.
+#[cfg(test)]
+pub fn extract_block_scalar(yaml: &str, key: &str) -> String {
+    let header = format!("  {key}: |");
+    let mut lines = yaml.lines();
+    for line in lines.by_ref() {
+        if line == header {
+            break;
+        }
+    }
+    let mut body: Vec<String> = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            body.push(String::new());
+        } else if let Some(rest) = line.strip_prefix("    ") {
+            body.push(rest.to_string());
+        } else {
+            // A less-indented non-empty line ends the block scalar.
+            break;
+        }
+    }
+    while body.last().is_some_and(|l| l.is_empty()) {
+        body.pop();
+    }
+    body.join("\n")
+}
+
 /// The six golden configs — the exact Python output that produced the green e2e
 /// run, snapshotted with the baked-default images. `sim generate` must reproduce
 /// each byte-for-byte. Depth-independent path via `CARGO_MANIFEST_DIR`.

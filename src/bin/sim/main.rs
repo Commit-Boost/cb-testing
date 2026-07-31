@@ -13,6 +13,7 @@ use clap::Parser;
 
 mod cli;
 mod diagnose;
+mod generate;
 mod genmodel;
 mod preflight;
 mod render;
@@ -27,6 +28,16 @@ fn main() {
     match cli.command {
         Command::Preflight { args_file } => preflight(&args_file),
         Command::Triage { enclave } => triage(&enclave),
+        Command::Generate { scenario, out_dir } => generate(scenario.as_deref(), &out_dir),
+    }
+}
+
+/// Generate Kurtosis args-files (Task 1). Implemented in `generate::run`.
+fn generate(scenario: Option<&str>, out_dir: &Path) {
+    if let Err(e) = generate::run(scenario, out_dir) {
+        tracing::error!(error = %e, "sim generate failed");
+        eprintln!("generate error: {e:?}");
+        std::process::exit(1);
     }
 }
 

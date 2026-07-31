@@ -40,4 +40,13 @@ pub enum Command {
         /// Name of the kurtosis enclave to triage.
         enclave: String,
     },
+    /// Generate Kurtosis args-files for the CB test scenarios (Rust port of the
+    /// retired `generate_kurtosis_configs.py`).
+    Generate {
+        /// Scenario name (e.g. `cb-basic`); omit to generate all six.
+        scenario: Option<String>,
+        /// Directory to write the generated `<scenario>.yml` files into.
+        #[arg(long, default_value = "configs/generated")]
+        out_dir: PathBuf,
+    },
 }
