@@ -34,7 +34,19 @@ classifier, then test + correct it.**
    the adversarial multi-relay case. (Also noted while here: `missed` — relay delivered a slot with no
    on-chain block — is counted but never downgrades the verdict; and a mismatch is WARN, not FAIL.)
 
-## Judgment calls for J (each changes what real runs report)
+## J's decisions (2026-07-31) — RATIFIED
+- **mux.routing:** unverifiable (`pubkeys_verified==0`) → **WARN** (not PASS), and CB debug logging is **required**
+  for mux scenarios. Finding: the generated cb-mux config ALREADY sets `[logs.stdout] level="debug"`, so the
+  requirement is mostly satisfied by generation; fix = the WARN gate + a guard/assert that debug stays on.
+- **payload_matching:** a cross-relay `block_hash` conflict → **WARN** (matches how single-relay mismatches
+  are already handled). The BUG is that the first-wins union DROPS the conflict before it's ever detected, so
+  the fix is the DETECTION (compare per-(relay,slot)); verdict stays WARN, naming the slot + relays.
+- **relay_pipeline best-bid:** **compare bid values**. Per-relay get_header bids are in the CB logs
+  ("received new header … value_eth … relay_id"). Fix = ADD a best-bid check arm that asserts CB delivered
+  the max-value bid across relays; KEEP the existing delivered-count as a coverage check.
+- **CB-preflight:** keep the honest `Inconclusive` stub — NOT shipping the partial preflight.
+
+## Judgment calls for J (each changes what real runs report) — ANSWERED ABOVE
 - **mux.routing (Tier-1):** when routing is unverifiable (CB debug logging off → `pubkeys_verified==0`),
   should it WARN or FAIL? WARN is honest ("couldn't verify") but if mux.routing stays Tier-1-must-pass, a
   WARN could fail runs that pass today. Options: (a) require CB debug logging on for mux scenarios (make it a
