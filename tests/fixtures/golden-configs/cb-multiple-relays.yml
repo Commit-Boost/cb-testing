@@ -1,4 +1,4 @@
-# cb-multiple-relays: Two relays (helix + flashbots) behind a single
+# cb-multiple-relays: Two Helix relay instances behind a single
 # Commit-Boost sidecar.
 #
 # Tests that CB correctly routes get_header requests to both relays,
@@ -18,7 +18,7 @@ mev_type: custom
 mev_params:
   mev_relay:
     - helix
-    - flashbots
+    - helix
   mev_sidecar: commit-boost
   mev_builder: flashbots
 

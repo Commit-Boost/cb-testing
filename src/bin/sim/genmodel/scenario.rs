@@ -127,7 +127,7 @@ impl Scenario {
                  # relay as the only relay endpoint."
             }
             Scenario::MultipleRelays => {
-                "# cb-multiple-relays: Two relays (helix + flashbots) behind a single\n\
+                "# cb-multiple-relays: Two Helix relay instances behind a single\n\
                  # Commit-Boost sidecar.\n\
                  #\n\
                  # Tests that CB correctly routes get_header requests to both relays,\n\
@@ -157,10 +157,10 @@ impl Scenario {
             Scenario::Mux => {
                 "# cb-mux: Multiplexed relay routing per validator node.\n\
                  #\n\
-                 # Routes all 128 validators from node-0 exclusively to the Helix relay and\n\
-                 # all 128 validators from node-1 exclusively to the Flashbots relay.\n\
-                 # This tests CB's ability to partition the validator set and apply\n\
-                 # per-mux timeout and relay configurations."
+                 # Routes all 128 validators from node-0 exclusively to the first Helix\n\
+                 # relay instance and all 128 validators from node-1 exclusively to the\n\
+                 # second Helix relay instance. This tests CB's ability to partition the\n\
+                 # validator set and apply per-mux timeout and relay configurations."
             }
         }
     }
@@ -171,9 +171,7 @@ impl Scenario {
     fn relays(&self) -> &'static [&'static str] {
         match self {
             Scenario::Basic | Scenario::SkipSigverify | Scenario::ExtraValidation => &["helix"],
-            Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => {
-                &["helix", "flashbots"]
-            }
+            Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => &["helix", "helix"],
         }
     }
 

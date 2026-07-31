@@ -130,11 +130,11 @@ pub fn cb_toml_mux(pubkeys_node0: &[String], pubkeys_node1: &[String]) -> String
         r#"url = "{{ index .Relays 0 }}""#.to_string(),
         String::new(),
         "[[mux]]".to_string(),
-        r#"id = "node_1_to_flashbots""#.to_string(),
+        r#"id = "node_1_to_helix""#.to_string(),
         format!("validator_pubkeys = {node1_list}"),
         "timeout_get_header_ms = 900".to_string(),
         "[[mux.relays]]".to_string(),
-        r#"id = "mux_flashbots""#.to_string(),
+        r#"id = "mux_helix_1""#.to_string(),
         r#"url = "{{ index .Relays 1 }}""#.to_string(),
         String::new(),
         "[logs.stdout]".to_string(),
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(out.matches("[[mux]]").count(), 2, "two [[mux]] blocks");
         assert_eq!(out.matches("[[mux.relays]]").count(), 2);
         assert!(out.contains(r#"id = "node_0_to_helix""#));
-        assert!(out.contains(r#"id = "node_1_to_flashbots""#));
+        assert!(out.contains(r#"id = "node_1_to_helix""#));
         // per-node validator_pubkeys lists, entries indented 4 spaces.
         assert!(out.contains("validator_pubkeys = [\n    \"0xdead\",\n    \"0xbeef\"\n]"));
         assert!(out.contains("validator_pubkeys = [\n    \"0xcafe\",\n    \"0xf00d\"\n]"));

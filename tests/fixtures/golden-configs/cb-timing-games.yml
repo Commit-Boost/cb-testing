@@ -18,7 +18,7 @@ mev_type: custom
 mev_params:
   mev_relay:
     - helix
-    - flashbots
+    - helix
   mev_sidecar: commit-boost
   mev_builder: flashbots
 

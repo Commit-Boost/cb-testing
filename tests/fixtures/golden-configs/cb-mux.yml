@@ -1,9 +1,9 @@
 # cb-mux: Multiplexed relay routing per validator node.
 #
-# Routes all 128 validators from node-0 exclusively to the Helix relay and
-# all 128 validators from node-1 exclusively to the Flashbots relay.
-# This tests CB's ability to partition the validator set and apply
-# per-mux timeout and relay configurations.
+# Routes all 128 validators from node-0 exclusively to the first Helix
+# relay instance and all 128 validators from node-1 exclusively to the
+# second Helix relay instance. This tests CB's ability to partition the
+# validator set and apply per-mux timeout and relay configurations.
 
 participants:
   - el_type: geth
@@ -19,7 +19,7 @@ mev_type: custom
 mev_params:
   mev_relay:
     - helix
-    - flashbots
+    - helix
   mev_sidecar: commit-boost
   mev_builder: flashbots
 
@@ -275,7 +275,7 @@ mev_params:
     url = "{{ index .Relays 0 }}"
 
     [[mux]]
-    id = "node_1_to_flashbots"
+    id = "node_1_to_helix"
     validator_pubkeys = [
         "0xb05cafec5912f22dbd6f15677f25f13d93ecd5ec6f957fddd7cf27d73521b34aaaf6a219f77b21128d18321c2c8d679b",
         "0x870342ee85d1d3eda564de4126f20880d59164e2f88652d9dcf3dc93d0bf19e22ca3a11305f1cba1cadaf2d117028936",
@@ -408,7 +408,7 @@ mev_params:
     ]
     timeout_get_header_ms = 900
     [[mux.relays]]
-    id = "mux_flashbots"
+    id = "mux_helix_1"
     url = "{{ index .Relays 1 }}"
 
     [logs.stdout]

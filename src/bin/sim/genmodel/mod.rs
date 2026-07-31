@@ -46,9 +46,14 @@ pub fn extract_block_scalar(yaml: &str, key: &str) -> String {
     body.join("\n")
 }
 
-/// The six golden configs — the exact Python output that produced the green e2e
-/// run, snapshotted with the baked-default images. `sim generate` must reproduce
-/// each byte-for-byte. Depth-independent path via `CARGO_MANIFEST_DIR`.
+/// The six golden configs. The three single-relay ones (cb-basic,
+/// cb-skip-sigverify, cb-extra-validation) are the exact Python output that
+/// produced the green e2e run. The three multi-relay ones (cb-multiple-relays,
+/// cb-timing-games, cb-mux) were REGENERATED for the intended two-Helix-instance
+/// topology (the flashbots RELAY was dropped; the flashbots BUILDER stays), so
+/// they are the intended output, not the old Python baseline. All are snapshotted
+/// with the baked-default images. `sim generate` must reproduce each
+/// byte-for-byte. Depth-independent path via `CARGO_MANIFEST_DIR`.
 #[cfg(test)]
 pub fn golden(scenario: &str) -> &'static str {
     match scenario {
