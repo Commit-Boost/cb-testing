@@ -13,6 +13,7 @@ use clap::Parser;
 
 mod cli;
 mod diagnose;
+mod genmodel;
 mod preflight;
 mod render;
 mod triage;
