@@ -1,6 +1,8 @@
 //! Relay pipeline verification checks for MEV pipeline stages.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use alloy_primitives::U256;
 
 use crate::beacon::BeaconClient;
 use crate::checks::{CheckResult, CheckStatus};
@@ -98,6 +100,141 @@ pub async fn check_payloads_delivered_multi(
             ),
         )
         .with_data(serde_json::json!({ "count": 0 }))
+    }
+}
+
+/// Verify AGGREGATED BIDDING: for slots where >=2 relays actually competed, did
+/// CB deliver at least the best (max-value) per-relay bid? This is the real
+/// aggregation signal — `check_payloads_delivered_multi` above only proves
+/// *coverage* (payloads were delivered), which is why one delivering relay scored
+/// the same as genuine two-relay aggregation (the P3 false-green). Fetch per-relay
+/// best bids + delivered values, then classify.
+pub async fn check_best_bid_selection(
+    relays: &[RelayClient],
+    start_slot: u64,
+    end_slot: u64,
+) -> CheckResult {
+    // Each relay's BEST bid per slot = max value among its builder-blocks-received.
+    let mut bids_by_slot: BTreeMap<u64, Vec<(String, U256)>> = BTreeMap::new();
+    let range = end_slot.saturating_sub(start_slot).max(1);
+    let step = (range / 10).max(1);
+    let sample_slots: Vec<u64> = (start_slot..=end_slot).step_by(step as usize).collect();
+
+    for relay in relays {
+        let label = relay.base_url().to_string();
+        for slot in &sample_slots {
+            if let Ok(entries) = relay.get_builder_blocks_received(*slot).await
+                && let Some(best) = entries.iter().map(|e| e.value).max()
+            {
+                bids_by_slot
+                    .entry(*slot)
+                    .or_default()
+                    .push((label.clone(), best));
+            }
+        }
+    }
+
+    // Delivered value per slot = the winning (max) delivered value across relays.
+    let mut delivered_by_slot: BTreeMap<u64, U256> = BTreeMap::new();
+    for relay in relays {
+        if let Ok(payloads) = relay.get_payloads_delivered(start_slot, end_slot).await {
+            for p in payloads {
+                let e = delivered_by_slot.entry(p.slot).or_insert(p.value);
+                if p.value > *e {
+                    *e = p.value;
+                }
+            }
+        }
+    }
+
+    classify_best_bid(&bids_by_slot, &delivered_by_slot)
+}
+
+/// Pure verdict logic for aggregated bidding (Law 4 seam; generic over the value
+/// type so tests use a trivial `V`). Contract:
+/// - NO slot had >=2 relays bidding → WARN: aggregation was never exercised, so we
+///   do NOT green "aggregated bidding verified" (a single delivering relay must
+///   not score as multi-relay aggregation — the P3 false-green).
+/// - a competitive slot where the delivered value < the best available bid →
+///   suboptimal selection (value left on the table) → recorded, verdict WARN.
+/// - otherwise → PASS.
+pub fn classify_best_bid<V>(
+    bids_by_slot: &BTreeMap<u64, Vec<(String, V)>>,
+    delivered_by_slot: &BTreeMap<u64, V>,
+) -> CheckResult
+where
+    V: Copy + Ord + std::fmt::Display,
+{
+    let competitive: Vec<(u64, &Vec<(String, V)>)> = bids_by_slot
+        .iter()
+        .filter(|(_, bids)| {
+            bids.iter()
+                .map(|(r, _)| r)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                >= 2
+        })
+        .map(|(s, b)| (*s, b))
+        .collect();
+
+    if competitive.is_empty() {
+        return CheckResult::warn(
+            "relay.best_bid",
+            2,
+            format!(
+                "No multi-relay bid competition observed across {} slot(s) — aggregated bidding was \
+                 NOT exercised (single relay, or relays did not bid on overlapping slots). Not \
+                 asserting best-bid selection.",
+                bids_by_slot.len()
+            ),
+        )
+        .with_data(
+            serde_json::json!({ "competitive_slots": 0, "slots_with_bids": bids_by_slot.len() }),
+        );
+    }
+
+    let mut suboptimal = Vec::new();
+    for (slot, bids) in &competitive {
+        let best = bids.iter().map(|(_, v)| *v).max().unwrap(); // competitive => non-empty
+        if let Some(delivered) = delivered_by_slot.get(slot)
+            && *delivered < best
+        {
+            suboptimal.push(serde_json::json!({
+                "slot": slot,
+                "best_bid": best.to_string(),
+                "delivered": delivered.to_string(),
+            }));
+        }
+    }
+
+    let n = competitive.len();
+    let data = serde_json::json!({
+        "competitive_slots": n,
+        "suboptimal_count": suboptimal.len(),
+        "suboptimal": suboptimal,
+    });
+
+    if suboptimal.is_empty() {
+        CheckResult::pass(
+            "relay.best_bid",
+            2,
+            format!(
+                "Aggregated bidding verified across {n} competitive slot(s): CB delivered >= the \
+                 best per-relay bid."
+            ),
+        )
+        .with_data(data)
+    } else {
+        CheckResult::warn(
+            "relay.best_bid",
+            2,
+            format!(
+                "{} of {n} competitive slot(s) delivered LESS than the best available bid (value \
+                 left on the table — timing/reorg or misrouting).",
+                suboptimal.len()
+            ),
+        )
+        .with_data(data)
     }
 }
 
@@ -370,6 +507,7 @@ pub async fn run_relay_checks(
     }
 
     results.push(check_payloads_delivered_multi(&live, start_slot, end_slot).await);
+    results.push(check_best_bid_selection(&live, start_slot, end_slot).await);
 
     // Check MEV delivery rate across ALL live relays.
     // Aggregated: best-of status; reports combined delivery stats.
@@ -496,4 +634,64 @@ pub async fn run_relay_checks(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // classify_best_bid verdict tests (u64 stands in for U256).
+    fn bids(pairs: &[(u64, &[(&str, u64)])]) -> BTreeMap<u64, Vec<(String, u64)>> {
+        pairs
+            .iter()
+            .map(|(slot, rs)| (*slot, rs.iter().map(|(r, v)| (r.to_string(), *v)).collect()))
+            .collect()
+    }
+
+    fn delivered(pairs: &[(u64, u64)]) -> BTreeMap<u64, u64> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn best_bid_warn_when_no_multi_relay_competition() {
+        // The false-green: only one relay bid per slot → aggregation never
+        // exercised. Must NOT pass as "aggregated bidding verified".
+        let b = bids(&[(5, &[("relay-a", 100)]), (6, &[("relay-a", 200)])]);
+        let d = delivered(&[(5, 100), (6, 200)]);
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(
+            r.status,
+            CheckStatus::Warn,
+            "single-relay coverage must not pass as aggregation"
+        );
+        assert_eq!(r.data["competitive_slots"], 0);
+    }
+
+    #[test]
+    fn best_bid_pass_when_delivered_matches_best() {
+        // Two relays compete; CB delivered the higher bid.
+        let b = bids(&[(5, &[("relay-a", 100), ("relay-b", 150)])]);
+        let d = delivered(&[(5, 150)]);
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["competitive_slots"], 1);
+        assert_eq!(r.data["suboptimal_count"], 0);
+    }
+
+    #[test]
+    fn best_bid_warn_when_delivered_below_best() {
+        // Two relays compete; CB delivered LESS than the best available bid.
+        let b = bids(&[(5, &[("relay-a", 100), ("relay-b", 150)])]);
+        let d = delivered(&[(5, 100)]);
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert_eq!(r.data["suboptimal_count"], 1);
+    }
+
+    #[test]
+    fn best_bid_empty_warns_no_competition() {
+        let b: BTreeMap<u64, Vec<(String, u64)>> = BTreeMap::new();
+        let d: BTreeMap<u64, u64> = BTreeMap::new();
+        assert_eq!(classify_best_bid(&b, &d).status, CheckStatus::Warn);
+    }
 }
