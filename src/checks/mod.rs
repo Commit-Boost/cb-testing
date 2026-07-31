@@ -85,6 +85,7 @@ impl CheckResult {
     }
 }
 
+pub mod best_bid;
 pub mod cb_metrics;
 pub mod chain_health;
 pub mod mux_routing;

@@ -498,6 +498,18 @@ async fn run_verification(cli: &Cli) -> i32 {
         .await,
     );
 
+    info!("Running best-bid (aggregated bidding) check...");
+    all_checks.push(
+        checks::best_bid::check_best_bid_selection(
+            &enclave_name,
+            &services.cb_service_names,
+            &relays,
+            window.start_slot,
+            window.end_slot,
+        )
+        .await,
+    );
+
     info!("Running CB metrics checks...");
     all_checks.extend(
         checks::cb_metrics::run_metrics_checks(
