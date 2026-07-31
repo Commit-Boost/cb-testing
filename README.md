@@ -24,14 +24,14 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HELIX_RELAY_IMAGE` | `helix-relay:kurtosis` | Custom Helix relay image |
+| `HELIX_RELAY_IMAGE` | `ghcr.io/gattaca-com/helix-relay:main` | Helix relay image |
 | `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | mev-boost relay (multi-relay scenarios) |
-| `MEV_BOOST_IMAGE` | `commit-boost/pbs:kurtosis` | Commit-Boost PBS image |
+| `MEV_BOOST_IMAGE` | `commit-boost/commit-boost:kurtosis` | Commit-Boost sidecar image |
 | `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
 | `BUILDER_EL_IMAGE` | `ethpandaops/reth-rbuilder:develop` | Builder execution client |
 
-The `.env` file is read automatically by `generate_kurtosis_configs.py`.
-It is gitignored — do not commit it. Use `.env.example` as the reference.
+The `.env` file is read automatically by `just generate-configs` (the `sim generate`
+command). It is gitignored — do not commit it. Use `.env.example` as the reference.
 
 ## Kurtosis setup / gotchas
 
@@ -45,9 +45,9 @@ The fork generalizes hardcoded patterns from upstream, enabling configs like com
 
 ### Kurtosis configs
 
-Kurtosis uses a default Commit-Boost config that can be overridden by inlining it into the kurtosis config — see `configs/example-kurtosis-config.yml`. Every generated test config uses this pattern.
+Kurtosis uses a default Commit-Boost config that can be overridden by inlining it into the kurtosis config. Every generated test config uses this pattern: the helix and commit-boost configs are embedded as the two `|` block scalars under `mev_params`.
 
-`generate_kurtosis_configs.py` generates test scenarios from `.env`:
+`sim generate` (via `just generate-configs`) builds the test scenarios, applying any `.env` image overrides:
 
 ```bash
 just generate-configs
@@ -197,13 +197,12 @@ cb-testing/
   README.md
   .env.example            # Docker image overrides
   scripts/
-    run-and-verify.sh     # Attached mode launcher
-    generate_kurtosis_configs.py  # Config generator
+    run-and-verify.sh     # Attached mode launcher (preflight-gated)
   configs/
-    generated/            # Pre-generated test scenarios
-    example-kurtosis-config.yml
+    generated/            # Test scenarios, emitted by `sim generate`
   src/
     main.rs               # cb-verify binary
+    bin/sim/              # sim: generate | preflight | triage
     checks/
       chain_health.rs     # Finality, sync, missed slots
       relay_pipeline.rs   # Delivery, registration, MEV rate

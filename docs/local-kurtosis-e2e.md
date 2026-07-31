@@ -109,7 +109,7 @@ kurtosis clean -a                     # full wipe
   `helix_relay_config` the pinned fork (`ethereum-package @ 4844f884`) renders. The UTF-8 grpc error is a
   SECONDARY symptom of kurtosis streaming the crashing container. Reproduced on kurtosis 1.20.0 AND 1.18.1
   (NOT a kurtosis-version issue). FIX (chosen: track latest helix): reconcile the embedded
-  `helix_relay_config` in `scripts/generate_kurtosis_configs.py` to current `:main`. Source of truth =
+  `HELIX_RELAY_CONFIG` const in `src/bin/sim/genmodel/helix.rs` to current `:main`. Source of truth =
   the `:main` BINARY's serde metadata (`docker create` + `docker cp /app/helix-relay` + `strings`), NOT
   the ws-workspace helix checkout (a divergent WS branch, unreliable). Two drifts fixed:
     1. Deleted `network_config: !Custom {dir_path, genesis_validator_root, genesis_time}` — `:main` removed

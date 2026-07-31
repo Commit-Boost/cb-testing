@@ -79,10 +79,10 @@ show-logs enclave="CB-Testnet":
 test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
     cargo run --release --bin test-mux -- {{enclave}} {{config}}
 
-# Generate Kurtosis YAML configs from templates into configs/generated/
-# Loads optional .env for Docker image overrides (see .env.example).
+# Generate Kurtosis YAML configs into configs/generated/ (the typed `sim`
+# generator). Loads optional .env for Docker image overrides (see .env.example).
 generate-configs:
-    python3 scripts/generate_kurtosis_configs.py
+    cargo run --quiet --bin sim -- generate
 
 # Run kurtosis testnet with verification on target `config`.
 # Observes 1 epoch starting at target_epoch. Chain just needs to reach
