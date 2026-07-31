@@ -34,6 +34,29 @@ classifier, then test + correct it.**
    the adversarial multi-relay case. (Also noted while here: `missed` — relay delivered a slot with no
    on-chain block — is counted but never downgrades the verdict; and a mismatch is WARN, not FAIL.)
 
+## Status (2026-07-31): 2 of 3 LANDED + reviewed; best-bid backed out pending correct source
+- **mux.routing ✓ LANDED** (`2868e8e`): pure `classify_mux_routing`; WARNs on `routing_decisions_verified==0`.
+- **payload_hash_match ✓ LANDED** (`cad323a`, `37ebd75`): pure `classify_payload_matches`; detects per-(relay,slot)
+  conflict; WARN.
+- **relay.best_bid ✗ BACKED OUT** (`effc560` reverted by `4b873af`): the adversarial review found the data
+  source unsound — `get_builder_blocks_received` includes builder bids that failed sim and were never
+  offered to the proposer, so it would false-alarm on correct runs; sampling also made "no competition"
+  WARN the default. The pure `classify_best_bid` logic was fine. **Correct follow-up:** source per-relay
+  bids from CB "received new header" log events (`relay_id`+`slot`+`value_eth`, already parsed by
+  `parse_cb_log_line`, full-coverage), parse `value_eth` decimal→wei for `Ord`, compare delivered vs max
+  OFFERED bid. Needs CB-log context (enclave + cb_service_names) plumbed into the check — its own reviewed
+  slice. `check_payloads_delivered_multi` stays as the coverage check meanwhile.
+
+**Review confirmations / notes for J:**
+- **WARN is non-fatal** (`report.rs:136`, `main.rs:547`): exit code / overall result key ONLY on a tier-1
+  FAIL. So these PASS→WARN changes do NOT break CI/the nightly. BUT that means a real anomaly these
+  trust-core checks detect (relay equivocation; unverifiable routing) yields a GREEN exit — a CI consumer
+  must parse the JSON `result:"WARN"`, not just the exit code. Decide if any of these should be able to FAIL.
+- Lenient gaps left as-is (within your ratified scope; flagged for possible future tightening): payload
+  `missed` (relay delivered a slot with no on-chain block) never downgrades the verdict and is
+  indistinguishable from a transient beacon error; a mux "using mux config" event for a pubkey our TOML
+  parser missed folds into the generic WARN rather than its own parse-gap signal.
+
 ## J's decisions (2026-07-31) — RATIFIED
 - **mux.routing:** unverifiable (`pubkeys_verified==0`) → **WARN** (not PASS), and CB debug logging is **required**
   for mux scenarios. Finding: the generated cb-mux config ALREADY sets `[logs.stdout] level="debug"`, so the
