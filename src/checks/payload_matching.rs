@@ -100,8 +100,8 @@ where
                     .collect::<Vec<_>>(),
             }));
             warn!(
-                "Cross-relay payload conflict at slot {slot}: relays reported {} distinct block \
-                 hashes (equivocation or relay bug)",
+                "Payload hash conflict at slot {slot}: {} distinct block hashes reported \
+                 (relay equivocation or bug)",
                 distinct.len()
             );
         }
