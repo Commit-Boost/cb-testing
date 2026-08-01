@@ -34,7 +34,10 @@ classifier, then test + correct it.**
    the adversarial multi-relay case. (Also noted while here: `missed` — relay delivered a slot with no
    on-chain block — is counted but never downgrades the verdict; and a mismatch is WARN, not FAIL.)
 
-## Status (2026-07-31): 2 of 3 LANDED + reviewed; best-bid backed out pending correct source
+## Status: LANDED — all 3 fixed + twice-reviewed + live-devnet-validated. best_bid v2 RE-LANDED via the CB-log source (`145d7e1`), NOT backed out (the note below predates the re-land). Files: `src/checks/{mux_routing,payload_matching,best_bid}.rs`. See `docs/plans/INDEX.md`.
+(historical detail below; best-bid section reads "backed out" but v2 shipped — see the commit trail)
+
+### Superseded status (2026-07-31, kept for history): 2 of 3 landed, best-bid backed out pending correct source
 - **mux.routing ✓ LANDED** (`2868e8e`): pure `classify_mux_routing`; WARNs on `routing_decisions_verified==0`.
 - **payload_hash_match ✓ LANDED** (`cad323a`, `37ebd75`): pure `classify_payload_matches`; detects per-(relay,slot)
   conflict; WARN.

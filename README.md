@@ -25,7 +25,7 @@ cp .env.example .env
 | Variable | Default | Purpose |
 |---|---|---|
 | `HELIX_RELAY_IMAGE` | `ghcr.io/gattaca-com/helix-relay:main` | Helix relay image |
-| `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | mev-boost relay (multi-relay scenarios) |
+| `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | flashbots mev-boost-relay — **no longer used** (multi-relay now runs two helix instances); still emitted into configs but inert |
 | `MEV_BOOST_IMAGE` | `commit-boost/commit-boost:kurtosis` | Commit-Boost sidecar image |
 | `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
 | `BUILDER_EL_IMAGE` | `ethpandaops/reth-rbuilder:develop` | Builder execution client |
@@ -58,8 +58,8 @@ Six scenarios are generated:
 | Config | What it tests |
 |---|---|
 | `cb-basic.yml` | Single relay (helix), default CB config |
-| `cb-multiple-relays.yml` | Two relays (helix + flashbots), aggregated bidding |
-| `cb-mux.yml` | Mux routing — 128 validators to helix, 128 to flashbots |
+| `cb-multiple-relays.yml` | Two helix relay instances, aggregated bidding |
+| `cb-mux.yml` | Mux routing — 128 validators to helix-1, 128 to helix-2 |
 | `cb-skip-sigverify.yml` | Fast path with BLS signature verification disabled |
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
@@ -100,6 +100,11 @@ cargo run --release --bin test-relay -- http://127.0.0.1:PORT 128 160
 
 ## What it checks
 
+> The tables below are a quick reference. **[`docs/CHECKS.md`](docs/CHECKS.md) is the authoritative
+> catalog** — per-check pass/warn/fail contract, data source, and the load-bearing verdict rule: the
+> process exit code keys **only on a tier-1 FAIL**; WARN and SKIP are non-fatal, so a consumer gating on
+> a trust-critical anomaly must read the JSON `result:"WARN"`, not just the exit code.
+
 ### Tier 1: Pipeline health (must pass)
 
 | Check | What it verifies |
@@ -119,6 +124,7 @@ cargo run --release --bin test-relay -- http://127.0.0.1:PORT 128 160
 | `relay.builder_blocks_received` | Builder submitted blocks to relay | > 0 |
 | `relay.mev_delivery_rate` | Slots using relay-built blocks vs local | >= 30% |
 | `relay.validator_registrations` | All validators registered on relay | 100% |
+| `relay.best_bid` | CB delivered >= the best bid it was offered across relays | competition + delivered |
 
 ### Tier 3: CB metrics 
 
@@ -151,6 +157,17 @@ Options:
       --live-metrics          Poll :9090/metrics during observation
       --show-logs             Print raw CB PBS logs, no checks
       --output-dir <DIR>      Save JSON reports (requires --json)
+      --skip-finalization-check  Skip the finality check (for early/short windows)
+```
+
+### sim (generate | preflight | triage)
+
+```
+sim generate [SCENARIO] [--out-dir DIR] [--check]   # typed Rust config generator
+                                                    #   --check: verify on-disk configs match (CI drift gate)
+sim preflight <ARGS_FILE>                           # validate the config against the real helix image (~1s)
+                                                    #   exit 1 only on a genuine config-drift Fail
+sim triage <ENCLAVE>                                # extract each dead service's root panic (JSON)
 ```
 
 ### test-mux

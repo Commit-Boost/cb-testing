@@ -7,7 +7,8 @@
 Rust binary (the ratified full-Rust consolidation), and collapse the image-name drift — WITHOUT typed
 serde mirrors of the config bodies.
 
-## Status: LANDED (Tasks 0-2), UNCOMMITTED-TO-REMOTE — for J review (2026-07-30)
+## Status: LANDED (committed `097a0b7`→`05a450f`; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{generate,genmodel/*}.rs`; Python generator + stale example deleted. See `docs/plans/INDEX.md`.
+(historical detail below — 2026-07-30)
 `feat/sim-harness`: `097a0b7` (Task 0, golden harness) → `70e4081` (Task 1, `sim generate` + review fixes)
 → `05a450f` (Task 2, retire Python + repoint docs). All 6 scenarios reproduce their golden byte-for-byte
 through the real `sim generate` binary; `just generate-configs` runs it; the Python generator + stale

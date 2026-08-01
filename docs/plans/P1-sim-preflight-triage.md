@@ -147,7 +147,8 @@ Per the coverage grill: a manual verb diagnoses faster but doesn't prevent the s
   `kurtosis run` wrapped in `if !`; on failure fires `sim triage "$ENCLAVE"` then exits 1. **NOT committed**
   (awaiting J review of the full P1 diff).
 
-## Status: P1 COMPLETE (Tasks 0-4), UNCOMMITTED — awaiting J review (2026-07-30)
+## Status: LANDED (committed `a0c8be4`+; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{preflight,triage,diagnose,render}.rs`, `scripts/run-and-verify.sh`. See `docs/plans/INDEX.md`.
+(historical detail below — Tasks 0-4 all committed 2026-07-30)
 77 tests green (lib+bin, 0 fail/0 warn). Proven end-to-end against the real `:main` image: valid cb-basic.yml
 -> `helix: pass`, exit 0, ~8.5s; a config with `hostname` renamed -> `Fail{field:"hostname"}`, exit 1, ~0.3s.
 The multi-hour drift saga of 2026-07-30 now collapses to a sub-second, structured, exit-coded gate. Nothing
