@@ -630,7 +630,7 @@ async fn run_checks(
 
     let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.arg("--enclave").arg(name);
-    cmd.arg("--cb-config").arg(config);
+    cmd.arg("--config").arg(config);
     cmd.arg("--json");
     cmd.arg("--timeout").arg("3600");
     cmd.arg("--min-epochs").arg("0"); // Already observed
