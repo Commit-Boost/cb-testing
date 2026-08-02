@@ -4,12 +4,18 @@ Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit
 
 ## Prerequisites
 
-- [Kurtosis CLI](https://docs.kurtosis.com/install) (>= 0.90)
-- [Rust toolchain](https://rustup.rs/) (1.91+)
+- [Kurtosis CLI](https://docs.kurtosis.com/install) — **pin 1.18.1** (the proven-good version; the parsers
+  rely on its text-table output, and a newer CLI, e.g. 1.20.0, writes an incompatible
+  `~/.config/kurtosis/kurtosis-config.yml` — see `docs/local-kurtosis-e2e.md`)
+- [Rust toolchain](https://rustup.rs/) (1.91+, edition 2024)
 - Docker (for Kurtosis)
+- The forked `ethereum-package` submodule: `git submodule update --init`
 
-If you're testing a local CB build, you also need:
-- The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned
+If you're testing a local CB build (the default — the CB sidecar image is built, not pulled), you also need:
+- The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned as a sibling
+  (`../commit-boost-client`, overridable — see `just build-cb-image`)
+
+> Contributing? See **[`docs/DEVELOPING.md`](docs/DEVELOPING.md)** for the dev loop and how to add checks + scenarios.
 
 ## Docker image configuration
 
@@ -67,10 +73,14 @@ Six scenarios are generated:
 ## Quick start
 
 ```bash
-# ONE-TIME: build the Commit-Boost image the devnet runs (from the sibling repo)
+# ONE-TIME (from scratch): init the forked ethereum-package, then build the
+# Commit-Boost image the devnet runs (from the sibling commit-boost-client repo)
+git submodule update --init
 just build-cb-image                 # -> commit-boost/commit-boost:kurtosis
 
-# From scratch: generate configs, pull public images, launch + verify
+# Generate configs, pull public images, launch + verify. Prints the tiered
+# report and exits 0 (pass) / 1 (tier-1 FAIL) / 2 (setup failure). Add --json
+# to the verifier for the machine-readable verdict (see docs/CHECKS.md).
 just e2e                            # cb-basic
 just e2e configs/generated/cb-mux.yml
 
@@ -93,9 +103,6 @@ just show-logs CB-Testnet
 
 # Quick mux routing diagnostic
 just test-mux CB-Testnet configs/generated/cb-mux.yml
-
-# Test relay API endpoints
-cargo run --release --bin test-relay -- http://127.0.0.1:PORT 128 160
 ```
 
 ## What it checks
@@ -173,19 +180,10 @@ sim triage <ENCLAVE>                                # extract each dead service'
 ### test-mux
 
 ```
-test-mux <enclave> <config>
+just test-mux <enclave> <config>
 
-Fetches CB PBS logs, parses mux events, verifies routing against config.
-No observation window. Completes in seconds.
-```
-
-### test-relay
-
-```
-test-relay <relay_url> <start_slot> <end_slot> [pubkey]
-
-Tests relay data API endpoints with slot filtering.
-Verifies delivered payloads, builder blocks, validator registration.
+Runs cb-verify with --config against a running enclave: fetches CB PBS logs,
+parses mux events, verifies routing against config. No observation window.
 ```
 
 ## How it works
@@ -218,7 +216,7 @@ Verifies delivered payloads, builder blocks, validator registration.
 
 ```
 cb-testing/
-  Cargo.toml              # Workspace: cb-verify, test-mux, test-relay
+  Cargo.toml              # Workspace: cb-verify, cb-orchestrator, sim
   justfile                # Build/test/launch commands
   README.md
   .env.example            # Docker image overrides
@@ -235,8 +233,5 @@ cb-testing/
       payload_matching.rs # Hash matching
       mux_routing.rs      # Mux config parsing, log analysis
       cb_metrics.rs       # Prometheus metrics checks
-    bin/
-      test_mux.rs         # Mux diagnostic binary
-      test_relay.rs       # Relay API diagnostic binary
   ethereum-package/       # Forked Kurtosis package (submodule)
 ```
