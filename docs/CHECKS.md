@@ -81,6 +81,9 @@ dies mid-run:
 | `payload_hash_match` | 1 | relay data API + beacon | relay-delivered hashes match on-chain, no cross-relay conflict |
 | `relay.best_bid` | 2 | CB logs + relay data API | CB delivered ≥ the best per-relay bid it was offered |
 | `mux.routing` | 1 | CB logs | every checked getHeader routed per the `[[mux]]` config |
+| `feature.timing_games` | 1 | CB logs | timing-games codepath fired (≥1 `TG:` debug line); config-gated |
+| `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
+| `feature.skip_sigverify` | 1 | CB logs | skip-sigverify enabled; **WARN-only** (not runtime-confirmable); config-gated |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
 | `cb_submit_blinded_block_matrix` | 2 → 1 on FAIL | CB Prometheus | ≥1 blinded-block delivery (200/202) |
@@ -229,6 +232,25 @@ when a known pubkey is seen with its mux_id).
 - **SKIP** — no `[[mux]]` entries to verify. (A config that fails to parse produces a tier-1 FAIL
   from `main.rs`, not a SKIP.)
 
+### `feature.*` — tier 1 (CB logs), Law-3 feature-fired assertions
+
+One check per CB feature the `--config` enables, proving the feature's codepath actually fired at
+runtime (not just that generic health passed). Source: CB PBS debug logs (the toggle scenarios set
+`[logs.stdout] level = "debug"`). Detected by scanning the CB config template for `<key> = true`.
+Each is emitted **only when its feature is enabled** — an off feature produces no check at all.
+
+- **`feature.timing_games`** (`enable_timing_games`) — **PASS** on ≥1 `TG:` debug line
+  (`send_timed_get_header`), else **WARN** (enabled but unobserved — maybe no getHeader in the window).
+- **`feature.extra_validation`** (`extra_validation_enabled`) — **PASS** on ≥1 `fetched parent block`
+  / `fetching parent block` line, else **WARN**.
+- **`feature.skip_sigverify`** (`skip_sigverify`) — **always WARN**. This is a *negative* codepath
+  (sigverify is simply not called; no success log or metric), indistinguishable from OFF on the happy
+  path. Honestly reports "not runtime-confirmable" rather than a false green. Confirming it needs a
+  bad-signature-injecting relay in the helix mock.
+
+A marker feature enabled-but-unobserved is WARN, never FAIL (no-false-red — the same discipline as
+`mux.routing`). All three are non-fatal (only a tier-1 FAIL fails the run).
+
 ### `cb_*_matrix` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)
 
 Four checks, one per endpoint, built from CB's status-code counters
@@ -303,12 +325,16 @@ the intro.
 
 ## Known gaps and caveats (factual, from the code)
 
-- **Feature scenarios with no feature-fired assertion (Law 3 gap).** North-Star Law 3 wants every
-  scenario to positively assert its feature's codepath fired. Only `mux.routing` (routing decisions)
-  and `relay.best_bid` (cross-relay bid comparison) currently do. The `skip-sigverify`,
-  `extra-validation`, and `timing-games` scenarios run only the generic checks above — there is **no
-  check that asserts those features fired** (e.g. a skip-sigverify counter > 0, a timing-game poll
-  count, an extra-validation RPC hit). Such a scenario can pass while the feature silently no-oped.
+- **Feature-fired assertions (Law 3) — mostly closed.** North-Star Law 3 wants every scenario to
+  positively assert its feature's codepath fired. Now five checks do: `mux.routing`, `relay.best_bid`,
+  and the config-gated `feature.timing_games` (≥1 `TG:` debug line), `feature.extra_validation` (≥1
+  parent-block fetch log). The residual gap is **`skip_sigverify`**: it is a *negative* codepath
+  (signature verification simply not called, with no success log or metric), indistinguishable from
+  OFF on the happy path with a valid-signature mock relay. `feature.skip_sigverify` therefore reports
+  an honest **WARN** ("not runtime-confirmable") rather than a false green. Closing it fully needs a
+  bad-signature-injecting relay in the helix mock (then: ON delivers the bad-sig bid, OFF rejects it).
+  A marker feature that is enabled but unobserved WARNs (could be no getHeader in the window), never
+  FAILs — the no-false-red discipline.
 - **`relay.best_bid` is inert or degenerate in common setups.** It SKIPs any single-relay run (no
   aggregation to verify), and in mux mode — where each mux typically points a validator at exactly one
   relay — no slot sees ≥2 relays competing, so it WARNs "aggregation not exercised" rather than

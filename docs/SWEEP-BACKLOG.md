@@ -124,6 +124,20 @@ keeping the honest Inconclusive stub (partial would false-pass `[pbs]` drift). 1
 (= refactor #1). 16. fix + expand the nightly CI (matrix + build-cb-main lane + the enclave-name bug). 17.
 snapshot relay-data-API during the window (relay-dies-before-checks class). 18. structured run history / trend.
 
+### Feature status (updated 2026-08-01, campaign)
+- DONE: #3 image/build provenance (`report::Provenance`, `c9d18e4`); #10 `sim doctor` + #11
+  `sim checks --list --json` (`e6185c6`); #9 `sim diff` (verdict/provenance regression gate); #1
+  Law-3 feature-fired assertions (`feature.timing_games` / `.extra_validation` / `.skip_sigverify`).
+  H2/H3/C1/M4-M6 all landed earlier in the campaign.
+- NEXT (in order): #6 distinct-key 2-helix (divergent competition) → #7 Law 7 EL/CL matrix.
+- **NEW (surfaced by Law-3):** bad-signature-injecting helix mock relay — the only way to turn
+  `feature.skip_sigverify` from an honest WARN into a real ON/OFF differential test (ON delivers the
+  bad-sig bid, OFF rejects with `ValidationError::Sigverify`). Needs a fault mode in
+  `src/bin/sim/genmodel/helix.rs` + the relay mock. M/L. Same capability would sharpen any negative-path
+  feature test. Filed as a follow-up, not built.
+- **DEFERRED — do NOT autonomously build:** #5 ePBS first slice belongs to the `/epbs` arc, where J
+  gates every design decision and nothing commits without his review. Surface it to J; don't self-drive it.
+
 ## Notes
 - P3 is effectively COMPLETE despite the plan doc reading "best_bid backed out" — best_bid v2 re-landed
   (`145d7e1`). Law 6b (external-builder hook) is already satisfied in the fork.
