@@ -53,6 +53,18 @@ pub enum Command {
     /// Host-prerequisite preflight for a devnet: kurtosis, docker, memory
     /// headroom, the CB image, and the ethereum-package submodule.
     Doctor,
+    /// Compare two verification reports (JSON) and surface the verdict delta.
+    /// Exits nonzero if any check regressed — usable as a CI regression gate
+    /// after an image bump.
+    Diff {
+        /// The baseline report (the "from" side).
+        from: PathBuf,
+        /// The new report (the "to" side).
+        to: PathBuf,
+        /// Emit the structured diff as JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate Kurtosis args-files for the CB test scenarios (Rust port of the
     /// retired `generate_kurtosis_configs.py`).
     Generate {

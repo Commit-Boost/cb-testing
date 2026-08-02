@@ -1,9 +1,9 @@
 //! Verification check infrastructure: result types and status enum.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Status of a single verification check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum CheckStatus {
     Pass,
@@ -54,13 +54,14 @@ impl PartialOrd for CheckStatus {
 }
 
 /// Result of a single verification check.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
     pub id: String,
     pub tier: u8,
     #[serde(rename = "result")]
     pub status: CheckStatus,
     pub detail: String,
+    #[serde(default = "empty_data")]
     pub data: serde_json::Value,
 }
 

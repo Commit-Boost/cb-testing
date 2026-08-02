@@ -1,19 +1,19 @@
 //! Verification report formatting: terminal (colored) and JSON output.
 
 use colored::Colorize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::checks::{CheckResult, CheckStatus};
 
 /// Observation window: slot range that was verified.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservationWindow {
     pub start_slot: u64,
     pub end_slot: u64,
 }
 
 /// A single Docker image the run used, with its resolved image ID.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageRef {
     /// Role of the image in the pipeline (helix_relay, mev_boost, ...).
     pub role: String,
@@ -22,36 +22,38 @@ pub struct ImageRef {
     /// Resolved Docker image ID (`sha256:...`), or `null` when the image was
     /// not present locally / could not be inspected. Deliberately serialized as
     /// `null` (not omitted) so a report records that the image was unresolved.
+    #[serde(default)]
     pub id: Option<String>,
 }
 
 /// Provenance: WHAT was tested. Makes a report self-describing so two runs can
-/// be compared for regression detection (foundational for a future `sim diff`).
-#[derive(Debug, Clone, Serialize)]
+/// be compared for regression detection (consumed by `sim diff`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     /// Path to the Kurtosis config the run used (as passed on the CLI).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_path: Option<String>,
     /// Short content fingerprint of the config file bytes (first 12 hex of a
     /// std `DefaultHasher`). `None` if no config was read.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
     /// Resolved Docker image IDs for the images the devnet ran.
+    #[serde(default)]
     pub images: Vec<ImageRef>,
 }
 
 /// Full verification report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationReport {
     pub enclave: String,
     pub timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_window: Option<ObservationWindow>,
     pub result: CheckStatus,
     pub checks: Vec<CheckResult>,
     /// What was tested (config + resolved image IDs). Best-effort: `None` when
     /// docker is unreachable or the config could not be parsed.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
 }
 

@@ -14,6 +14,7 @@ use clap::Parser;
 mod checks_catalog;
 mod cli;
 mod diagnose;
+mod diff;
 mod doctor;
 mod generate;
 mod genmodel;
@@ -32,6 +33,7 @@ fn main() {
         Command::Triage { enclave } => triage(&enclave),
         Command::Checks { list, json } => checks(list, json),
         Command::Doctor => doctor(),
+        Command::Diff { from, to, json } => diff_reports(&from, &to, json),
         Command::Generate {
             scenario,
             out_dir,
@@ -61,6 +63,16 @@ fn checks(list: bool, json: bool) {
     if let Err(e) = checks_catalog::run(list, json) {
         tracing::error!(error = %e, "sim checks failed");
         eprintln!("checks error: {e:?}");
+        std::process::exit(1);
+    }
+}
+
+/// Compare two verification reports (`sim diff`). Implemented in `diff::run`;
+/// exits nonzero if any check regressed (usable as a CI regression gate).
+fn diff_reports(from: &Path, to: &Path, json: bool) {
+    if let Err(e) = diff::run(from, to, json) {
+        tracing::error!(error = %e, "sim diff failed");
+        eprintln!("diff error: {e:?}");
         std::process::exit(1);
     }
 }
