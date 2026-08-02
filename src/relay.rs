@@ -1,15 +1,59 @@
 //! Relay Data API client.
 //!
 //! Thin async wrapper over reqwest returning alloy relay types.
-//! Implements the Flashbots relay data API endpoints needed for verification.
+//! Implements the helix relay data API endpoints needed for verification
+//! (the relays run `ghcr.io/gattaca-com/helix-relay`, not the Flashbots
+//! reference relay, so helix's response contract is what we target here).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
+use alloy_primitives::B256;
 use alloy_rpc_types_beacon::relay::{BuilderBlockReceived, ProposerPayloadDelivered};
 use eyre::Result;
 use tracing::warn;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The relay caps `limit` at 200 rows per page.
+const PAGE_LIMIT: usize = 200;
+
+/// Safety bound on pagination: 50 × 200 = 10,000 payloads max.
+const MAX_PAGES: usize = 50;
+
+/// Decide whether to keep paging after fetching a page.
+///
+/// This is the pure loop-termination seam for `get_payloads_delivered`. It is
+/// deliberately order-agnostic (works whether the relay returns rows ascending
+/// or descending by slot) and defensive against a relay that ignores the
+/// `cursor` query param.
+///
+/// Returns `true` to keep paging, `false` to stop.
+///
+/// - **No-progress / ignored-cursor guard:** if the next cursor equals the
+///   previous one, the relay did not advance the page (e.g. helix ignored the
+///   cursor and re-served the same 200 rows). Stop rather than refetch the
+///   same page up to `MAX_PAGES` times.
+/// - **Range-complete guard:** once we have collected at least one in-range row
+///   (`prev_seen_count > 0`), a page that adds no new in-range rows means we
+///   have paged past the requested window in whichever direction the relay
+///   orders results. Stop. While `prev_seen_count == 0` we keep paging so that
+///   an ascending relay whose earliest pages sit below the window still reaches
+///   the window instead of terminating after page 1.
+fn page_made_progress(
+    prev_cursor: Option<&str>,
+    new_cursor: Option<&str>,
+    prev_seen_count: usize,
+    new_seen_count: usize,
+) -> bool {
+    if new_cursor == prev_cursor {
+        return false;
+    }
+    if prev_seen_count > 0 && new_seen_count == prev_seen_count {
+        return false;
+    }
+    true
+}
 
 /// Relay data API client.
 pub struct RelayClient {
@@ -56,24 +100,38 @@ impl RelayClient {
     ///
     /// Returns payloads delivered in the given slot range.
     ///
-    /// The relay enforces a maximum limit of 200. We paginate using `cursor`
-    /// (which is an opaque DB ID from the last item's `block_number` field) until
-    /// we've fetched all payloads in the slot range or the relay returns no more results.
+    /// The relay caps `limit` at 200, so we paginate with `cursor` (an opaque
+    /// DB id we source from the last row's `block_number`). We make **no**
+    /// assumption about how helix orders results (ascending or descending by
+    /// slot) or whether it honors `cursor` at all:
+    ///
+    /// - Termination is order-agnostic: we stop once a page adds no new
+    ///   in-range rows after we have already collected some (see
+    ///   [`page_made_progress`]), which terminates correctly in either
+    ///   direction without undercounting deliveries past the first page.
+    /// - If the relay ignores `cursor` and re-serves the same page, the cursor
+    ///   does not advance and we stop after 2 pages instead of refetching the
+    ///   same rows `MAX_PAGES` times.
+    /// - Rows are de-duplicated by `block_hash`, so a refetched page cannot
+    ///   double-count a delivery.
     pub async fn get_payloads_delivered(
         &self,
         start_slot: u64,
         end_slot: u64,
     ) -> Result<Vec<ProposerPayloadDelivered>> {
         let mut all = Vec::new();
+        let mut seen: HashSet<B256> = HashSet::new();
         let mut cursor: Option<String> = None;
-        let max_pages = 50; // safety: 50 × 200 = 10,000 payloads max
 
-        for _ in 0..max_pages {
+        for _ in 0..MAX_PAGES {
             let url = format!(
                 "{}/relay/v1/data/bidtraces/proposer_payload_delivered",
                 self.base_url
             );
-            let mut req = self.client.get(&url).query(&[("limit", "200")]);
+            let mut req = self
+                .client
+                .get(&url)
+                .query(&[("limit", PAGE_LIMIT.to_string())]);
             if let Some(ref c) = cursor {
                 req = req.query(&[("cursor", c)]);
             }
@@ -84,28 +142,35 @@ impl RelayClient {
                 break;
             }
 
-            // Check if we've gone past our slot range
-            let min_slot = resp.iter().map(|p| p.slot).min().unwrap_or(0);
-            let _max_slot = resp.iter().map(|p| p.slot).max().unwrap_or(0);
+            let prev_seen_count = seen.len();
 
-            // Filter to our slot range
+            // Collect in-range rows, de-duplicated by block hash so a relay that
+            // ignores the cursor (and re-serves the same page) cannot
+            // double-count a delivery.
             for p in &resp {
-                if p.slot >= start_slot && p.slot <= end_slot {
+                if p.slot >= start_slot && p.slot <= end_slot && seen.insert(p.block_hash) {
                     all.push(p.clone());
                 }
             }
+            let new_seen_count = seen.len();
 
-            // If the oldest result is before our range, we can stop
-            if min_slot < start_slot {
+            // A short page means the relay had nothing more for this query; this
+            // is the only stop condition the normal small-window case hits, so
+            // it still completes in a single request.
+            if resp.len() < PAGE_LIMIT {
                 break;
             }
 
-            // Use the last item's block_number as cursor for pagination
-            if let Some(last) = resp.last() {
-                cursor = Some(last.block_number.to_string());
-            } else {
+            let new_cursor = resp.last().map(|last| last.block_number.to_string());
+            if !page_made_progress(
+                cursor.as_deref(),
+                new_cursor.as_deref(),
+                prev_seen_count,
+                new_seen_count,
+            ) {
                 break;
             }
+            cursor = new_cursor;
         }
 
         Ok(all)
@@ -156,5 +221,48 @@ impl RelayClient {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_made_progress;
+
+    #[test]
+    fn continues_when_cursor_advances_and_coverage_grows() {
+        // Normal forward progress: new cursor, new in-range rows.
+        assert!(page_made_progress(Some("100"), Some("101"), 5, 12));
+    }
+
+    #[test]
+    fn continues_on_first_page() {
+        // Page 1: no previous cursor, first in-range rows collected.
+        assert!(page_made_progress(None, Some("42"), 0, 10));
+    }
+
+    #[test]
+    fn stops_when_cursor_does_not_advance() {
+        // Relay ignored the cursor and re-served the same page (same last
+        // block_number). Bounds the ignore-cursor case to 2 pages.
+        assert!(!page_made_progress(Some("77"), Some("77"), 3, 3));
+        // ...even if it somehow reported "new" rows, an unchanged cursor stops us.
+        assert!(!page_made_progress(Some("77"), Some("77"), 3, 9));
+    }
+
+    #[test]
+    fn stops_when_in_range_and_page_adds_nothing_new() {
+        // We already collected in-range rows and this (cursor-advanced) page
+        // adds none: we've paged past the window. This is the order-agnostic
+        // range-complete termination (holds for ascending or descending).
+        assert!(!page_made_progress(Some("50"), Some("40"), 11, 11)); // descending
+        assert!(!page_made_progress(Some("50"), Some("60"), 11, 11)); // ascending
+    }
+
+    #[test]
+    fn keeps_paging_below_range_before_entering_window() {
+        // Ascending relay whose early pages sit entirely below the window:
+        // zero in-range rows yet, so we must keep paging to reach the window
+        // rather than terminate after page 1 (the old descending-only bug).
+        assert!(page_made_progress(Some("10"), Some("20"), 0, 0));
     }
 }
