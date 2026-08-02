@@ -14,15 +14,33 @@ on:
         description: 'Observation window in epochs'
         required: false
         default: '1'
-
-env:
-  ENCLAVE: cb-ci-${{ github.run_id }}
+      cb_image:
+        description: 'Commit-Boost PBS image (MEV_BOOST_IMAGE). Override to pin a specific tag/digest.'
+        required: false
+        default: 'ghcr.io/commit-boost/pbs:latest'
 
 jobs:
   verify:
-    name: devnet + verify
+    name: devnet + verify (${{ matrix.scenario }})
+    # RUNNER MEMORY: a full devnet (geth+lighthouse + helix relay(s) + reth-rbuilder
+    # + commit-boost + dora/spamoor/prometheus) needs ~15-20GB; cb-mux runs TWO
+    # helix instances (8GB cap each) → ~25GB+. A GitHub-hosted ubuntu-latest has
+    # only ~7GB RAM, so this nightly requires a LARGE or SELF-HOSTED runner. Change
+    # runs-on accordingly before relying on it (cb-mux will OOM on the hosted runner).
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
+    strategy:
+      # Don't cancel cb-mux just because cb-basic failed (or vice versa); we
+      # want independent e2e signal from each scenario every night.
+      fail-fast: false
+      matrix:
+        scenario: [cb-basic, cb-mux]
+
+    env:
+      # One enclave per (run, scenario) so matrix legs never collide and each
+      # leg's Teardown removes exactly the enclave it launched.
+      ENCLAVE: cb-ci-${{ github.run_id }}-${{ matrix.scenario }}
 
     steps:
       - name: Checkout
@@ -56,31 +74,44 @@ jobs:
           kurtosis analytics disable
           echo "$(dirname $(which kurtosis))" >> $GITHUB_PATH
 
-      - name: Generate cb-basic config
+      - name: Generate ${{ matrix.scenario }} config
         # The Python generator + its checked-in example config were retired (P2);
         # `sim generate` is now the source. The nightly builds no commit-boost
-        # image, so pin the public CB image the old example config used.
-        # NOTE (for review): confirm ghcr.io/commit-boost/pbs:latest is current
-        # enough for the SSZ-era cb-verify checks, or switch to building the image.
+        # image, so it pins the public CB image via .env (MEV_BOOST_IMAGE).
+        #
+        # REPRODUCIBILITY GAP: the default below is a moving `:latest` tag, so a
+        # replay can silently pick up a different PBS binary. commit-boost-client
+        # is NOT checked out here (only ethereum-package is a submodule), so we
+        # can't build the image from `main` in-workflow without adding that repo.
+        # For a reproducible run, override the `cb_image` workflow_dispatch input
+        # with a pinned tag/digest, e.g.
+        #   ghcr.io/commit-boost/pbs@sha256:<digest>
+        # TODO: promote a pinned digest to the default here once the SSZ-current
+        # PBS image is confirmed (see the review NOTE this replaced), so the
+        # scheduled nightly is reproducible too, not just manual dispatches.
+        env:
+          # On schedule there are no inputs, so fall back to the pinned default.
+          CB_IMAGE: ${{ github.event.inputs.cb_image || 'ghcr.io/commit-boost/pbs:latest' }}
         run: |
-          echo "MEV_BOOST_IMAGE=ghcr.io/commit-boost/pbs:latest" > .env
-          cargo run --bin sim -- generate cb-basic
+          echo "MEV_BOOST_IMAGE=${CB_IMAGE}" > .env
+          cargo run --bin sim -- generate ${{ matrix.scenario }}
 
       - name: Launch devnet + verify
         timeout-minutes: 60
         run: |
           ./scripts/run-and-verify.sh \
-            --config configs/generated/cb-basic.yml \
+            --enclave "$ENCLAVE" \
+            --config configs/generated/${{ matrix.scenario }}.yml \
             --json \
             --live-metrics \
             --min-epochs "${{ github.event.inputs.min_epochs }}" \
-            --target-epoch "${{ github.event.inputs.target_epoch }}" \
+            --target-epoch "${{ github.event.inputs.target_epoch }}"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: verify-${{ github.run_id }}
+          name: verify-${{ matrix.scenario }}-${{ github.run_id }}
           path: |
             verify-report.json
             kurtosis-run.log
