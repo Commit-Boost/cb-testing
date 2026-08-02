@@ -11,8 +11,10 @@ use std::path::Path;
 
 use clap::Parser;
 
+mod checks_catalog;
 mod cli;
 mod diagnose;
+mod doctor;
 mod generate;
 mod genmodel;
 mod preflight;
@@ -28,6 +30,8 @@ fn main() {
     match cli.command {
         Command::Preflight { args_file } => preflight(&args_file),
         Command::Triage { enclave } => triage(&enclave),
+        Command::Checks { list, json } => checks(list, json),
+        Command::Doctor => doctor(),
         Command::Generate {
             scenario,
             out_dir,
@@ -47,6 +51,26 @@ fn generate(scenario: Option<&str>, out_dir: &Path, check: bool) {
     if let Err(e) = result {
         tracing::error!(error = %e, "sim generate failed");
         eprintln!("generate error: {e:?}");
+        std::process::exit(1);
+    }
+}
+
+/// Emit the machine-readable check catalog (`sim checks --list [--json]`).
+/// Implemented in `checks_catalog::run`.
+fn checks(list: bool, json: bool) {
+    if let Err(e) = checks_catalog::run(list, json) {
+        tracing::error!(error = %e, "sim checks failed");
+        eprintln!("checks error: {e:?}");
+        std::process::exit(1);
+    }
+}
+
+/// Host-prerequisite preflight for a devnet (`sim doctor`). Implemented in
+/// `doctor::run`; exits nonzero if a hard prerequisite (kurtosis/docker) is missing.
+fn doctor() {
+    if let Err(e) = doctor::run() {
+        tracing::error!(error = %e, "sim doctor failed");
+        eprintln!("doctor error: {e:?}");
         std::process::exit(1);
     }
 }

@@ -40,6 +40,19 @@ pub enum Command {
         /// Name of the kurtosis enclave to triage.
         enclave: String,
     },
+    /// Emit the machine-readable catalog of what `cb-verify` asserts, so an agent
+    /// can discover the harness's contract without reading source or CHECKS.md.
+    Checks {
+        /// Emit the check catalog (required — without it there is nothing to do).
+        #[arg(long)]
+        list: bool,
+        /// Emit the catalog as JSON instead of a readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Host-prerequisite preflight for a devnet: kurtosis, docker, memory
+    /// headroom, the CB image, and the ethereum-package submodule.
+    Doctor,
     /// Generate Kurtosis args-files for the CB test scenarios (Rust port of the
     /// retired `generate_kurtosis_configs.py`).
     Generate {
