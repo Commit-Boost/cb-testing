@@ -522,21 +522,29 @@ async fn run_verification(cli: &Cli) -> i32 {
         info!("No --cb-config provided — skipping MUX routing check");
     }
 
-    // Step 5: Report
-    let tier1_failed = all_checks
-        .iter()
-        .any(|c| c.tier == 1 && c.status == CheckStatus::Fail);
+    // Best-effort provenance: WHAT was tested (config hash + resolved Docker
+    // image IDs). Never fails the run — docker unreachable or an unparseable
+    // config just yields None.
+    let provenance = report::gather_provenance(cb_config.as_deref());
+    if provenance.is_none() {
+        debug!(
+            "provenance unavailable (docker unreachable or config could not be parsed); \
+             continuing without it"
+        );
+    }
 
+    // Step 5: Report
     let report = VerificationReport {
         enclave: enclave_name.clone(),
         timestamp: now,
         observation_window: Some(window),
-        result: if tier1_failed {
+        result: if report::tier1_failed(&all_checks) {
             CheckStatus::Fail
         } else {
             CheckStatus::Pass
         },
         checks: all_checks,
+        provenance,
     };
 
     report::print_report(&report, cli.json);
@@ -764,6 +772,7 @@ fn show_cb_logs(
                 cb_service_names.len()
             ),
         )],
+        provenance: None,
     };
     report::print_report(&report, json_mode);
     save_report(&report);
@@ -777,5 +786,6 @@ fn make_error_report(enclave: &str, timestamp: &str, detail: &str) -> Verificati
         observation_window: None,
         result: CheckStatus::Fail,
         checks: vec![CheckResult::fail("setup", 1, detail)],
+        provenance: None,
     }
 }
