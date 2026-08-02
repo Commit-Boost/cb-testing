@@ -173,6 +173,28 @@ pub async fn check_mev_delivery_rate(
         }
     }
 
+    // Delegate the verdict to the pure classifier, then attach the missed-slot
+    // count (context the rate logic doesn't need to reach a verdict, but the
+    // report records — mirrors chain_health::check_missed_slots).
+    let mut result = classify_mev_rate(mev_blocks, total_blocks, threshold);
+    if let Some(obj) = result.data.as_object_mut() {
+        obj.insert("missed_slots".to_string(), serde_json::json!(missed));
+    }
+    result
+}
+
+/// Classify the MEV delivery rate verdict from the delivered/proposed counts.
+///
+/// Pure decision core extracted from [`check_mev_delivery_rate`] (the P3 pattern
+/// — see `chain_health::classify_missed_slots`):
+/// - `total_blocks == 0` => FAIL (no proposed blocks to measure against)
+/// - `rate >= threshold` => PASS
+/// - otherwise           => WARN
+///
+/// `rate = mev_blocks / total_blocks` (0.0 when there are no proposed blocks).
+/// The caller ([`check_mev_delivery_rate`]) attaches the `missed_slots` count to
+/// the returned `data` payload afterward.
+pub fn classify_mev_rate(mev_blocks: u64, total_blocks: u64, threshold: f64) -> CheckResult {
     let rate = if total_blocks > 0 {
         mev_blocks as f64 / total_blocks as f64
     } else {
@@ -182,7 +204,6 @@ pub async fn check_mev_delivery_rate(
     let data = serde_json::json!({
         "mev_blocks": mev_blocks,
         "total_blocks": total_blocks,
-        "missed_slots": missed,
         "rate": (rate * 10000.0).round() / 10000.0,
     });
 
@@ -263,30 +284,42 @@ pub async fn check_validator_registrations(
         "missing": missing,
     });
 
-    if reg_count == total {
+    // The verdict + detail come from the pure classifier; the caller owns the
+    // `data` payload (it holds the missing-pubkey vector the counts can't carry).
+    classify_registrations(reg_count, missing.len()).with_data(data)
+}
+
+/// Classify the validator-registration verdict from the registered/missing counts.
+///
+/// Pure decision core extracted from [`check_validator_registrations`] (the P3
+/// pattern). `total = registered + missing`:
+/// - all registered (`missing == 0`) => PASS
+/// - some registered, some missing    => WARN
+/// - none registered                  => FAIL
+///
+/// Returns the verdict with an empty `data` payload; the caller attaches the
+/// full payload (which includes the list of missing pubkeys) via `with_data`.
+pub fn classify_registrations(registered: usize, missing: usize) -> CheckResult {
+    let total = registered + missing;
+
+    if registered == total {
         CheckResult::pass(
             "relay.validator_registrations",
             3,
             format!("All {total} validator(s) registered on relay"),
         )
-        .with_data(data)
-    } else if reg_count > 0 {
+    } else if registered > 0 {
         CheckResult::warn(
             "relay.validator_registrations",
             3,
-            format!(
-                "{reg_count}/{total} validator(s) registered; {} missing",
-                missing.len()
-            ),
+            format!("{registered}/{total} validator(s) registered; {missing} missing"),
         )
-        .with_data(data)
     } else {
         CheckResult::fail(
             "relay.validator_registrations",
             3,
             format!("No validators registered on relay (0/{total})"),
         )
-        .with_data(data)
     }
 }
 
@@ -385,14 +418,10 @@ pub async fn run_relay_checks(
                     .with_data(serde_json::json!({"count": total})),
             );
         } else {
-            let worst = bb_results
-                .into_iter()
-                .max_by_key(|r| match r.status {
-                    CheckStatus::Fail => 2,
-                    CheckStatus::Warn => 1,
-                    _ => 0,
-                })
-                .unwrap();
+            // No relay passed: surface the worst result (Fail > Warn > Skip).
+            // `CheckStatus: Ord` (Fail > Warn > Pass > Skip) reproduces the old
+            // hand-rolled key; no Pass is present in this branch by construction.
+            let worst = bb_results.into_iter().max_by_key(|r| r.status).unwrap();
             results.push(worst);
         }
     }
@@ -407,6 +436,12 @@ pub async fn run_relay_checks(
         mv_results.push(
             check_mev_delivery_rate(&live, beacon, start_slot, end_slot, mev_threshold).await,
         );
+        // NOTE: this is a BEST-of aggregation (Pass wins), the OPPOSITE of the
+        // worst-status `CheckStatus: Ord`, and it collapses Skip => Fail (a Skip
+        // result, e.g. no relay supports the data API, lands in the `else`).
+        // It is deliberately NOT unified with `worst_status`/`.max()`: doing so
+        // would (a) invert the Pass/Fail preference and (b) turn a Skip verdict
+        // into the least-severe status instead of Fail.
         let any_pass = mv_results.iter().any(|r| r.status == CheckStatus::Pass);
         let best_status = if any_pass {
             CheckStatus::Pass
@@ -475,17 +510,17 @@ pub async fn run_relay_checks(
         }
         // Aggregate: FAIL > WARN > PASS; details comma-joined.
         if !per_relay.is_empty() {
-            let worst =
-                per_relay
-                    .iter()
-                    .map(|r| r.status)
-                    .fold(CheckStatus::Pass, |acc, s| match (acc, s) {
-                        (CheckStatus::Fail, _) | (_, CheckStatus::Fail) => CheckStatus::Fail,
-                        (CheckStatus::Warn, _) | (_, CheckStatus::Warn) => CheckStatus::Warn,
-                        (CheckStatus::Skip, CheckStatus::Pass)
-                        | (CheckStatus::Pass, CheckStatus::Skip) => CheckStatus::Pass,
-                        (a, _) => a,
-                    });
+            // `CheckStatus: Ord` (Fail > Warn > Pass > Skip). The per-relay
+            // results here are only ever Pass/Warn/Fail (this branch is guarded
+            // by `!pubkeys.is_empty()`, so check_validator_registrations never
+            // returns Skip), so `.max()` reproduces the old fold exactly. The old
+            // fold's Skip+Pass=>Pass and empty=>Pass cases only diverge from
+            // `.max()` on all-Skip input, which is unreachable here.
+            let worst = per_relay
+                .iter()
+                .map(|r| r.status)
+                .max()
+                .unwrap_or(CheckStatus::Pass);
             let combined_detail = per_relay
                 .iter()
                 .enumerate()
@@ -547,5 +582,91 @@ mod tests {
                 .filter(|c| c.tier != 1)
                 .all(|c| c.status == CheckStatus::Skip)
         );
+    }
+
+    // --- classify_mev_rate (seam 1) -------------------------------------
+
+    // Contract: no proposed blocks (total == 0) FAILs — there's nothing to
+    // measure a delivery rate against, so a 0-rate must not silently PASS/WARN.
+    #[test]
+    fn mev_rate_zero_total_fails() {
+        let r = classify_mev_rate(0, 0, 0.5);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.id, "relay.mev_delivery_rate");
+        assert_eq!(r.tier, 2);
+        assert_eq!(r.detail, "No proposed blocks found");
+        assert_eq!(r.data["mev_blocks"], 0);
+        assert_eq!(r.data["total_blocks"], 0);
+        assert_eq!(r.data["rate"], 0.0);
+    }
+
+    // Contract: a rate exactly AT the threshold PASSes (boundary is `>=`).
+    #[test]
+    fn mev_rate_at_threshold_passes() {
+        // 5/10 = 0.5 == 0.5
+        let r = classify_mev_rate(5, 10, 0.5);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.contains(">="));
+        assert_eq!(r.data["mev_blocks"], 5);
+        assert_eq!(r.data["total_blocks"], 10);
+        assert_eq!(r.data["rate"], 0.5);
+    }
+
+    // Contract: a rate ABOVE the threshold PASSes.
+    #[test]
+    fn mev_rate_above_threshold_passes() {
+        // 9/10 = 0.9 > 0.5
+        let r = classify_mev_rate(9, 10, 0.5);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["rate"], 0.9);
+    }
+
+    // Contract: a rate BELOW the threshold WARNs (not FAIL — deliveries exist,
+    // just under target).
+    #[test]
+    fn mev_rate_below_threshold_warns() {
+        // 2/10 = 0.2 < 0.5
+        let r = classify_mev_rate(2, 10, 0.5);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("below"));
+        assert_eq!(r.data["rate"], 0.2);
+    }
+
+    // Contract: the classifier's data payload carries no `missed_slots` (the
+    // caller, check_mev_delivery_rate, attaches it) but everything else matches.
+    #[test]
+    fn mev_rate_classifier_omits_missed_slots() {
+        let r = classify_mev_rate(1, 4, 0.5);
+        assert!(r.data.get("missed_slots").is_none());
+        assert_eq!(r.data["rate"], 0.25);
+    }
+
+    // --- classify_registrations (seam 2) --------------------------------
+
+    // Contract: every validator registered (missing == 0) PASSes.
+    #[test]
+    fn registrations_all_registered_passes() {
+        let r = classify_registrations(3, 0);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.id, "relay.validator_registrations");
+        assert_eq!(r.tier, 3);
+        assert!(r.detail.contains("All 3 validator(s) registered"));
+    }
+
+    // Contract: some registered, some missing WARNs, and the counts appear.
+    #[test]
+    fn registrations_some_missing_warns() {
+        let r = classify_registrations(2, 1);
+        assert_eq!(r.status, CheckStatus::Warn);
+        // total = registered + missing = 3
+        assert!(r.detail.contains("2/3 validator(s) registered; 1 missing"));
+    }
+
+    // Contract: none registered FAILs (0/total), even when total > 0.
+    #[test]
+    fn registrations_none_registered_fails() {
+        let r = classify_registrations(0, 4);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.detail.contains("No validators registered on relay (0/4)"));
     }
 }

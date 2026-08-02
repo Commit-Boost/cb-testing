@@ -496,4 +496,55 @@ mod tests {
         assert!(parts.len() >= 3);
         assert_eq!(parts[1], "cl-1-lighthouse");
     }
+
+    // Parse the real `kurtosis enclave inspect` fixture (a prime format-drift
+    // trap). Asserts the User Services table is read into service names + ports,
+    // that the header/separator/Files-Artifacts noise is skipped, and that a
+    // `<none>` ports column yields no parsed ports.
+    //
+    // Note: the shared fixture (also consumed by `sim triage`) contains only a
+    // beacon (cl-*) and a relay (mev-relay-*) service; it has no commit-boost
+    // service, so cb-name/port extraction isn't exercised here (extending the
+    // fixture would break the triage test's `len == 2` assertion).
+    #[test]
+    fn test_parse_services_from_fixture() {
+        const INSPECT: &str = include_str!("../tests/fixtures/enclave_inspect.txt");
+        let services = parse_services(INSPECT);
+
+        // Exactly the two User Services rows (the Files Artifacts table and all
+        // header/separator lines are skipped).
+        assert_eq!(
+            services.len(),
+            2,
+            "expected 2 user services, got {:?}",
+            services.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+
+        // Beacon service: name + a parsed `http` port URL.
+        let beacon = services
+            .iter()
+            .find(|s| s.name == "cl-1-lighthouse-geth")
+            .expect("beacon service parsed");
+        let (_, http_url) = beacon
+            .ports
+            .iter()
+            .find(|(name, _)| name == "http")
+            .expect("beacon http port parsed");
+        assert!(
+            http_url.contains("127.0.0.1:32811"),
+            "unexpected http url: {http_url}"
+        );
+
+        // Relay service: name is extracted even though its ports column is
+        // `<none>` (a stopped service), which parses to zero ports.
+        let relay = services
+            .iter()
+            .find(|s| s.name == "mev-relay-helix")
+            .expect("relay service parsed");
+        assert!(
+            relay.ports.is_empty(),
+            "a `<none>` ports column must parse to no ports, got {:?}",
+            relay.ports
+        );
+    }
 }
