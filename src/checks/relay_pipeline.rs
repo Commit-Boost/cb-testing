@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use futures::StreamExt;
+
 use crate::beacon::BeaconClient;
 use crate::checks::{CheckResult, CheckStatus};
 use crate::relay::RelayClient;
@@ -149,8 +151,17 @@ pub async fn check_mev_delivery_rate(
     let mut total_blocks = 0u64;
     let mut missed = 0u64;
 
-    for slot in start_slot..=end_slot {
-        match beacon.get_block_hash(slot).await {
+    // Gather the per-slot block hashes concurrently (bounded). The counting fold
+    // below is identical to the old serial loop — order-independent counters, so
+    // buffer_unordered's out-of-order completion does not change the result.
+    let fetched: Vec<_> = futures::stream::iter(start_slot..=end_slot)
+        .map(|slot| async move { (slot, beacon.get_block_hash(slot).await) })
+        .buffer_unordered(16)
+        .collect()
+        .await;
+
+    for (_slot, res) in fetched {
+        match res {
             Ok(None) => missed += 1,
             Err(_) => missed += 1,
             Ok(Some(hash)) => {

@@ -2,6 +2,8 @@
 
 use std::process::Command;
 
+use futures::StreamExt;
+
 use crate::beacon::BeaconClient;
 use crate::checks::CheckResult;
 
@@ -63,9 +65,18 @@ pub async fn check_missed_slots(
     }
     let total = end_slot - start_slot;
 
+    // Gather the per-slot headers concurrently (bounded). The miss-count fold is
+    // identical to the old serial loop — `missed` is an order-independent counter,
+    // so buffer_unordered's out-of-order completion does not change the result.
+    let fetched: Vec<_> = futures::stream::iter(start_slot..end_slot)
+        .map(|slot| async move { (slot, beacon.get_header(slot).await) })
+        .buffer_unordered(16)
+        .collect()
+        .await;
+
     let mut missed = 0u64;
-    for slot in start_slot..end_slot {
-        match beacon.get_header(slot).await {
+    for (_slot, res) in fetched {
+        match res {
             Ok(None) => missed += 1,
             Err(_) => missed += 1,
             Ok(Some(_)) => {}

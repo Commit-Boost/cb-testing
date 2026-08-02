@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::B256;
+use futures::StreamExt;
 use tracing::warn;
 
 use crate::beacon::BeaconClient;
@@ -47,10 +48,19 @@ pub async fn check_payload_hash_match(
         );
     }
 
-    // Fetch the on-chain hash for each observed slot (None = missing/error).
+    // Fetch the on-chain hash for each observed slot (None = missing/error),
+    // concurrently but bounded. The result map is keyed by slot, so out-of-order
+    // completion cannot change it; the Err -> warn+None mapping is preserved.
+    let slots: Vec<u64> = by_slot.keys().copied().collect();
+    let fetched: Vec<_> = futures::stream::iter(slots)
+        .map(|slot| async move { (slot, beacon.get_block_hash(slot).await) })
+        .buffer_unordered(16)
+        .collect()
+        .await;
+
     let mut chain: BTreeMap<u64, Option<B256>> = BTreeMap::new();
-    for &slot in by_slot.keys() {
-        let h = match beacon.get_block_hash(slot).await {
+    for (slot, res) in fetched {
+        let h = match res {
             Ok(v) => v,
             Err(e) => {
                 warn!("Failed to get block for slot {slot}: {e}");

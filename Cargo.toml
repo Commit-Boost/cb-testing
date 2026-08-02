@@ -36,7 +36,8 @@ prometheus-parse = "0.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "net", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde_yaml = "0.9.34"
@@ -44,4 +45,4 @@ toml = "0.8"
 
 [profile.release]
 strip = true
-lto = true
+lto = "thin"

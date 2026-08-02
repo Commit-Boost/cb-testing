@@ -302,7 +302,9 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
 
         // Beacon API: cl-* services, port 'http'
         if matches_pattern(&svc.name, "cl-*") {
-            let url = port_print(enclave, &svc.name, "http").or_else(|| find_port("http"));
+            // Prefer the port already parsed from `enclave inspect`; only shell
+            // out to `port print` when the parse missed it (see item-3 rationale).
+            let url = find_port("http").or_else(|| port_print(enclave, &svc.name, "http"));
             if let Some(url) = url {
                 info!("Beacon API: {} -> {url}", svc.name);
                 result.beacon_urls.push(url);
@@ -319,10 +321,11 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
         //   mev-rs:    "mev-rs-relay"    — port "http" (28545)
         // Exclude supporting services (postgres, redis, website, housekeeper).
         if is_relay_api_service(&svc.name) {
-            let url = port_print(enclave, &svc.name, "http")
-                .or_else(|| port_print(enclave, &svc.name, "endpoint"))
-                .or_else(|| find_port("http"))
-                .or_else(|| find_port("endpoint"));
+            // Prefer already-parsed ports; fall back to `port print` on a miss.
+            let url = find_port("http")
+                .or_else(|| find_port("endpoint"))
+                .or_else(|| port_print(enclave, &svc.name, "http"))
+                .or_else(|| port_print(enclave, &svc.name, "endpoint"));
             if let Some(url) = url {
                 let identity = relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
                 info!("Relay API: {} -> {url} (identity={identity})", svc.name);
@@ -343,11 +346,12 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
             result.cb_service_names.push(svc.name.clone());
 
             // Try "pbs" first (older configs / custom setups), fall back to
-            // "http" (ethereum-package default).
-            let pbs_url = port_print(enclave, &svc.name, "pbs")
-                .or_else(|| find_port("pbs"))
-                .or_else(|| port_print(enclave, &svc.name, "http"))
-                .or_else(|| find_port("http"));
+            // "http" (ethereum-package default). Within each port name, prefer
+            // the already-parsed port over shelling out to `port print`.
+            let pbs_url = find_port("pbs")
+                .or_else(|| port_print(enclave, &svc.name, "pbs"))
+                .or_else(|| find_port("http"))
+                .or_else(|| port_print(enclave, &svc.name, "http"));
             if let Some(url) = pbs_url {
                 info!("CB PBS: {} -> {url}", svc.name);
                 result.cb_pbs_urls.push(url);
@@ -355,11 +359,12 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
                 warn!("CB '{}': no pbs/http port exposed", svc.name);
             }
 
-            // Metrics port may be named "metrics" or "http-metrics".
-            let metrics_url = port_print(enclave, &svc.name, "metrics")
-                .or_else(|| find_port("metrics"))
-                .or_else(|| port_print(enclave, &svc.name, "http-metrics"))
-                .or_else(|| find_port("http-metrics"));
+            // Metrics port may be named "metrics" or "http-metrics". Prefer the
+            // already-parsed port over shelling out to `port print`.
+            let metrics_url = find_port("metrics")
+                .or_else(|| port_print(enclave, &svc.name, "metrics"))
+                .or_else(|| find_port("http-metrics"))
+                .or_else(|| port_print(enclave, &svc.name, "http-metrics"));
             if let Some(url) = metrics_url {
                 info!("CB metrics: {} -> {url}", svc.name);
                 result.cb_metrics_urls.push(url);
@@ -368,7 +373,7 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
 
         // Prometheus
         if svc.name == "prometheus" {
-            if let Some(url) = port_print(enclave, &svc.name, "http").or_else(|| find_port("http"))
+            if let Some(url) = find_port("http").or_else(|| port_print(enclave, &svc.name, "http"))
             {
                 info!("Prometheus: {} -> {url}", svc.name);
                 result.prometheus_url = Some(url);
