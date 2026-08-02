@@ -204,9 +204,10 @@ pub async fn check_mev_delivery_rate(
 
 /// Check validator registrations with the relay (tier 3).
 ///
-/// For each pubkey, calls `is_validator_registered`. PASS if all registered,
-/// WARN if some missing, FAIL if none registered. The caller should SKIP
-/// outright if the pubkey list is empty (we also handle that defensively).
+/// For each pubkey, queries the relay's validator_registration endpoint. PASS
+/// if all registered, WARN if some missing, FAIL if none registered. The caller
+/// should SKIP outright if the pubkey list is empty (we also handle that
+/// defensively).
 pub async fn check_validator_registrations(
     relay_url: &str,
     client: &reqwest::Client,

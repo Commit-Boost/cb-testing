@@ -77,7 +77,11 @@ show-logs enclave="CB-Testnet":
 
 # Quick mux routing check (no observation window, just fetch logs and check)
 test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
-    cargo run --release --bin test-mux -- {{enclave}} {{config}}
+    cargo run --release --bin cb-verify -- \
+        --enclave {{enclave}} \
+        --config {{config}} \
+        --min-epochs 0 \
+        --timeout 300
 
 # Generate Kurtosis YAML configs into configs/generated/ (the typed `sim`
 # generator). Loads optional .env for Docker image overrides (see .env.example).

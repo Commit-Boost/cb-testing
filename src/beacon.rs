@@ -7,12 +7,11 @@ use std::time::Duration;
 
 use alloy_primitives::B256;
 use alloy_rpc_types_beacon::{
-    block::BlockResponse, config::SpecResponse, genesis::GenesisResponse, header::HeaderResponse,
-    node::SyncStatus, state::FinalityCheckpointsResponse,
+    block::BlockResponse, header::HeaderResponse, node::SyncStatus,
+    state::FinalityCheckpointsResponse,
 };
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
-use tracing::warn;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -95,47 +94,6 @@ impl BeaconClient {
             .await?;
 
         Ok(resp.data.is_syncing)
-    }
-
-    /// GET /eth/v1/beacon/genesis -> genesis_time
-    pub async fn get_genesis_time(&self) -> Result<u64> {
-        let resp: GenesisResponse = self
-            .client
-            .get(format!("{}/eth/v1/beacon/genesis", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        Ok(resp.data.genesis_time)
-    }
-
-    /// GET /eth/v1/config/spec -> SECONDS_PER_SLOT (defaults to 12)
-    pub async fn get_seconds_per_slot(&self) -> u64 {
-        match self.try_get_seconds_per_slot().await {
-            Ok(sps) => sps,
-            Err(e) => {
-                warn!("Failed to get SECONDS_PER_SLOT, defaulting to 12: {e}");
-                12
-            }
-        }
-    }
-
-    async fn try_get_seconds_per_slot(&self) -> Result<u64> {
-        let resp: SpecResponse = self
-            .client
-            .get(format!("{}/eth/v1/config/spec", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        resp.data
-            .get("SECONDS_PER_SLOT")
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| eyre::eyre!("SECONDS_PER_SLOT not found in spec"))
     }
 
     /// GET /eth/v1/beacon/headers/{slot} -> Some(header) or None if 404

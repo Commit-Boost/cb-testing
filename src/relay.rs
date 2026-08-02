@@ -11,7 +11,6 @@ use std::time::Duration;
 use alloy_primitives::B256;
 use alloy_rpc_types_beacon::relay::{BuilderBlockReceived, ProposerPayloadDelivered};
 use eyre::Result;
-use tracing::warn;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -198,29 +197,6 @@ impl RelayClient {
             .await?;
 
         Ok(entries)
-    }
-
-    /// Check if a validator is registered with the relay.
-    ///
-    /// GET /relay/v1/data/validator_registration?pubkey={pubkey}
-    /// Returns true if 200, false otherwise.
-    pub async fn is_validator_registered(&self, pubkey: &str) -> bool {
-        match self
-            .client
-            .get(format!(
-                "{}/relay/v1/data/validator_registration",
-                self.base_url
-            ))
-            .query(&[("pubkey", pubkey)])
-            .send()
-            .await
-        {
-            Ok(resp) => resp.status().is_success(),
-            Err(e) => {
-                warn!("Failed to check registration for {pubkey}: {e}");
-                false
-            }
-        }
     }
 }
 

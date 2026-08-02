@@ -6,8 +6,7 @@
 use std::process::Command;
 
 use eyre::{Result, WrapErr, bail};
-use prometheus_parse::{Scrape, Value};
-use tracing::{debug, warn};
+use prometheus_parse::Scrape;
 
 /// Fetch and parse Prometheus metrics from an HTTP endpoint.
 pub async fn fetch_metrics(client: &reqwest::Client, url: &str) -> Result<Scrape> {
@@ -50,49 +49,4 @@ pub fn fetch_metrics_via_exec(enclave: &str, service: &str, port: u16) -> Result
 fn parse_metrics(text: &str) -> Result<Scrape> {
     let lines = text.lines().map(|l| Ok(l.to_owned()));
     Scrape::parse(lines).wrap_err("failed to parse Prometheus metrics")
-}
-
-/// Helper: sum all samples matching a metric name and optional label filter.
-pub fn sum_metric(scrape: &Scrape, name: &str, label_filter: Option<(&str, &str)>) -> f64 {
-    scrape
-        .samples
-        .iter()
-        .filter(|s| s.metric == name)
-        .filter(|s| {
-            if let Some((key, val)) = label_filter {
-                s.labels.get(key) == Some(val)
-            } else {
-                true
-            }
-        })
-        .map(|s| match &s.value {
-            Value::Counter(v) | Value::Gauge(v) | Value::Untyped(v) => *v,
-            _ => 0.0,
-        })
-        .sum()
-}
-
-/// Helper: check if any samples exist for a metric.
-pub fn has_metric(scrape: &Scrape, name: &str) -> bool {
-    scrape.samples.iter().any(|s| s.metric == name)
-}
-
-/// Helper: get all sample values for a metric, optionally filtered by label.
-pub fn metric_values(scrape: &Scrape, name: &str, label_filter: Option<(&str, &str)>) -> Vec<f64> {
-    scrape
-        .samples
-        .iter()
-        .filter(|s| s.metric == name)
-        .filter(|s| {
-            if let Some((key, val)) = label_filter {
-                s.labels.get(key) == Some(val)
-            } else {
-                true
-            }
-        })
-        .filter_map(|s| match &s.value {
-            Value::Counter(v) | Value::Gauge(v) | Value::Untyped(v) => Some(*v),
-            _ => None,
-        })
-        .collect()
 }

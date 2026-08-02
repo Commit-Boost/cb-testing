@@ -87,29 +87,11 @@ struct Cli {
 // Types
 // ---------------------------------------------------------------------------
 
-/// The lifecycle state of a single enclave run.
-#[derive(Debug, Clone, PartialEq)]
-enum EnclaveState {
-    /// `kurtosis run` has been launched, waiting for containers to start.
-    Launching,
-    /// Containers are up, waiting for beacon to reach target_epoch.
-    WaitingForReadiness,
-    /// Beacon is ready, observing for min_epochs.
-    Observing,
-    /// Running cb-verify checks.
-    Checking,
-    /// All checks complete.
-    Done,
-    /// Failed at some point.
-    Failed(String),
-}
-
 /// Per-enclave status tracked by the orchestrator.
 #[derive(Debug, Clone)]
 struct EnclaveStatus {
     name: String,
     config: PathBuf,
-    state: EnclaveState,
     /// Set when the enclave process has been launched.
     launched_at: Option<Instant>,
     /// Set when the enclave becomes ready for observation.
@@ -190,7 +172,6 @@ async fn main() -> Result<()> {
             EnclaveStatus {
                 name,
                 config: config.clone(),
-                state: EnclaveState::Launching,
                 launched_at: None,
                 ready_at: None,
                 observed_at: None,
@@ -365,13 +346,11 @@ async fn run_enclave_pipeline(
         enc.name,
         enc.config.display()
     );
-    enc.state = EnclaveState::Launching;
     enc.launched_at = Some(Instant::now());
 
     if let Err(e) = launch_enclave(&enc.name, &enc.config, package).await {
         let msg = format!("Launch failed: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
         // Try to clean up
         if !keep {
             let _ = teardown_enclave(&enc.name);
@@ -384,12 +363,10 @@ async fn run_enclave_pipeline(
         "[{}] Waiting for readiness (target epoch {target_epoch})...",
         enc.name
     );
-    enc.state = EnclaveState::WaitingForReadiness;
 
     if let Err(e) = wait_for_enclave_readiness(&enc.name, target_epoch, timeout).await {
         let msg = format!("Readiness timeout: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
         if !keep {
             let _ = teardown_enclave(&enc.name);
         }
@@ -406,12 +383,10 @@ async fn run_enclave_pipeline(
 
     // Phase 3: Observe
     info!("[{}] Observing for {min_epochs} epoch(s)...", enc.name);
-    enc.state = EnclaveState::Observing;
 
     if let Err(e) = observe_enclave(&enc.name, min_epochs, target_epoch).await {
         let msg = format!("Observation failed: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
         if !keep {
             let _ = teardown_enclave(&enc.name);
         }
@@ -421,7 +396,6 @@ async fn run_enclave_pipeline(
 
     // Phase 4: Run checks
     info!("[{}] Running checks...", enc.name);
-    enc.state = EnclaveState::Checking;
 
     let check_result = run_checks(
         &enc.name,
@@ -439,7 +413,6 @@ async fn run_enclave_pipeline(
         Ok(summary) => {
             let result_str = summary.result.clone();
             enc.check_result = Some(summary);
-            enc.state = EnclaveState::Done;
             info!(
                 "[{}] Checks complete: {} (total {:?})",
                 enc.name,
@@ -450,7 +423,6 @@ async fn run_enclave_pipeline(
         Err(e) => {
             let msg = format!("Check execution failed: {e}");
             error!("[{}] {}", enc.name, msg);
-            enc.state = EnclaveState::Failed(msg);
         }
     }
 

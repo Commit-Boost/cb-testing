@@ -5,9 +5,6 @@
 //! binary in the package (`cb-verify`, `cb-orchestrator`, `sim`, …) can reuse
 //! them by import instead of re-declaring or re-implementing them.
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
 pub mod beacon;
 pub mod checks;
 pub mod discovery;

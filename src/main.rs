@@ -3,9 +3,6 @@
 //! Discovers services in a running enclave, polls for readiness,
 //! runs verification checks, and produces a structured report.
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use clap::Parser;

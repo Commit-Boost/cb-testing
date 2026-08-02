@@ -12,14 +12,6 @@ use std::process::Command;
 use eyre::{Result, WrapErr, bail};
 use tracing::{debug, info, warn};
 
-/// A single payload-delivered record from post-mortem Postgres query.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PostMortemRecord {
-    pub slot: u64,
-    pub block_hash: String,
-    pub value: String,
-}
-
 /// Derive a relay identity from the Kurtosis service name.
 ///
 /// Returns a short string like "helix", "flashbots", or "mev-rs"
@@ -43,9 +35,6 @@ pub fn relay_identity(service_name: &str) -> Option<String> {
 pub struct EnclaveServices {
     pub beacon_urls: Vec<String>,
     pub relay_urls: Vec<String>,
-    /// Parallel to relay_urls: identity string per relay
-    /// ("helix", "flashbots", "mev-rs", etc.)
-    pub relay_identities: Vec<String>,
     pub cb_pbs_urls: Vec<String>,
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
@@ -338,7 +327,6 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
                 let identity = relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
                 info!("Relay API: {} -> {url} (identity={identity})", svc.name);
                 result.relay_urls.push(url);
-                result.relay_identities.push(identity);
             } else {
                 warn!("Relay '{}': no http/endpoint port", svc.name);
             }
@@ -415,121 +403,6 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
     }
 
     Ok(result)
-}
-
-/// Post-mortem: query `mev-relay-postgres` directly when the relay API is dead.
-///
-/// Shells out to `kurtosis service exec` to run a psql query inside the relay's
-/// Postgres container. Returns payload-delivered records found. If the Postgres
-/// container doesn't exist or the query fails, returns an empty Vec.
-///
-/// This salvages a verdict when the relay crashed mid-run: if the pipeline
-/// worked before the crash, Postgres still has the evidence.
-pub fn query_mev_relay_postgres(enclave: &str) -> Vec<PostMortemRecord> {
-    debug!("Running post-mortem Postgres query in enclave '{enclave}'");
-
-    let query = "SELECT slot, block_hash, value FROM mainnet_payload_delivered ORDER BY slot DESC LIMIT 20;";
-
-    // `kurtosis service exec` returns output on stdout. The psql output
-    // includes a header row and separator line before data rows.
-    match Command::new("kurtosis")
-        .args([
-            "service",
-            "exec",
-            enclave,
-            "mev-relay-postgres",
-            "--",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "mev_boost_relay",
-            "-c",
-            query,
-        ])
-        .output()
-    {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!(
-                    "Post-mortem query failed (exit {}): {}",
-                    output.status,
-                    stderr.trim()
-                );
-                return Vec::new();
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_postmortem_output(&stdout)
-        }
-        Err(e) => {
-            debug!("Post-mortem: kurtosis CLI not available: {e}");
-            Vec::new()
-        }
-    }
-}
-
-/// Parse psql tabular output into PostMortemRecords.
-///
-/// Expected format:
-/// ```text
-///  slot | block_hash | value
-/// ------+------------+-------
-///   224 | 0xabc...   | 12345
-///   223 | 0xdef...   | 67890
-/// (2 rows)
-/// ```
-///
-/// Skips header rows (first 2 lines: column names + separator) and the
-/// trailing "(N rows)" line.
-fn parse_postmortem_output(output: &str) -> Vec<PostMortemRecord> {
-    let mut records = Vec::new();
-    let mut seen_header = false;
-    let mut seen_sep = false;
-
-    for line in output.lines() {
-        let stripped = line.trim();
-
-        if stripped.is_empty() {
-            continue;
-        }
-
-        // Skip the column-name header and separator line.
-        if !seen_header {
-            seen_header = true;
-            continue;
-        }
-        if !seen_sep {
-            seen_sep = true;
-            continue;
-        }
-
-        // Skip trailing "(N rows)" line.
-        if stripped.starts_with('(') && stripped.ends_with(')') {
-            continue;
-        }
-
-        // Data rows: " 224 | 0xabc...   | 12345"
-        let parts: Vec<&str> = stripped.split('|').map(|s| s.trim()).collect();
-        if parts.len() < 3 {
-            continue;
-        }
-
-        let slot: u64 = match parts[0].parse() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let block_hash = parts[1].to_string();
-        let value = parts[2].to_string();
-
-        records.push(PostMortemRecord {
-            slot,
-            block_hash,
-            value,
-        });
-    }
-
-    records
 }
 
 /// Heuristic check: is this service name a relay API endpoint?
@@ -617,35 +490,5 @@ mod tests {
         );
         assert!(parts.len() >= 3);
         assert_eq!(parts[1], "cl-1-lighthouse");
-    }
-
-    #[test]
-    fn test_parse_postmortem_output() {
-        let output = concat!(
-            " slot | block_hash | value\n",
-            "------+------------+-------\n",
-            "  224 | 0xabc123  | 12345\n",
-            "  223 | 0xdef456  | 67890\n",
-            "(2 rows)\n",
-        );
-        let records = parse_postmortem_output(output);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].slot, 224);
-        assert_eq!(records[0].block_hash, "0xabc123");
-        assert_eq!(records[0].value, "12345");
-        assert_eq!(records[1].slot, 223);
-        assert_eq!(records[1].block_hash, "0xdef456");
-        assert_eq!(records[1].value, "67890");
-    }
-
-    #[test]
-    fn test_parse_postmortem_output_empty() {
-        let output = concat!(
-            " slot | block_hash | value\n",
-            "------+------------+-------\n",
-            "(0 rows)\n",
-        );
-        let records = parse_postmortem_output(output);
-        assert!(records.is_empty());
     }
 }

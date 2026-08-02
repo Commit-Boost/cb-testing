@@ -11,7 +11,6 @@
 //! such masking lines and return the innermost app-code panic.
 
 // The public API is wired into `triage::run`; the tests below exercise it.
-#![allow(dead_code)]
 
 use serde::Serialize;
 
@@ -24,8 +23,6 @@ pub enum CauseKind {
     Killed,
     /// A non-panic fatal error (bind failure, connection refused, `os error`).
     Fatal,
-    /// Logs ended without a recognised failure signature.
-    Unknown,
 }
 
 /// A structured root cause extracted from a log stream.

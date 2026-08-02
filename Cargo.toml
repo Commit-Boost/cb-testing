@@ -20,14 +20,6 @@ name = "cb-orchestrator"
 path = "src/orchestrator.rs"
 
 [[bin]]
-name = "test-mux"
-path = "src/bin/test_mux.rs"
-
-[[bin]]
-name = "test-relay"
-path = "src/bin/test_relay.rs"
-
-[[bin]]
 name = "sim"
 path = "src/bin/sim/main.rs"
 
