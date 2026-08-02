@@ -522,6 +522,27 @@ async fn run_verification(cli: &Cli) -> i32 {
         info!("No --cb-config provided — skipping MUX routing check");
     }
 
+    // Feature-fired assertions (Law 3): for each CB feature the config enables
+    // (skip_sigverify / extra_validation / timing_games), assert its codepath
+    // actually fired at runtime. Same config gate as mux.
+    if let Some(ref cb_path) = cb_config {
+        match checks::mux_routing::read_cb_config_template(cb_path) {
+            Ok(template) => {
+                all_checks.extend(
+                    checks::feature_fired::run_feature_checks(
+                        &enclave_name,
+                        &services.cb_service_names,
+                        &template,
+                    )
+                    .await,
+                );
+            }
+            Err(e) => {
+                warn!("Could not read CB config for feature-fired checks: {e}");
+            }
+        }
+    }
+
     // Best-effort provenance: WHAT was tested (config hash + resolved Docker
     // image IDs). Never fails the run — docker unreachable or an unparseable
     // config just yields None.

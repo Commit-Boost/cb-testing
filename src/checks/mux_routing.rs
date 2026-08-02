@@ -65,20 +65,28 @@ pub struct CbEvent {
 /// `Ok(None)` if no mux sections (check will SKIP),
 /// `Err` if parsing fails.
 pub fn extract_mux_from_config(path: &str) -> eyre::Result<Option<Vec<MuxEntry>>> {
+    let template = read_cb_config_template(path)?;
+    parse_mux_from_toml_template(&template)
+}
+
+/// Read the Commit-Boost config TOML template from a config path.
+///
+/// Supports `.toml` (raw CB config) and `.yml`/`.yaml` (Kurtosis config with the
+/// CB config embedded at `mev_params.commit_boost_config`). Shared by the mux
+/// check and the feature-fired checks, both of which scan the same template.
+pub fn read_cb_config_template(path: &str) -> eyre::Result<String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| eyre::eyre!("Failed to read config '{path}': {e}"))?;
 
-    let template = if path.ends_with(".toml") {
-        raw
+    if path.ends_with(".toml") {
+        Ok(raw)
     } else if path.ends_with(".yml") || path.ends_with(".yaml") {
-        extract_commit_boost_config_from_yaml(&raw)?
+        extract_commit_boost_config_from_yaml(&raw)
     } else {
-        return Err(eyre::eyre!(
+        Err(eyre::eyre!(
             "Unrecognized config format. Expected .toml (CB config) or .yml/.yaml (Kurtosis config), got: {path}"
-        ));
-    };
-
-    parse_mux_from_toml_template(&template)
+        ))
+    }
 }
 
 fn extract_commit_boost_config_from_yaml(raw: &str) -> eyre::Result<String> {
@@ -452,6 +460,47 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
 pub fn fetch_service_logs(enclave: &str, service: &str) -> eyre::Result<String> {
     info!("mux check: fetching logs from service '{service}' (enclave={enclave})...");
 
+    // Filter to mux-relevant lines client-side.
+    let result = fetch_filtered_logs(
+        enclave,
+        service,
+        &[
+            "using mux config",
+            "received new header",
+            "auction winner",
+            "received unblinded block",
+            "CRITICAL: no payload",
+        ],
+    )?;
+
+    if result.is_empty() {
+        // The empty-log warning wants a sample of what WAS there, so re-fetch
+        // the raw logs. This only runs on the (rare) empty path.
+        let all_logs = fetch_raw_logs(enclave, service).unwrap_or_default();
+        let sample: String = all_logs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        warn!(
+            "mux check: service '{service}' returned no relevant log lines. \
+             Total: {} bytes. Sample:\n{}",
+            all_logs.len(),
+            sample
+        );
+    } else {
+        info!(
+            "mux check: service '{service}' returned {} relevant log line(s)",
+            result.lines().count()
+        );
+    }
+
+    Ok(result)
+}
+
+/// Fetch a service's raw logs (stdout+stderr combined), no filtering.
+fn fetch_raw_logs(enclave: &str, service: &str) -> eyre::Result<String> {
     let output = std::process::Command::new("kurtosis")
         .args(["service", "logs", enclave, service, "-n", "200000"])
         .output()
@@ -469,41 +518,25 @@ pub fn fetch_service_logs(enclave: &str, service: &str) -> eyre::Result<String> 
     // Combine stdout and stderr — kurtosis writes to either depending on version.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let all_logs = format!("{}\n{}", stdout, stderr);
+    Ok(format!("{}\n{}", stdout, stderr))
+}
 
-    // Filter to relevant lines client-side.
+/// Fetch a service's logs and keep only lines containing one of `keywords`.
+///
+/// The shared log-fetch primitive: mux and the feature-fired checks both scan
+/// CB debug logs for a small set of marker strings. Returns the matching lines
+/// joined by newlines (empty string if none matched).
+pub fn fetch_filtered_logs(
+    enclave: &str,
+    service: &str,
+    keywords: &[&str],
+) -> eyre::Result<String> {
+    let all_logs = fetch_raw_logs(enclave, service)?;
     let result: String = all_logs
         .lines()
-        .filter(|line| {
-            line.contains("using mux config")
-                || line.contains("received new header")
-                || line.contains("auction winner")
-                || line.contains("received unblinded block")
-                || line.contains("CRITICAL: no payload")
-        })
+        .filter(|line| keywords.iter().any(|kw| line.contains(kw)))
         .collect::<Vec<_>>()
         .join("\n");
-
-    if result.is_empty() {
-        let sample: String = all_logs
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n");
-        warn!(
-            "mux check: service '{service}' returned no relevant log lines.              Total: {} bytes stdout, {} bytes stderr. Sample:\n{}",
-            stdout.len(),
-            stderr.len(),
-            sample
-        );
-    } else {
-        info!(
-            "mux check: service '{service}' returned {} relevant log line(s)",
-            result.lines().count()
-        );
-    }
-
     Ok(result)
 }
 

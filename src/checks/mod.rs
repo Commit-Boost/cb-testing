@@ -119,6 +119,7 @@ impl CheckResult {
 pub mod best_bid;
 pub mod cb_metrics;
 pub mod chain_health;
+pub mod feature_fired;
 pub mod mux_routing;
 pub mod payload_matching;
 pub mod relay_pipeline;

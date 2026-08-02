@@ -170,6 +170,30 @@ pub fn catalog() -> Vec<CatalogEntry> {
             severity_note: "feature check; misrouting FAILs (fatal), but unverifiable routing is WARN — needs CB [logs.stdout] level = debug",
         },
         CatalogEntry {
+            id: "feature.timing_games",
+            tier: 1,
+            title: "timing-games codepath fired (TG: debug logs seen)",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when the config enables enable_timing_games; PASS on >=1 TG: log line, WARN (non-fatal) if none seen",
+        },
+        CatalogEntry {
+            id: "feature.extra_validation",
+            tier: 1,
+            title: "extra-validation codepath fired (parent-block fetch logs seen)",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when the config enables extra_validation_enabled; PASS on >=1 'fetched parent block' log, WARN (non-fatal) if none",
+        },
+        CatalogEntry {
+            id: "feature.skip_sigverify",
+            tier: 1,
+            title: "skip-sigverify enabled (NOT runtime-confirmable)",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when skip_sigverify is enabled; ALWAYS WARN — a negative codepath with no positive log/metric, indistinguishable from OFF without a bad-signature relay",
+        },
+        CatalogEntry {
             id: "cb_get_header_matrix",
             tier: 2,
             title: "get_header status-code distribution healthy",
@@ -316,15 +340,26 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_feature_checks_assert_a_feature() {
-        // Guards the CHECKS.md invariant: only mux.routing + relay.best_bid
-        // positively assert that a scenario's feature codepath fired.
+    fn only_the_feature_checks_assert_a_feature() {
+        // Guards the CHECKS.md invariant: exactly these checks positively assert
+        // that a scenario's feature codepath fired — the two runtime-behaviour
+        // checks (best_bid, mux.routing) plus the three Law-3 feature-fired
+        // checks (skip_sigverify is a WARN-only honest report).
         let feature_ids: Vec<&str> = catalog()
             .iter()
             .filter(|e| e.feature_asserted)
             .map(|e| e.id)
             .collect();
-        assert_eq!(feature_ids, vec!["relay.best_bid", "mux.routing"]);
+        assert_eq!(
+            feature_ids,
+            vec![
+                "relay.best_bid",
+                "mux.routing",
+                "feature.timing_games",
+                "feature.extra_validation",
+                "feature.skip_sigverify",
+            ]
+        );
     }
 
     #[test]
