@@ -33,6 +33,11 @@ use crate::metrics;
 
 const METRICS_PORT: u16 = 9090;
 
+/// A relay/CB-to-relay 5xx FRACTION above this fails the matrix check; at or below
+/// it, a nonzero 5xx count is a transient WARN (warmup noise). See classify_endpoint
+/// (the H2 warmup-5xx false-red fix). `--strict` ignores this and fails on any 5xx.
+const MAX_5XX_RATE: f64 = 0.25;
+
 /// Status-code counts for a single endpoint, split by observation side.
 ///
 /// CB emits the same HTTP-level event at two layers:
@@ -222,13 +227,38 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     let r5xx = stats.relay_get("5xx");
     let b5xx = stats.beacon_get("5xx");
 
-    // Relay 5xx always fails. No warnings here -- this is the relay or the
-    // network between CB and relay actually breaking.
+    // Relay 5xx handling (H2 fix). These are absolute CUMULATIVE counters that
+    // include the pre/early-window warmup phase, where a handful of 5xx are normal
+    // (relays/builders not yet ready). FAILing on any 5xx > 0 made a genuinely
+    // healthy run red. Classify on the 5xx RATE instead: a materially broken
+    // relay/CB-to-relay link produces a high fraction of 5xx (FAIL); a few 5xx
+    // against many good requests is transient warmup (WARN, surfaced but non-fatal).
+    // `--strict` still promotes the transient case to FAIL for zero-tolerance CI.
     if r5xx > 0.0 {
-        return CheckResult::fail(
+        let total = r200 + r202 + r204 + r4xx + r5xx;
+        let rate = if total > 0.0 { r5xx / total } else { 1.0 };
+        let pct = rate * 100.0;
+        if rate > MAX_5XX_RATE || strict {
+            return CheckResult::fail(
+                id,
+                tier,
+                format!(
+                    "{endpoint}: {r5xx:.0}/{total:.0} 5xx ({pct:.1}%) from relay(s) -- relay or \
+                     CB-to-relay failure (>{:.0}% threshold{})",
+                    MAX_5XX_RATE * 100.0,
+                    if strict { ", --strict" } else { "" }
+                ),
+            )
+            .with_data(data);
+        }
+        return CheckResult::warn(
             id,
             tier,
-            format!("{endpoint}: {r5xx:.0} 5xx from relay(s) -- relay or CB-to-relay failure"),
+            format!(
+                "{endpoint}: {r5xx:.0}/{total:.0} transient 5xx ({pct:.1}%) -- likely warmup, below \
+                 the {:.0}% FAIL threshold",
+                MAX_5XX_RATE * 100.0
+            ),
         )
         .with_data(data);
     }
@@ -723,16 +753,27 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn classify_get_header_5xx_always_fails() {
-        let mut s = EndpointStats::default();
-        s.add_relay("r0", "200", 10.0);
-        s.add_relay("r0", "500", 1.0);
+    fn classify_5xx_transient_warns_but_strict_and_high_rate_fail() {
+        // H2: a few 5xx against many good requests (1/11 = 9% < 25%) is warmup
+        // noise → WARN (not the old FAIL), but --strict still FAILs.
+        let mut low = EndpointStats::default();
+        low.add_relay("r0", "200", 10.0);
+        low.add_relay("r0", "500", 1.0);
         assert_eq!(
-            classify_endpoint("get_header", &s, false).status,
-            CheckStatus::Fail
+            classify_endpoint("get_header", &low, false).status,
+            CheckStatus::Warn
         );
         assert_eq!(
-            classify_endpoint("get_header", &s, true).status,
+            classify_endpoint("get_header", &low, true).status,
+            CheckStatus::Fail
+        );
+
+        // A materially broken relay (5/6 = 83% > 25%) FAILs even without --strict.
+        let mut high = EndpointStats::default();
+        high.add_relay("r0", "200", 1.0);
+        high.add_relay("r0", "500", 5.0);
+        assert_eq!(
+            classify_endpoint("get_header", &high, false).status,
             CheckStatus::Fail
         );
     }
