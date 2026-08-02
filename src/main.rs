@@ -323,9 +323,12 @@ async fn run_verification(cli: &Cli) -> i32 {
 
         let summary: Vec<String> = dead_at_preflight.iter().map(|(l, _)| l.clone()).collect();
 
-        // When ONLY relay targets are dead, try post-mortem: query the relay's
-        // Postgres directly. If the pipeline worked before the crash, Postgres
-        // still has the evidence. Salvage the verdict instead of hard-failing.
+        // When ONLY relay targets are dead, PROCEED to the observation window
+        // rather than bail: the relay checks handle dead relays and FAIL the
+        // tier-1 delivery check (all_relays_dead_results / C1), which is the
+        // correct verdict for a relay that died. (A flashbots-Postgres post-mortem
+        // salvage lived here; it hardcoded the mev-boost-relay's service/schema and
+        // was dead after the 2-helix migration — dropped, see M5.)
         let all_are_relays = dead_at_preflight
             .iter()
             .all(|(l, _)| l.starts_with("relay["));
@@ -334,46 +337,13 @@ async fn run_verification(cli: &Cli) -> i32 {
             .any(|(l, _)| l.starts_with("relay["));
 
         if all_are_relays && relay_died {
-            info!("Relay Data API unreachable — attempting post-mortem via Postgres...");
-            let postmortem = discovery::query_mev_relay_postgres(&enclave_name);
-            if !postmortem.is_empty() {
-                info!(
-                    "Post-mortem: found {} payload(s) in relay Postgres before crash:",
-                    postmortem.len()
-                );
-                for r in &postmortem {
-                    let hash_short = if r.block_hash.len() > 28 {
-                        &r.block_hash[..28]
-                    } else {
-                        &r.block_hash
-                    };
-                    info!("  slot={} hash={}... value={}", r.slot, hash_short, r.value);
-                }
-                info!(
-                    "Pipeline worked before relay crash. Proceeding with non-relay checks \
-                     (relay API checks will SKIP)."
-                );
-                // Fall through to Step 3 — wait for window. Relay checks
-                // will naturally SKIP because the relay URLs are unreachable.
-            } else {
-                error!("Post-mortem: no delivery records found in relay Postgres.");
-                let report = make_error_report(
-                    &enclave_name,
-                    &now,
-                    &format!(
-                        "Preflight failed ({} of {} services): {}. Relay API unreachable \
-                         and post-mortem Postgres query found no delivery records. \
-                         Try: kurtosis enclave inspect {} ; docker ps -a",
-                        dead_at_preflight.len(),
-                        targets.len(),
-                        summary.join(", "),
-                        &enclave_name
-                    ),
-                );
-                report::print_report(&report, cli.json);
-                save_report(&report);
-                return 2;
-            }
+            warn!(
+                "Relay(s) unreachable at preflight ({}). Non-relay services are up; proceeding to \
+                 the observation window — the relay checks report the failure \
+                 (relay.payloads_delivered_multi FAILs if they stay down).",
+                summary.join(", ")
+            );
+            // Fall through to Step 3.
         } else {
             error!(
                 "{} of {} service(s) unreachable: {:?}",
