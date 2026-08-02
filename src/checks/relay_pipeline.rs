@@ -109,29 +109,32 @@ pub async fn check_mev_delivery_rate(
     end_slot: u64,
     threshold: f64,
 ) -> CheckResult {
-    // Get delivered payload block hashes — try each relay until one succeeds.
-    // Some relays (e.g., mev-boost-relay) don't expose the data API.
+    // UNION delivered payloads across ALL relays (not just the first that answers).
+    // Under mux each relay holds only the half of deliveries it won, so taking the
+    // first relay undercounts the MEV rate and spuriously WARNs (H3). We only SKIP
+    // if NO relay answered the data API at all.
     let mut delivered = Vec::new();
+    let mut any_ok = false;
     let mut last_error = None;
     for relay in relays {
         match relay.get_payloads_delivered(start_slot, end_slot).await {
             Ok(p) => {
-                delivered = p;
-                break;
+                delivered.extend(p);
+                any_ok = true;
             }
             Err(e) => {
                 tracing::warn!(
-                    "Relay {} doesn't support data API ({}), trying next...",
-                    relay.base_url(),
-                    e
+                    "Relay {} doesn't support the data API ({e})",
+                    relay.base_url()
                 );
                 last_error = Some(e);
             }
         }
     }
-    if delivered.is_empty()
-        && let Some(err) = last_error
-    {
+    if !any_ok {
+        let err = last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no relays".to_string());
         return CheckResult::skip(
             "relay.mev_delivery_rate",
             2,
@@ -275,12 +278,43 @@ pub async fn check_validator_registrations(
     }
 }
 
+/// Verdicts when EVERY relay in the enclave is unreachable at check time. This is
+/// NOT benign: the relays were launched and the chain observed a full epoch, so
+/// all-dead means the MEV pipeline died mid-run (e.g. relay OOM). The tier-1
+/// delivery check must therefore FAIL, not SKIP — a tier-1 SKIP is treated as
+/// PASS by `report::exit_code`, which would green a run whose relays died (the C1
+/// false-green). The tier-2/3 checks stay SKIP (the tier-1 FAIL already gates).
+fn all_relays_dead_results(
+    total: usize,
+    dead_urls: &[String],
+    has_pubkeys: bool,
+) -> Vec<CheckResult> {
+    let detail = format!(
+        "All {total} relay(s) unreachable at check time ({}) — the MEV pipeline is down: relays died \
+         or never served during the observation window",
+        dead_urls.join(", ")
+    );
+    let mut out = vec![
+        CheckResult::fail("relay.payloads_delivered_multi", 1, detail.clone()),
+        CheckResult::skip("relay.builder_blocks_received", 2, detail.clone()),
+        CheckResult::skip("relay.mev_delivery_rate", 2, detail.clone()),
+    ];
+    if has_pubkeys {
+        out.push(CheckResult::skip(
+            "relay.validator_registrations",
+            3,
+            detail,
+        ));
+    }
+    out
+}
+
 /// Run all relay pipeline checks.
 ///
-/// Probes each relay before running the check batch. Unreachable relays
-/// produce a single SKIP per downstream check instead of multiple FAILs
-/// with "error sending request" noise. This catches mid-run relay crashes
-/// that the startup preflight couldn't.
+/// Probes each relay before running the check batch. If ALL relays are unreachable
+/// at check time (mid-run death the startup preflight couldn't catch), the tier-1
+/// delivery check FAILs (see `all_relays_dead_results`); otherwise the batch runs
+/// against the live relays.
 pub async fn run_relay_checks(
     relays: &[RelayClient],
     beacon: &BeaconClient,
@@ -306,29 +340,11 @@ pub async fn run_relay_checks(
     }
 
     if live_relays.is_empty() && !relays.is_empty() {
-        let detail = format!(
-            "All {} relay(s) unreachable at check time: {}",
+        results.extend(all_relays_dead_results(
             relays.len(),
-            dead_urls.join(", ")
-        );
-        results.push(CheckResult::skip(
-            "relay.builder_blocks_received",
-            2,
-            &detail,
+            &dead_urls,
+            !pubkeys.is_empty(),
         ));
-        results.push(CheckResult::skip(
-            "relay.payloads_delivered_multi",
-            1,
-            &detail,
-        ));
-        results.push(CheckResult::skip("relay.mev_delivery_rate", 2, &detail));
-        if !pubkeys.is_empty() {
-            results.push(CheckResult::skip(
-                "relay.validator_registrations",
-                3,
-                &detail,
-            ));
-        }
         return results;
     }
 
@@ -496,4 +512,28 @@ pub async fn run_relay_checks(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_relays_dead_fails_tier1_not_skip() {
+        // C1: relays that die mid-run must FAIL the tier-1 delivery check, not SKIP
+        // (a tier-1 SKIP is treated as pass by exit_code → false green).
+        let r = all_relays_dead_results(2, &["u1".into(), "u2".into()], true);
+        let t1 = r
+            .iter()
+            .find(|c| c.id == "relay.payloads_delivered_multi")
+            .expect("tier-1 delivery check present");
+        assert_eq!(t1.tier, 1);
+        assert_eq!(t1.status, CheckStatus::Fail);
+        // The others stay SKIP (tier-1 FAIL already gates the run).
+        assert!(
+            r.iter()
+                .filter(|c| c.tier != 1)
+                .all(|c| c.status == CheckStatus::Skip)
+        );
+    }
 }
