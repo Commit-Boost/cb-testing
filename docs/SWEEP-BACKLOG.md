@@ -152,6 +152,14 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
   should timing-games exempt / down-tier the get_header matrix (it fails on its own aggressive-polling
   behavior), or is a high early-poll 5xx rate a real signal worth failing on? Could not root-cause the
   exact 5xx source (enclave torn down); confirm with `--keep` + relay logs next run. NOT patched.
+- **CONFIRMED scenario-specific:** the SECOND run (cb-extra-validation, a normal non-aggressive
+  scenario) had `cb_get_header_matrix` = PASS with **0 get_header 5xx** ("222 bids delivered, 0 no-bid,
+  1 4xx") → overall PASS. So the H2 rate-classifier does NOT false-fail a green run (the no-false-red
+  guarantee, validated live), and the timing-games FAIL is definitively the aggressive config's own
+  behavior, not a harness bug. Also validated live: `feature.extra_validation` = PASS (second Law-3
+  marker check fires), `relay.best_bid` = SKIP on the single-relay scenario (correct), and `sim diff`
+  on the two REAL reports (FAIL→PASS, feature checks added/removed per scenario, config_hash delta,
+  correct "no regression" verdict).
 
 ## Notes
 - P3 is effectively COMPLETE despite the plan doc reading "best_bid backed out" — best_bid v2 re-landed
