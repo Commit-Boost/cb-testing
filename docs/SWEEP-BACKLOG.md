@@ -138,6 +138,21 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
 - **DEFERRED — do NOT autonomously build:** #5 ePBS first slice belongs to the `/epbs` arc, where J
   gates every design decision and nothing commits without his review. Surface it to J; don't self-drive it.
 
+### Live-validation findings (2026-08-02, cb-timing-games run)
+- **VALIDATED live:** provenance populates (config_hash + all 4 image sha256 ids); `feature.timing_games`
+  = PASS ("fired ✓ 1342 CB debug log lines" — the Law-3 mechanism works on real infra); `relay.best_bid`
+  = PASS (37 competitive 2-helix slots); H2 rate-classifier discriminates correctly (see below).
+- **NEW FINDING (J design call) — timing-games tier-1-FAILs on `cb_get_header_matrix` despite a green
+  pipeline.** The run showed get_header 47.5% 5xx (424/892, evenly split mev_relay_0=214 / mev_relay_1=210)
+  → matrix FAIL → tier-1 → overall FAIL. This is NOT the H2 warmup false-red (the rate genuinely exceeds
+  25%, so the fix is working); it is the aggressive timing-games config (target_first_request_ms=100,
+  timeout_get_header_ms=400, frequency=200) polling helix before it has a bid, and helix answering 5xx.
+  The DELIVERY pipeline was fully green (best_bid / payloads_delivered / payload_hash / mev_delivery all
+  PASS), so MEV worked — the 5xx are the expected consequence of the feature under test. **Question for J:**
+  should timing-games exempt / down-tier the get_header matrix (it fails on its own aggressive-polling
+  behavior), or is a high early-poll 5xx rate a real signal worth failing on? Could not root-cause the
+  exact 5xx source (enclave torn down); confirm with `--keep` + relay logs next run. NOT patched.
+
 ## Notes
 - P3 is effectively COMPLETE despite the plan doc reading "best_bid backed out" — best_bid v2 re-landed
   (`145d7e1`). Law 6b (external-builder hook) is already satisfied in the fork.
