@@ -149,7 +149,10 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
   timeout mentions. Fix: 555 → its own `timeout` bucket; >25% timeouts = WARN (never FAIL, not under
   --strict — it's CB's own deadline policy, e.g. timing-games by design); real 5xx keeps the rate-FAIL
   with timeouts excluded from the denominator so an error storm still fails amid heavy polling.
-  4 new both-sides tests. The original finding below is kept for the record:
+  4 new both-sides tests. **Live-confirmed post-fix (2026-08-03):** the timing-games re-run now
+  reads overall **PASS**, exit 0, with the annotative WARN "396/892 CB-deadline timeouts (555,
+  44.4%) ... not a relay-served error (486 bids still delivered)"; `feature.timing_games` PASS again
+  (1342 TG: lines). The original finding below is kept for the record:
 - **ORIGINAL FINDING (now resolved) — timing-games tier-1-FAILs on `cb_get_header_matrix` despite a green
   pipeline.** The run showed get_header 47.5% 5xx (424/892, evenly split mev_relay_0=214 / mev_relay_1=210)
   → matrix FAIL → tier-1 → overall FAIL. This is NOT the H2 warmup false-red (the rate genuinely exceeds
