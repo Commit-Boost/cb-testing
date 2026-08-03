@@ -256,8 +256,10 @@ A marker feature enabled-but-unobserved is WARN, never FAIL (no-false-red — th
 Four checks, one per endpoint, built from CB's status-code counters
 `cb_pbs_relay_status_code_total` (codes CB received from relays, the source of truth) and
 `cb_pbs_beacon_node_status_code_total` (codes CB returned to the CL, surfaced for cross-boundary
-diagnosis). Codes bucket into `200 / 202 / 204 / 4xx / 5xx / timeout / other`. **`timeout` is CB's
-synthetic code 555** (`TIMEOUT_ERROR_CODE`) — not a relay-served status but CB cancelling its own
+diagnosis). Codes bucket into `200 / 202 / 204 / 4xx / 5xx / timeout / transport / other`. **`timeout` is CB's
+synthetic code 555** (`TIMEOUT_ERROR_CODE`) and **`transport` is its code 556** (`TRANSPORT_ERROR_CODE`,
+introduced with WS get_header streaming: connect refused / dns / tls / stream broke) — neither is a
+relay-served status; 555 is CB cancelling its own
 request at its deadline; it must never count as relay 5xx (live-confirmed 2026-08-03: timing-games
 produced 42% 555s with ZERO real relay 5xx, and the old bucketing tier-1-failed the run). Metrics are
 fetched over HTTP, falling back to `kurtosis exec`; if neither works (the usual case — default
@@ -267,7 +269,8 @@ kurtosis PBS mode sets no metrics config), **all** matrix checks plus `cb_v2_fal
 Shared rules across all four: **relay-side 5xx FAILs when it exceeds 25% of COMPLETED responses**
 (timeouts excluded from the denominator, so a real error storm still fails amid heavy timeout
 polling); at or below the rate it's a transient-warmup WARN, promoted to FAIL under `--strict`.
-**CB-deadline timeouts (555) above 25% → WARN, never FAIL — not even under `--strict`** (client-side
+**CB client-side codes (555 timeouts + 556 ws transport errors) above 25% combined → WARN, never FAIL
+— not even under `--strict`** (client-side
 deadline policy, e.g. timing-games cancelling late polls by design, or a slow relay). Any matrix FAIL
 is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for the endpoint → SKIP.**
 

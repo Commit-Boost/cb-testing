@@ -1039,6 +1039,33 @@ additional_services:
     }
 
     #[test]
+    fn test_parse_cb_log_line_ws_stream_variant() {
+        // CB with WS get_header streaming (commit-boost PR #483) logs
+        // "received new header from ws stream" — a SUPERSTRING of the HTTP
+        // message with different latency fields (connect_latency /
+        // first_bid_latency instead of latency) and no content_type. Our
+        // consumers filter with starts_with("received new header"), so the
+        // variant must (a) match that prefix and (b) yield the fields
+        // best_bid needs: relay_id, slot (span-rendered), value_eth.
+        let line = r#"2026-08-04T10:00:00.000000Z  INFO : received new header from ws stream relay_id="mux_helix" header_size_bytes=2891 connect_latency=12.3ms first_bid_latency=88.1ms validate_latency=1.2ms version=Fulu value_eth="0.050439063999832000" block_hash=0x15cd5f31333e1a8d42f0207cf1a61c65baf3d938836b07877a3a76b1cb890d11 updates=7 invalid_frames=0 req_id=8e5020cb-a893-42b3-a2f5-8f4c3f400c9e slot=521"#;
+
+        let event = parse_cb_log_line(line).expect("ws variant should parse");
+        assert!(
+            event.message.starts_with("received new header"),
+            "prefix filter must match the ws variant, got: {:?}",
+            event.message
+        );
+        assert_eq!(event.relay_id, Some("mux_helix".to_string()));
+        assert_eq!(event.slot, Some(521));
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.050439063999832000".to_string())
+        );
+        // The HTTP-only fields are absent, not misparsed.
+        assert!(!event.fields.contains_key("latency"));
+    }
+
+    #[test]
     fn test_parse_cb_log_line_auction_winner() {
         let line = r#"2026-05-06T20:43:48.010000Z  INFO : auction winner relay_id="mux_helix" value_eth="0.042701386561497000" block_hash=0x0d7d119986cbd7b1c376056ffa703245404dc4d9d8b989f2d5ce2ee93d9354aa"#;
 

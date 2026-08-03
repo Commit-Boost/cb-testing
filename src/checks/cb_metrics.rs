@@ -152,6 +152,12 @@ fn bucket_code(code: &str) -> String {
         // Not a relay-served status — MUST NOT land in the 5xx bucket, or a
         // designed deadline-cancellation counts as a relay failure.
         "555" => "timeout".to_string(),
+        // CB's synthetic transport-error marker (TRANSPORT_ERROR_CODE = 556,
+        // introduced with WS get_header streaming: connect refused / dns / tls
+        // / stream broke mid-window). Also client-observed, not relay-served —
+        // must not count toward the relay 5xx error rate. Relay reachability
+        // has its own tier-1 owner (the relay_pipeline death checks).
+        "556" => "transport".to_string(),
         c if c.starts_with('4') && c.len() == 3 => "4xx".to_string(),
         c if c.starts_with('5') && c.len() == 3 => "5xx".to_string(),
         _ => "other".to_string(),
@@ -243,6 +249,7 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     let r4xx = stats.relay_get("4xx");
     let r5xx = stats.relay_get("5xx");
     let rtimeout = stats.relay_get("timeout");
+    let rtransport = stats.relay_get("transport");
     let b5xx = stats.beacon_get("5xx");
 
     // Relay 5xx handling (H2 fix). These are absolute CUMULATIVE counters that
@@ -284,25 +291,31 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
         .with_data(data);
     }
 
-    // CB client-side timeouts (code 555). A high rate is surfaced as WARN — it
-    // means either an aggressive timing config cancelling late polls by design
-    // (timing-games) or a slow relay — but never FAIL, and never under --strict
-    // either: a 555 is CB's own deadline policy firing, not a pipeline error.
-    // Below the threshold, fall through to normal classification (the count is
-    // still visible in `data`).
-    if rtimeout > 0.0 {
+    // CB client-side synthetic codes: 555 (deadline timeout) and 556 (WS
+    // transport error). A high rate of either is surfaced as WARN — 555 means
+    // an aggressive timing config cancelling late polls by design
+    // (timing-games) or a slow relay; 556 means the stream relay is
+    // unreachable/breaking (relay reachability's FAIL owner is the tier-1
+    // relay_pipeline death check, not this matrix). Never FAIL here, and never
+    // under --strict either: neither is a relay-served pipeline error. Below
+    // the threshold, fall through to normal classification (the counts stay
+    // visible in `data`).
+    let rsynthetic = rtimeout + rtransport;
+    if rsynthetic > 0.0 {
         let completed = r200 + r202 + r204 + r4xx + r5xx;
-        let rate = rtimeout / (completed + rtimeout);
+        let rate = rsynthetic / (completed + rsynthetic);
         if rate > MAX_TIMEOUT_RATE {
             let pct = rate * 100.0;
             return CheckResult::warn(
                 id,
                 tier,
                 format!(
-                    "{endpoint}: {rtimeout:.0}/{:.0} CB-deadline timeouts (555, {pct:.1}%) -- \
-                     aggressive timing config (e.g. timing-games) or slow relay; client-side \
-                     cancellation, not a relay-served error ({r200:.0} bids still delivered)",
-                    completed + rtimeout
+                    "{endpoint}: {rsynthetic:.0}/{:.0} CB client-side failures ({pct:.1}%: \
+                     {rtimeout:.0} deadline timeouts (555), {rtransport:.0} ws transport errors \
+                     (556)) -- not relay-served errors ({r200:.0} bids still delivered). 555 = \
+                     aggressive timing config or slow relay; 556 = stream relay \
+                     unreachable/breaking (relay death is the tier-1 relay checks' call)",
+                    completed + rsynthetic
                 ),
             )
             .with_data(data);
@@ -312,11 +325,14 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     match endpoint {
         "get_header" => {
             if r200 > 0.0 {
-                let timeout_note = if rtimeout > 0.0 {
+                let mut timeout_note = if rtimeout > 0.0 {
                     format!(", {rtimeout:.0} CB-deadline timeout (555)")
                 } else {
                     String::new()
                 };
+                if rtransport > 0.0 {
+                    timeout_note.push_str(&format!(", {rtransport:.0} ws transport error (556)"));
+                }
                 CheckResult::pass(
                     id,
                     tier,
@@ -747,8 +763,12 @@ mod tests {
         // CB's synthetic client-timeout marker MUST NOT bucket as relay 5xx —
         // that misattribution tier-1-failed a run whose relays served 0 errors.
         assert_eq!(bucket_code("555"), "timeout");
-        // A real (unusual) HTTP 5xx that is not 555 stays 5xx.
+        // CB's synthetic WS transport-error marker (PR-483 streaming): also
+        // client-observed, same misattribution class as 555.
+        assert_eq!(bucket_code("556"), "transport");
+        // A real (unusual) HTTP 5xx that is neither synthetic code stays 5xx.
         assert_eq!(bucket_code("550"), "5xx");
+        assert_eq!(bucket_code("557"), "5xx");
     }
 
     // --- timeout (555) classification: the timing-games false-red fix --------
@@ -774,7 +794,7 @@ mod tests {
             "detail names the marker: {}",
             r.detail
         );
-        assert!(r.detail.contains("not a relay-served error"));
+        assert!(r.detail.contains("not relay-served"));
     }
 
     #[test]
@@ -797,6 +817,56 @@ mod tests {
         let r = classify_endpoint("get_header", &s, false);
         assert_eq!(r.status, CheckStatus::Pass);
         assert!(r.detail.contains("timeout"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn classify_heavy_transport_errors_warn_not_fail() {
+        // A stream relay refusing connections every slot: heavy 556, zero real
+        // 5xx. Must WARN (relay death is the tier-1 relay checks' call), never
+        // FAIL, not even under --strict.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "556", 30.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn, "556 must not FAIL");
+        assert!(r.detail.contains("556"), "detail names 556: {}", r.detail);
+        let strict = classify_endpoint("get_header", &s, true);
+        assert_eq!(strict.status, CheckStatus::Warn, "strict must not promote");
+    }
+
+    #[test]
+    fn mixed_555_and_556_aggregate_into_one_warn() {
+        // Timing-games over a flaky stream: both synthetic codes present. One
+        // WARN naming both counts, not two competing verdicts.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "555", 10.0);
+        s.add_relay("r0", "556", 10.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("555") && r.detail.contains("556"));
+    }
+
+    #[test]
+    fn few_transport_errors_pass_with_note() {
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 90.0);
+        s.add_relay("r0", "556", 5.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.contains("556"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn real_5xx_still_fails_despite_heavy_transport_errors() {
+        // 556 excluded from the 5xx denominator, same as 555: a genuine relay
+        // error storm FAILs even amid heavy stream-transport failures.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 4.0);
+        s.add_relay("r0", "500", 10.0);
+        s.add_relay("r0", "556", 90.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Fail, "real 5xx must keep failing");
     }
 
     #[test]
