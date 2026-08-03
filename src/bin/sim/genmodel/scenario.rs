@@ -131,7 +131,10 @@ impl Scenario {
                  # Commit-Boost sidecar.\n\
                  #\n\
                  # Tests that CB correctly routes get_header requests to both relays,\n\
-                 # aggregating responses and selecting the best bid."
+                 # aggregating responses and selecting the best bid. The per-relay\n\
+                 # subsidy list [1, 2] makes the builder submit DIVERGENT bid values\n\
+                 # (rbuilder [[subsidy_overrides]]), so the best-bid selection is a\n\
+                 # real discrimination, not a tie between identical bids."
             }
             Scenario::SkipSigverify => {
                 "# cb-skip-sigverify: Signature verification disabled for header responses.\n\
@@ -216,11 +219,24 @@ impl Scenario {
         }
     }
 
+    /// The builder subsidy YAML value. cb-multiple-relays uses the per-relay
+    /// LIST form ([1, 2]: relay 0 gets subsidy 1, relay 1 gets 2) so the two
+    /// helix instances offer DIVERGENT bid values on the same slot and CB's
+    /// best-bid aggregation is actually discriminated — with the scalar form
+    /// one shared builder submits the identical bid to both relays and the
+    /// comparison is degenerate. Other scenarios keep the historical scalar.
+    fn builder_subsidy(&self) -> &'static str {
+        match self {
+            Scenario::MultipleRelays => "[1, 2]",
+            _ => "1",
+        }
+    }
+
     /// Assemble the full Kurtosis args-file for this scenario. Reads
     /// `keys/node-{0,1}-pubkeys.json` under `keys_dir` for the mux scenario only.
     pub fn args_file_in(&self, images: &Images, keys_dir: &Path) -> Result<String> {
         let cb_block = self.cb_block(keys_dir)?;
-        let mev_params = build_mev_params(self.relays(), images, &cb_block);
+        let mev_params = build_mev_params(self.relays(), images, &cb_block, self.builder_subsidy());
         Ok([
             self.comment(),
             COMMON_PARTICIPANTS,
@@ -236,7 +252,7 @@ impl Scenario {
 
 // --- mev_params assembly (ports build_mev_params) ---------------------------
 
-fn build_mev_params(relays: &[&str], images: &Images, cb_block: &str) -> String {
+fn build_mev_params(relays: &[&str], images: &Images, cb_block: &str, subsidy: &str) -> String {
     let mut lines: Vec<String> = vec!["mev_params:".to_string()];
 
     if relays.len() > 1 {
@@ -263,7 +279,7 @@ fn build_mev_params(relays: &[&str], images: &Images, cb_block: &str) -> String 
     lines.push(format!("  mev_builder_cl_image: {}", images.builder_cl));
 
     lines.push(String::new());
-    lines.push("  mev_builder_subsidy: 1".to_string());
+    lines.push(format!("  mev_builder_subsidy: {subsidy}"));
     lines.push(String::new());
 
     // helix block scalar: indent non-empty lines 4 spaces, blanks stay empty.

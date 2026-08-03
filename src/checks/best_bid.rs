@@ -168,9 +168,18 @@ where
     }
 
     // Only a competitive slot WITH a delivered value can actually be verified.
+    // `divergent` counts competitive slots whose offered values are NOT all
+    // equal — the discrimination-strength signal: with identical bids (one
+    // builder, one subsidy) "delivered >= best" is a tie and proves nothing
+    // about selection; only a divergent slot shows CB actually picked a winner.
     let mut verified = 0usize;
+    let mut divergent = 0usize;
     let mut suboptimal = Vec::new();
     for (slot, bids) in &competitive {
+        let first = bids[0].1;
+        if bids.iter().any(|(_, v)| *v != first) {
+            divergent += 1;
+        }
         let Some(delivered) = delivered_by_slot.get(slot) else {
             continue;
         };
@@ -189,6 +198,7 @@ where
     let data = serde_json::json!({
         "competitive_slots": n,
         "verified_slots": verified,
+        "divergent_slots": divergent,
         "unverified_slots": n - verified,
         "suboptimal_count": suboptimal.len(),
         "suboptimal": suboptimal,
@@ -206,12 +216,18 @@ where
         )
         .with_data(data)
     } else if suboptimal.is_empty() {
+        let strength = if divergent > 0 {
+            format!("{divergent} slot(s) had DIVERGENT offered values (real discrimination)")
+        } else {
+            "all offered values were identical (degenerate tie — selection not discriminated)"
+                .to_string()
+        };
         CheckResult::pass(
             "relay.best_bid",
             2,
             format!(
                 "Aggregated bidding verified across {verified} competitive slot(s) with delivered \
-                 payloads: CB delivered >= the best offered per-relay bid."
+                 payloads: CB delivered >= the best offered per-relay bid; {strength}."
             ),
         )
         .with_data(data)
@@ -263,6 +279,29 @@ mod tests {
         let r = classify_best_bid(&b, &d);
         assert_eq!(r.status, CheckStatus::Warn);
         assert_eq!(r.data["competitive_slots"], 0);
+    }
+
+    #[test]
+    fn divergent_slots_counted_when_offers_differ() {
+        // Two relays offering DIFFERENT values (the [1, 2] subsidy setup): the
+        // slot is divergent — real discrimination, and the detail says so.
+        let b = bids(&[(5, &[("relay-a", 100), ("relay-b", 150)])]);
+        let d = delivered(&[(5, 150)]);
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(r.data["divergent_slots"], 1);
+        assert!(r.detail.contains("DIVERGENT"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn identical_offers_are_a_degenerate_tie_not_divergent() {
+        // Two relays offering the SAME value (one builder, one subsidy): passes
+        // but is flagged as a degenerate tie — selection was not discriminated.
+        let b = bids(&[(5, &[("relay-a", 100), ("relay-b", 100)])]);
+        let d = delivered(&[(5, 100)]);
+        let r = classify_best_bid(&b, &d);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["divergent_slots"], 0);
+        assert!(r.detail.contains("degenerate"), "detail: {}", r.detail);
     }
 
     #[test]
