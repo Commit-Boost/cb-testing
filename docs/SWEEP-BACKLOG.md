@@ -129,7 +129,15 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
   `sim checks --list --json` (`e6185c6`); #9 `sim diff` (verdict/provenance regression gate); #1
   Law-3 feature-fired assertions (`feature.timing_games` / `.extra_validation` / `.skip_sigverify`).
   H2/H3/C1/M4-M6 all landed earlier in the campaign.
-- NEXT (in order): #6 distinct-key 2-helix (divergent competition) → #7 Law 7 EL/CL matrix.
+- **#6 divergent-bid 2-helix DONE + LIVE-VALIDATED (2026-08-03):** rbuilder upstream supports per-relay
+  bid values from ONE instance (top-level `[[subsidy_overrides]]` name-matched to `[[relays]]`; the
+  ethpandaops image is upstream develop, no fork) — the previously-mapped 5-file two-builder surgery
+  was unnecessary. `mev_builder_subsidy` accepts a list (submodule fc5e6a2); cb-multiple-relays emits
+  `[1, 2]`; `relay.best_bid` gained `divergent_slots` + a discrimination-vs-degenerate-tie detail.
+  Live run: overall PASS, **65/65 competitive slots divergent, 0 suboptimal** — CB delivered the
+  higher (+1 ETH) bid on every slot (e.g. slot 5: relay_0 1.0439 vs relay_1 2.0439 ETH). NOTE:
+  submodule fc5e6a2 is local-only (with 43fe436+fbe3141) — J must push to JasonVranek/ethereum-package.
+- NEXT: #7 Law 7 EL/CL matrix.
 - **NEW (surfaced by Law-3):** bad-signature-injecting helix mock relay — the only way to turn
   `feature.skip_sigverify` from an honest WARN into a real ON/OFF differential test (ON delivers the
   bad-sig bid, OFF rejects with `ValidationError::Sigverify`). Needs a fault mode in
