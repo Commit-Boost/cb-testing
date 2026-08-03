@@ -199,7 +199,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             title: "get_header status-code distribution healthy",
             data_source: CbPrometheus,
             feature_asserted: false,
-            severity_note: "tier 2 -> ESCALATES to tier 1 on FAIL (any relay 5xx fails the run); SKIP if metrics absent (the default)",
+            severity_note: "tier 2 -> ESCALATES to tier 1 on FAIL (relay 5xx over the 25% rate); CB-deadline timeouts (code 555) bucket separately and WARN only; SKIP if metrics absent (the default)",
         },
         CatalogEntry {
             id: "cb_register_validator_matrix",

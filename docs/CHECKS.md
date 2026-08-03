@@ -256,16 +256,23 @@ A marker feature enabled-but-unobserved is WARN, never FAIL (no-false-red — th
 Four checks, one per endpoint, built from CB's status-code counters
 `cb_pbs_relay_status_code_total` (codes CB received from relays, the source of truth) and
 `cb_pbs_beacon_node_status_code_total` (codes CB returned to the CL, surfaced for cross-boundary
-diagnosis). Codes bucket into `200 / 202 / 204 / 4xx / 5xx / other`. Metrics are fetched over HTTP,
-falling back to `kurtosis exec`; if neither works (the usual case — default kurtosis PBS mode sets no
-metrics config), **all** matrix checks plus `cb_v2_fallback` and `cb_relay_latency` SKIP.
+diagnosis). Codes bucket into `200 / 202 / 204 / 4xx / 5xx / timeout / other`. **`timeout` is CB's
+synthetic code 555** (`TIMEOUT_ERROR_CODE`) — not a relay-served status but CB cancelling its own
+request at its deadline; it must never count as relay 5xx (live-confirmed 2026-08-03: timing-games
+produced 42% 555s with ZERO real relay 5xx, and the old bucketing tier-1-failed the run). Metrics are
+fetched over HTTP, falling back to `kurtosis exec`; if neither works (the usual case — default
+kurtosis PBS mode sets no metrics config), **all** matrix checks plus `cb_v2_fallback` and
+`cb_relay_latency` SKIP.
 
-Shared rule across all four: **relay-side 5xx always FAILs** (relay or CB-to-relay failure), and any
-matrix FAIL is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for the
-endpoint → SKIP.**
+Shared rules across all four: **relay-side 5xx FAILs when it exceeds 25% of COMPLETED responses**
+(timeouts excluded from the denominator, so a real error storm still fails amid heavy timeout
+polling); at or below the rate it's a transient-warmup WARN, promoted to FAIL under `--strict`.
+**CB-deadline timeouts (555) above 25% → WARN, never FAIL — not even under `--strict`** (client-side
+deadline policy, e.g. timing-games cancelling late polls by design, or a slow relay). Any matrix FAIL
+is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for the endpoint → SKIP.**
 
-- **`cb_get_header_matrix`** — PASS if any 200 (bids delivered); WARN if only 204s (relay alive, no
-  bid — promoted to **FAIL under `--strict`**); FAIL if only 4xx; FAIL on any 5xx.
+- **`cb_get_header_matrix`** — PASS if any 200 (bids delivered, timeout count noted); WARN if only
+  204s (relay alive, no bid — promoted to **FAIL under `--strict`**); FAIL if only 4xx.
 - **`cb_register_validator_matrix`** — PASS if 200s and zero 4xx (100% accepted); WARN if a mix of
   200 and 4xx (some batches rejected — normal early on; the beacon-side 502 translation is surfaced);
   FAIL if only 4xx; SKIP if no registrations observed; FAIL on any 5xx.
@@ -340,10 +347,12 @@ the intro.
   relay — no slot sees ≥2 relays competing, so it WARNs "aggregation not exercised" rather than
   verifying anything. With an identical two-relay setup (e.g. two helix instances serving the same
   bid) the comparison is technically competitive but degenerate.
-- **The `cb_*_matrix` checks FAIL on any cumulative 5xx, including warmup.** The counters are
-  cumulative over the container's life, and a relay-side 5xx at any point in the run yields a matrix
-  FAIL — which then escalates to tier 1 and fails the whole run — even if the 5xx was a transient
-  startup/warmup blip before the observation window. There is no windowing of the counter.
+- **The `cb_*_matrix` counters are cumulative, not windowed.** The H2 fix made the 5xx verdict
+  rate-based (FAIL only above 25% of completed responses; below = transient-warmup WARN), and code 555
+  now buckets as `timeout` (WARN-only), so neither a warmup blip nor a designed deadline-cancellation
+  fails a run anymore. But the counters still cover the container's whole life, not the observation
+  window — a sustained pre-window error burst can still dominate the rate. True windowing (delta
+  against a baseline scrape, as `--live-metrics` already takes) remains future work.
 - **A real anomaly can still exit 0.** As stated in the intro: relay equivocation, unverifiable
   routing, and best-bid shortfall are all `WARN`. Gate on the JSON `result` per check, not the exit
   code, if you care about these.

@@ -142,7 +142,15 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
 - **VALIDATED live:** provenance populates (config_hash + all 4 image sha256 ids); `feature.timing_games`
   = PASS ("fired ✓ 1342 CB debug log lines" — the Law-3 mechanism works on real infra); `relay.best_bid`
   = PASS (37 competitive 2-helix slots); H2 rate-classifier discriminates correctly (see below).
-- **NEW FINDING (J design call) — timing-games tier-1-FAILs on `cb_get_header_matrix` despite a green
+- **RESOLVED 2026-08-03 (root-caused, no design exemption needed):** the "47.5% relay 5xx" was
+  **entirely CB's synthetic code 555** (`TIMEOUT_ERROR_CODE` — client-side deadline cancellation),
+  which `bucket_code` lumped into 5xx. Evidence: dedicated capture run's raw counter showed get_header
+  = 200×48 / 204×6 / 400×4 / **555×42, zero real 5xx**; helix logs had 0 server errors; CB log had 45
+  timeout mentions. Fix: 555 → its own `timeout` bucket; >25% timeouts = WARN (never FAIL, not under
+  --strict — it's CB's own deadline policy, e.g. timing-games by design); real 5xx keeps the rate-FAIL
+  with timeouts excluded from the denominator so an error storm still fails amid heavy polling.
+  4 new both-sides tests. The original finding below is kept for the record:
+- **ORIGINAL FINDING (now resolved) — timing-games tier-1-FAILs on `cb_get_header_matrix` despite a green
   pipeline.** The run showed get_header 47.5% 5xx (424/892, evenly split mev_relay_0=214 / mev_relay_1=210)
   → matrix FAIL → tier-1 → overall FAIL. This is NOT the H2 warmup false-red (the rate genuinely exceeds
   25%, so the fix is working); it is the aggressive timing-games config (target_first_request_ms=100,

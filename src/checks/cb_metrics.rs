@@ -17,7 +17,14 @@
 //! |                        | 202           | v2 path: relay publishes unblinded block itself   |
 //! | `status`, `reload`     | 200           | Endpoint alive / reload succeeded                 |
 //!
-//! 4xx = client bug. 5xx = relay or CB internal failure.
+//! 4xx = client bug. 5xx = relay or CB internal failure. 555 = NOT an HTTP
+//! response at all: CB's synthetic client-side timeout marker (commit-boost
+//! `constants.rs` `TIMEOUT_ERROR_CODE`), incremented when CB cancels its own
+//! request at its deadline. It gets its own `timeout` bucket — counting it as
+//! relay 5xx made the timing-games scenario (which cancels late polls at the
+//! 400ms budget BY DESIGN) tier-1-fail a run whose relays served zero errors
+//! (live-confirmed 2026-08-03: raw counter 200x48/204x6/400x4/555x42, zero
+//! real 5xx in helix logs).
 //!
 //! # Output shape
 //!
@@ -37,6 +44,12 @@ const METRICS_PORT: u16 = 9090;
 /// it, a nonzero 5xx count is a transient WARN (warmup noise). See classify_endpoint
 /// (the H2 warmup-5xx false-red fix). `--strict` ignores this and fails on any 5xx.
 const MAX_5XX_RATE: f64 = 0.25;
+
+/// A CB client-side timeout (code 555) FRACTION above this WARNs — high timeout
+/// rates are either an aggressive timing config (timing-games cancels late polls
+/// at its budget by design) or a slow relay, both worth surfacing. Never FAIL:
+/// a 555 is CB's own deadline policy firing, not a relay-served error.
+const MAX_TIMEOUT_RATE: f64 = 0.25;
 
 /// Status-code counts for a single endpoint, split by observation side.
 ///
@@ -135,6 +148,10 @@ impl EndpointStats {
 fn bucket_code(code: &str) -> String {
     match code {
         "200" | "202" | "204" => code.to_string(),
+        // CB's synthetic client-side timeout marker (TIMEOUT_ERROR_CODE = 555).
+        // Not a relay-served status — MUST NOT land in the 5xx bucket, or a
+        // designed deadline-cancellation counts as a relay failure.
+        "555" => "timeout".to_string(),
         c if c.starts_with('4') && c.len() == 3 => "4xx".to_string(),
         c if c.starts_with('5') && c.len() == 3 => "5xx".to_string(),
         _ => "other".to_string(),
@@ -225,6 +242,7 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     let r204 = stats.relay_get("204");
     let r4xx = stats.relay_get("4xx");
     let r5xx = stats.relay_get("5xx");
+    let rtimeout = stats.relay_get("timeout");
     let b5xx = stats.beacon_get("5xx");
 
     // Relay 5xx handling (H2 fix). These are absolute CUMULATIVE counters that
@@ -235,6 +253,9 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     // against many good requests is transient warmup (WARN, surfaced but non-fatal).
     // `--strict` still promotes the transient case to FAIL for zero-tolerance CI.
     if r5xx > 0.0 {
+        // Timeouts (555) are deliberately EXCLUDED from this denominator: the
+        // 5xx rate is "fraction of COMPLETED relay responses that were errors",
+        // so a real 5xx storm still FAILs even amid heavy timeout polling.
         let total = r200 + r202 + r204 + r4xx + r5xx;
         let rate = if total > 0.0 { r5xx / total } else { 1.0 };
         let pct = rate * 100.0;
@@ -263,14 +284,44 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
         .with_data(data);
     }
 
+    // CB client-side timeouts (code 555). A high rate is surfaced as WARN — it
+    // means either an aggressive timing config cancelling late polls by design
+    // (timing-games) or a slow relay — but never FAIL, and never under --strict
+    // either: a 555 is CB's own deadline policy firing, not a pipeline error.
+    // Below the threshold, fall through to normal classification (the count is
+    // still visible in `data`).
+    if rtimeout > 0.0 {
+        let completed = r200 + r202 + r204 + r4xx + r5xx;
+        let rate = rtimeout / (completed + rtimeout);
+        if rate > MAX_TIMEOUT_RATE {
+            let pct = rate * 100.0;
+            return CheckResult::warn(
+                id,
+                tier,
+                format!(
+                    "{endpoint}: {rtimeout:.0}/{:.0} CB-deadline timeouts (555, {pct:.1}%) -- \
+                     aggressive timing config (e.g. timing-games) or slow relay; client-side \
+                     cancellation, not a relay-served error ({r200:.0} bids still delivered)",
+                    completed + rtimeout
+                ),
+            )
+            .with_data(data);
+        }
+    }
+
     match endpoint {
         "get_header" => {
             if r200 > 0.0 {
+                let timeout_note = if rtimeout > 0.0 {
+                    format!(", {rtimeout:.0} CB-deadline timeout (555)")
+                } else {
+                    String::new()
+                };
                 CheckResult::pass(
                     id,
                     tier,
                     format!(
-                        "get_header: {r200:.0} bids delivered, {r204:.0} no-bid (204), {r4xx:.0} 4xx"
+                        "get_header: {r200:.0} bids delivered, {r204:.0} no-bid (204), {r4xx:.0} 4xx{timeout_note}"
                     ),
                 )
                 .with_data(data)
@@ -693,6 +744,73 @@ mod tests {
         assert_eq!(bucket_code("502"), "5xx");
         assert_eq!(bucket_code("201"), "other");
         assert_eq!(bucket_code("garbage"), "other");
+        // CB's synthetic client-timeout marker MUST NOT bucket as relay 5xx —
+        // that misattribution tier-1-failed a run whose relays served 0 errors.
+        assert_eq!(bucket_code("555"), "timeout");
+        // A real (unusual) HTTP 5xx that is not 555 stays 5xx.
+        assert_eq!(bucket_code("550"), "5xx");
+    }
+
+    // --- timeout (555) classification: the timing-games false-red fix --------
+
+    #[test]
+    fn classify_heavy_timeouts_warn_not_fail() {
+        // The live-captured timing-games shape (2026-08-03): healthy bids plus
+        // ~42% CB-deadline cancellations, ZERO relay-served 5xx. Old bucketing
+        // called this "47.5% relay 5xx" -> tier-1 FAIL. Must be WARN.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 27.0);
+        s.add_relay("r0", "204", 4.0);
+        s.add_relay("r0", "400", 2.0);
+        s.add_relay("r0", "555", 17.0);
+        s.add_relay("r1", "200", 21.0);
+        s.add_relay("r1", "204", 2.0);
+        s.add_relay("r1", "400", 2.0);
+        s.add_relay("r1", "555", 25.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn, "timeouts must not FAIL");
+        assert!(
+            r.detail.contains("555"),
+            "detail names the marker: {}",
+            r.detail
+        );
+        assert!(r.detail.contains("not a relay-served error"));
+    }
+
+    #[test]
+    fn classify_heavy_timeouts_warn_even_under_strict() {
+        // --strict is zero-tolerance for PIPELINE errors; a 555 is CB's own
+        // deadline policy, so strict must not promote it to FAIL.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "555", 30.0);
+        let r = classify_endpoint("get_header", &s, true);
+        assert_eq!(r.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn classify_few_timeouts_pass_with_note() {
+        // Below MAX_TIMEOUT_RATE: normal classification, timeout count noted.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 90.0);
+        s.add_relay("r0", "555", 5.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.contains("timeout"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn real_5xx_still_fails_despite_heavy_timeouts() {
+        // Timeouts are excluded from the 5xx denominator, so a genuine relay
+        // error storm FAILs even when timeout polling dominates raw counts:
+        // 10 x 500 vs 14 completed responses = 71% > 25%, regardless of 90 x 555.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 4.0);
+        s.add_relay("r0", "500", 10.0);
+        s.add_relay("r0", "555", 90.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Fail, "real 5xx must keep failing");
+        assert!(r.detail.contains("5xx"));
     }
 
     #[test]
