@@ -543,6 +543,50 @@ async fn run_verification(cli: &Cli) -> i32 {
         }
     }
 
+    // Commit-Boost SIGNER module. Only runs when a cb-signer-* service was
+    // discovered, so every other scenario is unaffected.
+    //
+    // The assertion is deliberately the key COUNT over a JWT-authed
+    // get_pubkeys, not a /status probe: /status is an unconditional 200 with
+    // zero logic, so it stays green with no keys loaded - and zero-keys is this
+    // feature's most likely failure, since CB's keystore loaders skip
+    // unreadable entries with warn! rather than failing startup.
+    for signer_url in &services.signer_urls {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Must match the fork's signer_launcher defaults (CB_JWTS).
+        let module_id = "TEST_MODULE";
+        let module_jwt = "b3d1f5a4c8e2079b6d4f1a3c5e7b9d2f";
+        match checks::signer::fetch_pubkeys(&http_client, signer_url, module_id, module_jwt, now)
+            .await
+        {
+            Ok((200, Some(resp))) => {
+                all_checks.push(checks::signer::classify_signer_pubkeys(
+                    validator_pubkeys.len(),
+                    resp.keys.len(),
+                ));
+            }
+            Ok((status, _)) => {
+                all_checks.push(CheckResult::fail(
+                    "signer.pubkeys",
+                    1,
+                    format!(
+                        "signer at {signer_url} answered {status} to an authenticated                          get_pubkeys (expected 200)"
+                    ),
+                ));
+            }
+            Err(e) => {
+                all_checks.push(CheckResult::fail(
+                    "signer.pubkeys",
+                    1,
+                    format!("signer at {signer_url} unreachable: {e}"),
+                ));
+            }
+        }
+    }
+
     // Best-effort provenance: WHAT was tested (config hash + resolved Docker
     // image IDs). Never fails the run — docker unreachable or an unparseable
     // config just yields None.

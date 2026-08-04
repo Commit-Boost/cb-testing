@@ -85,6 +85,7 @@ dies mid-run:
 | `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
 | `feature.min_bid` | 1 | CB logs | the `min_bid_eth` floor dropped bids; FAIL if a winner is under it; config-gated |
 | `feature.skip_sigverify` | 1 | CB logs | skip-sigverify fired (differential: wrong-pubkey relay + auction winners); WARN in plain scenarios |
+| `signer.pubkeys` | 1 | CB signer API | the signer loaded the devnet's validator keys (JWT-authed count); config-gated |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
 | `cb_submit_blinded_block_matrix` | 2 → 1 on FAIL | CB Prometheus | ≥1 blinded-block delivery (200/202) |
@@ -274,6 +275,25 @@ Emitted only when the CB config sets `min_bid_eth > 0`. Counts CB's `bid below m
 near 1.04 ETH, and CB validates `min_bid_wei < 1 ETH`, so no LEGAL floor could ever reject one and the
 scenario would silently prove nothing. `cb-min-bid` therefore sets subsidy `0` (bids ≈ 0.04 ETH of
 spamoor MEV) against a 0.5 ETH floor.
+
+### `signer.pubkeys` — tier 1 (CB signer API), only when a signer is running
+
+Emitted only when discovery finds a `cb-signer-*` service. Mints an HS256 module JWT and calls
+`GET /signer/v1/get_pubkeys`, asserting the KEY COUNT against the devnet's active validator set.
+
+- **PASS** — the signer loaded every expected key and authenticated the module JWT.
+- **WARN** — a partial load: CB warns and continues per keystore, so some were skipped.
+- **FAIL** — **zero keys**, or a non-200 answer. Zero is this feature's signature failure: CB's
+  keystore loaders are `filter_map` + `warn!`, so an unreadable mount yields a perfectly healthy
+  signer holding nothing. The detail names the likely cause (the devnet's `secrets/` dir is mode 600
+  and root-owned; the `teku-keys`/`teku-secrets` pair is the readable one).
+
+**Why not `/status`.** It is `Ok(StatusCode::OK)` with no logic — 200 with zero keys loaded — and the
+metrics server exposes a *second* unconditional `/status`, so probing the wrong port is an even
+emptier green. The startup log's `loaded_consensus=N` is log-only (the signer registers exactly one
+metric, `signer_status_code_total`, with no key-count gauge) and is ANSI-colored, so the field is not
+a contiguous substring. One JWT-authed `get_pubkeys` subsumes liveness, module registration, auth and
+key loading.
 
 ### `cb_*_matrix` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)
 

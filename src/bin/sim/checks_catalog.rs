@@ -202,6 +202,14 @@ pub fn catalog() -> Vec<CatalogEntry> {
             severity_note: "emitted only when skip_sigverify is enabled; PASS only in the cb-sigverify-diff scenario (wrong-pubkey relay url + >=1 auction winner proves the skip); plain scenarios stay an honest WARN (negative codepath, no positive signal)",
         },
         CatalogEntry {
+            id: "signer.pubkeys",
+            tier: 1,
+            title: "the CB signer loaded the devnet's validator keys and authenticated a module JWT",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when a cb-signer-* service exists; ZERO keys FAILs (CB's loaders skip unreadable keystores with warn!, so a bad mount yields a healthy signer holding nothing); a partial load WARNs. Asserted over JWT-authed get_pubkeys, NOT /status (which is an unconditional 200)",
+        },
+        CatalogEntry {
             id: "cb_get_header_matrix",
             tier: 2,
             title: "get_header status-code distribution healthy",
@@ -375,6 +383,7 @@ mod tests {
                 "feature.extra_validation",
                 "feature.min_bid",
                 "feature.skip_sigverify",
+                "signer.pubkeys",
             ]
         );
     }
