@@ -162,6 +162,20 @@ pipeline flips from dead to healthy.
   `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
   genuine `cb_relay_latency PASS -> WARN` retained).
 
+### The prysm question, sharpened by the sweep (2026-08-04)
+With the v2 route enabled, the SAME relay route behaves oppositely per CL:
+- **lighthouse**: CB submits over the relay's v2 route -> **202 Accepted**, 222 deliveries, run PASSes.
+- **nethermind+prysm**: CB submits over the same v2 route -> **4xx on every one of 25**, zero payloads.
+
+So the variable is NOT the route (now enabled and demonstrably working) and NOT relay capability - it
+is what CB forwards when the request ORIGINATES from prysm. Prysm calls CB's own
+`/eth/v2/builder/blinded_blocks` (confirmed in CB logs, `ms_into_slot=256`, so not a timing issue),
+whereas lighthouse calls CB's v1 endpoint and CB still reaches the relay over v2. Next hypothesis to
+test: the prysm-originated body/encoding (prysm negotiates SSZ; CB gained SSZ submit_block support in
+#468) produces something helix refuses, or the v2-originated path forwards different content than the
+v1-originated one. Method: `--keep` run, read helix's own rejection reason for a v2 submission, and
+diff the CB request headers/content-type between the lighthouse and prysm paths.
+
 ### UN-RETRACTED with real evidence: GetPayloadV2 DID change behavior (2026-08-04, sweep)
 The retraction below was correct that the false PASS proved nothing. The sweep then supplied proper
 evidence from the DELIVERY counters, which no broken check was involved in:
