@@ -234,6 +234,94 @@ pub fn classify_skip_sigverify(poisoned: bool, auction_winners: usize) -> CheckR
     }
 }
 
+/// CB's rejection marker when a bid is under `min_bid_eth`
+/// (`ValidationError::BidTooLow`, rendered by its `thiserror` Display and
+/// surfaced by the `error!(%err, relay_id)` at the get_header call site).
+const BID_TOO_LOW_MARKER: &str = "bid below minimum";
+
+/// Parse `min_bid_eth = <x>` out of the CB config template (pure). Returns the
+/// floor in ETH, or `None` when the key is absent or zero (zero = no floor).
+pub fn detect_min_bid_eth(template: &str) -> Option<f64> {
+    template.lines().find_map(|line| {
+        let t = line.trim();
+        if t.starts_with('#') {
+            return None;
+        }
+        let (k, v) = t.split_once('=')?;
+        if k.trim() != "min_bid_eth" {
+            return None;
+        }
+        let val: f64 = v.trim().trim_matches('"').parse().ok()?;
+        (val > 0.0).then_some(val)
+    })
+}
+
+/// Pure verdict for the `min_bid_eth` floor (Law 4 seam).
+///
+/// `rejections` = CB log lines carrying [`BID_TOO_LOW_MARKER`].
+/// `winner_values_eth` = the `value_eth` of every `auction winner` line.
+///
+/// The definitive falsifier is a WINNER BELOW THE FLOOR: that can only happen
+/// if the floor was not applied, which is the failure mode that matters here.
+/// `[pbs]` has no `deny_unknown_fields` (it must `#[serde(flatten)]`), so a
+/// renamed or misspelled key is SILENTLY IGNORED rather than rejected - this
+/// check is the canary for that whole class.
+///
+/// Absence of rejections is NOT a failure on its own: every bid legitimately
+/// clearing the floor looks the same as a dropped key, so that is a WARN naming
+/// both possibilities rather than a false red.
+pub fn classify_min_bid(
+    floor_eth: f64,
+    rejections: usize,
+    winner_values_eth: &[f64],
+) -> CheckResult {
+    let id = "feature.min_bid";
+    let below: Vec<f64> = winner_values_eth
+        .iter()
+        .copied()
+        .filter(|v| *v < floor_eth)
+        .collect();
+    let data = serde_json::json!({
+        "feature": "min bid",
+        "config_key": "min_bid_eth",
+        "floor_eth": floor_eth,
+        "rejections": rejections,
+        "auction_winners": winner_values_eth.len(),
+        "winners_below_floor": below.len(),
+    });
+
+    if !below.is_empty() {
+        return CheckResult::fail(
+            id,
+            1,
+            format!(
+                "{} auction winner(s) had a value BELOW the {floor_eth} ETH floor (lowest {:.6})                  -- min_bid_eth was not applied. `[pbs]` silently ignores unknown keys, so suspect                  a renamed/misspelled field before suspecting CB",
+                below.len(),
+                below.iter().cloned().fold(f64::INFINITY, f64::min)
+            ),
+        )
+        .with_data(data);
+    }
+    if rejections > 0 {
+        return CheckResult::pass(
+            id,
+            1,
+            format!(
+                "min_bid_eth enforced ✓ {rejections} bid(s) rejected below the {floor_eth} ETH                  floor, and no winner was under it"
+            ),
+        )
+        .with_data(data);
+    }
+    CheckResult::warn(
+        id,
+        1,
+        format!(
+            "min_bid_eth = {floor_eth} is set but ZERO bids were rejected -- cannot distinguish              'the floor was silently ignored' from 'every bid legitimately cleared it' (is the              builder subsidy raising bids above the floor?). NOT asserting the floor was applied"
+        ),
+    )
+    .with_data(data)
+}
+
 /// Run the feature-fired checks for every feature the CB config enables.
 ///
 /// `template` is the CB config TOML (via `mux_routing::read_cb_config_template`).
@@ -246,6 +334,36 @@ pub async fn run_feature_checks(
     let mut out = Vec::new();
     for feature in detect_enabled_features(template) {
         out.push(check_one(enclave, cb_service_names, feature, template).await);
+    }
+    // min_bid_eth is a VALUE knob, not a boolean toggle, so it sits outside the
+    // Feature enum; it is only emitted when a floor is actually configured.
+    if let Some(floor) = detect_min_bid_eth(template) {
+        let rejections = count_log_lines(enclave, cb_service_names, &[BID_TOO_LOW_MARKER]);
+        let winners = auction_winner_values_eth(enclave, cb_service_names);
+        out.push(classify_min_bid(floor, rejections, &winners));
+    }
+    out
+}
+
+/// Collect the `value_eth` of every `auction winner` CB logged, as f64 ETH.
+/// Lines whose value will not parse are skipped rather than failing the check.
+fn auction_winner_values_eth(enclave: &str, cb_service_names: &[String]) -> Vec<f64> {
+    let mut out = Vec::new();
+    for service in cb_service_names {
+        let Ok(logs) = fetch_filtered_logs(enclave, service, &["auction winner"]) else {
+            continue;
+        };
+        for line in logs.lines() {
+            if let Some(ev) = crate::checks::mux_routing::parse_cb_log_line(line)
+                && ev.message.starts_with("auction winner")
+                && let Some(v) = ev
+                    .fields
+                    .get("value_eth")
+                    .and_then(|v| v.parse::<f64>().ok())
+            {
+                out.push(v);
+            }
+        }
     }
     out
 }
@@ -406,6 +524,56 @@ mod tests {
         assert!(!has_poisoned_relay_pubkey("url = \"{{ $relay }}\""));
         // No relays at all → not poisoned.
         assert!(!has_poisoned_relay_pubkey("[pbs]\nport = 18550\n"));
+    }
+
+    // --- min_bid: the floor knob + the silent-flatten canary ----------------
+
+    #[test]
+    fn detects_min_bid_floor_and_ignores_zero_or_absent() {
+        assert_eq!(detect_min_bid_eth("[pbs]\nmin_bid_eth = 0.5\n"), Some(0.5));
+        assert_eq!(detect_min_bid_eth("min_bid_eth = \"0.25\"\n"), Some(0.25));
+        // zero means "no floor" - must not emit a check at all
+        assert_eq!(detect_min_bid_eth("min_bid_eth = 0\n"), None);
+        assert_eq!(detect_min_bid_eth("[pbs]\nport = 18550\n"), None);
+        assert_eq!(detect_min_bid_eth("# min_bid_eth = 0.5\n"), None);
+    }
+
+    #[test]
+    fn min_bid_passes_when_bids_were_rejected_and_no_winner_is_under_the_floor() {
+        let r = classify_min_bid(0.5, 30, &[]);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["rejections"], 30);
+    }
+
+    #[test]
+    fn min_bid_fails_when_a_winner_is_below_the_floor() {
+        // The definitive falsifier: a sub-floor bid winning can ONLY happen if
+        // the floor was not applied - the silent-flatten trap firing.
+        let r = classify_min_bid(0.5, 0, &[0.04, 0.9]);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.data["winners_below_floor"], 1);
+        assert!(
+            r.detail.contains("silently ignores"),
+            "names the trap: {}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn min_bid_fail_beats_rejections() {
+        // Even with rejections present, a single sub-floor winner is fatal.
+        let r = classify_min_bid(0.5, 10, &[0.01]);
+        assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn min_bid_warns_when_nothing_was_rejected() {
+        // Cannot distinguish "key ignored" from "every bid cleared the floor"
+        // (e.g. the builder subsidy lifting bids) - no false red.
+        let r = classify_min_bid(0.5, 0, &[1.04, 2.04]);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("NOT asserting"));
+        assert_eq!(r.data["winners_below_floor"], 0);
     }
 
     #[test]

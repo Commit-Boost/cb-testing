@@ -83,6 +83,7 @@ dies mid-run:
 | `mux.routing` | 1 | CB logs | every checked getHeader routed per the `[[mux]]` config |
 | `feature.timing_games` | 1 | CB logs | timing-games codepath fired (≥1 `TG:` debug line); config-gated |
 | `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
+| `feature.min_bid` | 1 | CB logs | the `min_bid_eth` floor dropped bids; FAIL if a winner is under it; config-gated |
 | `feature.skip_sigverify` | 1 | CB logs | skip-sigverify fired (differential: wrong-pubkey relay + auction winners); WARN in plain scenarios |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
@@ -255,6 +256,24 @@ Each is emitted **only when its feature is enabled** — an off feature produces
 
 A marker feature enabled-but-unobserved is WARN, never FAIL (no-false-red — the same discipline as
 `mux.routing`). All three are non-fatal (only a tier-1 FAIL fails the run).
+
+### `feature.min_bid` — tier 1 (CB logs), config-gated
+
+Emitted only when the CB config sets `min_bid_eth > 0`. Counts CB's `bid below minimum` rejections
+(`ValidationError::BidTooLow`) and the `value_eth` of every `auction winner`.
+
+- **FAIL** — any auction winner's value is BELOW the floor. That can only happen if the floor was not
+  applied, and it is the definitive falsifier. **`[pbs]` has no `deny_unknown_fields`** (it must
+  `#[serde(flatten)]` `PbsConfig`), so a renamed or misspelled key there is *silently ignored* rather
+  than rejected - this check is the canary for that whole class.
+- **PASS** — ≥1 rejection and no sub-floor winner.
+- **WARN** — nothing rejected: cannot distinguish "the key was ignored" from "every bid legitimately
+  cleared the floor", so no false red.
+
+**The scenario must run with the builder subsidy OFF.** With `mev_builder_subsidy: 1` real bids land
+near 1.04 ETH, and CB validates `min_bid_wei < 1 ETH`, so no LEGAL floor could ever reject one and the
+scenario would silently prove nothing. `cb-min-bid` therefore sets subsidy `0` (bids ≈ 0.04 ETH of
+spamoor MEV) against a 0.5 ETH floor.
 
 ### `cb_*_matrix` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)
 

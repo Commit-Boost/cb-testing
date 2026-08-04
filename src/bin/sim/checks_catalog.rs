@@ -186,6 +186,14 @@ pub fn catalog() -> Vec<CatalogEntry> {
             severity_note: "emitted only when the config enables extra_validation_enabled; PASS on >=1 'fetched parent block' log, WARN (non-fatal) if none",
         },
         CatalogEntry {
+            id: "feature.min_bid",
+            tier: 1,
+            title: "the min_bid_eth floor actually dropped bids",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when min_bid_eth > 0; FAIL if any auction winner is BELOW the floor (proof the key was silently ignored - [pbs] has no deny_unknown_fields); PASS on >=1 rejection; WARN if nothing was rejected (cannot tell 'ignored' from 'all bids cleared it')",
+        },
+        CatalogEntry {
             id: "feature.skip_sigverify",
             tier: 1,
             title: "skip-sigverify codepath fired (differential via wrong-pubkey relay)",
@@ -365,6 +373,7 @@ mod tests {
                 "mux.routing",
                 "feature.timing_games",
                 "feature.extra_validation",
+                "feature.min_bid",
                 "feature.skip_sigverify",
             ]
         );

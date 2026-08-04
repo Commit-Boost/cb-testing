@@ -121,6 +121,7 @@ pub enum Scenario {
     Basic,
     MultipleRelays,
     BasicAltClients,
+    MinBid,
     SkipSigverify,
     SigverifyDiff,
     SigverifyDiffControl,
@@ -132,10 +133,11 @@ pub enum Scenario {
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 9] = [
+    pub const ALL: [Scenario; 10] = [
         Scenario::Basic,
         Scenario::BasicAltClients,
         Scenario::MultipleRelays,
+        Scenario::MinBid,
         Scenario::SkipSigverify,
         Scenario::SigverifyDiff,
         Scenario::SigverifyDiffControl,
@@ -150,6 +152,7 @@ impl Scenario {
             Scenario::Basic => "cb-basic",
             Scenario::MultipleRelays => "cb-multiple-relays",
             Scenario::BasicAltClients => "cb-basic-nethermind-prysm",
+            Scenario::MinBid => "cb-min-bid",
             Scenario::SkipSigverify => "cb-skip-sigverify",
             Scenario::SigverifyDiff => "cb-sigverify-diff",
             Scenario::SigverifyDiffControl => "cb-sigverify-diff-control",
@@ -199,6 +202,19 @@ impl Scenario {
                  # Law 7 (coverage is a matrix, not a point): every other scenario runs\n\
                  # geth+lighthouse, so a CB regression specific to another client pair is\n\
                  # invisible. Same MEV pipeline assertions as cb-basic, different clients."
+            }
+            Scenario::MinBid => {
+                "# cb-min-bid: the min_bid_eth floor actually drops bids.\n\
+                 #\n\
+                 # min_bid_eth = 0.5 with the builder subsidy OFF: real devnet bids are\n\
+                 # ~0.04 ETH of spamoor MEV, so EVERY bid must be rejected with\n\
+                 # \"bid below minimum\" and zero auctions won. The subsidy must be 0 or\n\
+                 # bids land near 1.04 ETH and no LEGAL floor could reject them - CB\n\
+                 # validates min_bid_wei < 1 ETH.\n\
+                 #\n\
+                 # Doubles as a canary for CB's silent-flatten trap: [pbs] has no\n\
+                 # deny_unknown_fields, so a renamed/misspelled key is IGNORED rather\n\
+                 # than rejected. If bids still win here, the key was silently dropped."
             }
             Scenario::SkipSigverify => {
                 "# cb-skip-sigverify: Signature verification disabled for header responses.\n\
@@ -256,6 +272,7 @@ impl Scenario {
         match self {
             Scenario::Basic
             | Scenario::BasicAltClients
+            | Scenario::MinBid
             | Scenario::SkipSigverify
             | Scenario::SigverifyDiff
             | Scenario::SigverifyDiffControl
@@ -271,6 +288,10 @@ impl Scenario {
             Scenario::Basic | Scenario::BasicAltClients | Scenario::MultipleRelays => {
                 cb_toml(&CbParams::basic())
             }
+            Scenario::MinBid => cb_toml(&CbParams {
+                extra_pbs_lines: vec!["min_bid_eth = 0.5".to_string()],
+                ..CbParams::basic()
+            }),
             Scenario::SkipSigverify => cb_toml(&CbParams {
                 extra_pbs_lines: vec!["skip_sigverify = true".to_string()],
                 ..CbParams::basic()
@@ -326,6 +347,10 @@ impl Scenario {
     fn builder_subsidy(&self) -> &'static str {
         match self {
             Scenario::MultipleRelays => "[1, 2]",
+            // MUST be 0: with a 1 ETH subsidy every bid lands near 1.04 ETH and
+            // CB caps min_bid_wei below 1 ETH, so no legal floor could reject
+            // one and the scenario would silently prove nothing.
+            Scenario::MinBid => "0",
             _ => "1",
         }
     }
