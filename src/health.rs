@@ -141,10 +141,16 @@ mod tests {
             HealthTarget::new("dead-a", "http://127.0.0.1:1", ServiceKind::Beacon),
             HealthTarget::new("dead-b", "http://127.0.0.1:1", ServiceKind::Relay),
         ];
+        // probe_all returns (label, error) pairs so the caller can report WHY.
         let failed = probe_all(&client, &targets).await;
         assert_eq!(failed.len(), 2);
-        assert!(failed.contains(&"dead-a".to_string()));
-        assert!(failed.contains(&"dead-b".to_string()));
+        let labels: Vec<&str> = failed.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(labels.contains(&"dead-a"));
+        assert!(labels.contains(&"dead-b"));
+        assert!(
+            !failed[0].1.to_string().is_empty(),
+            "the death reason must be carried, not discarded"
+        );
     }
 
     #[tokio::test]
