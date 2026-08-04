@@ -146,6 +146,30 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
 - **DEFERRED — do NOT autonomously build:** #5 ePBS first slice belongs to the `/epbs` arc, where J
   gates every design decision and nothing commits without his review. Surface it to J; don't self-drive it.
 
+### skip_sigverify differential — CLOSED 2026-08-04 (live, both arms)
+The bad-signature follow-up filed below is DONE, and it needed no relay/mock change: CB validates
+bids against the pubkey in its OWN `[[relays]]` url, so pointing CB at the real helix through a
+literal url carrying a valid-but-WRONG BLS key (a mnemonic validator key, not helix's
+DEFAULT_MEV_PUBKEY) poisons exactly the function `skip_sigverify` skips. Scenarios
+`cb-sigverify-diff` (treatment) + `cb-sigverify-diff-control`. Live: treatment = overall PASS, 65
+payloads, **222 auction winners**, `feature.skip_sigverify` PASS; control (same poison, skip OFF) =
+overall FAIL, **ZERO payloads delivered**. The falsifier held — the flag is the only variable and the
+pipeline flips from dead to healthy.
+- **Bonus defect found by dogfooding:** running `sim diff` across the two arms reported REGRESSION on
+  a run that went FAIL -> PASS. `Direction` was derived from `CheckStatus`'s worst-status `Ord`, so
+  `SKIP -> PASS` (a check that started running and passed) read as a severity increase. Fixed: Skip
+  transitions are now `CoverageGained`/`CoverageLost`, never regressions; same rule backs
+  `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
+  genuine `cb_relay_latency PASS -> WARN` retained).
+
+### Law 7 (EL/CL matrix) — config-gen slice landed 2026-08-04
+`ElCl` axis threaded through participants AND every derived service name; new
+`cb-basic-nethermind-prysm` scenario. Caught in passing: extra-validation's `rpc_url` was hardcoded
+to `el-1-geth-lighthouse` while the ethereum-package names EL services `el-{index}-{el}-{cl}`, so on
+any other pair it pointed at a nonexistent service and the feature silently no-oped. Now derived.
+All 8 pre-existing goldens byte-identical. **Still owed: a live devnet run on the alt pair**
+(needs nethermind/prysm image pulls).
+
 ### Live-validation findings (2026-08-02, cb-timing-games run)
 - **VALIDATED live:** provenance populates (config_hash + all 4 image sha256 ids); `feature.timing_games`
   = PASS ("fired ✓ 1342 CB debug log lines" — the Law-3 mechanism works on real infra); `relay.best_bid`
