@@ -226,6 +226,14 @@ pub fn catalog() -> Vec<CatalogEntry> {
             severity_note: "tier 2 -> ESCALATES to tier 1 on FAIL (5xx); SKIP if no 200s / metrics absent",
         },
         CatalogEntry {
+            id: "cb_relay_v2_unsupported",
+            tier: 2,
+            title: "no v2 submit_block lost to a relay that 404s the v2 route",
+            data_source: CbPrometheus,
+            feature_asserted: false,
+            severity_note: "tier 2 -> ESCALATES to tier 1 on FAIL: every builder block the proposer chose is LOST (CB will not downgrade v2->v1). Usually the relay's route config, not a capability gap (helix needs GetPayloadV2 in enabled_routes); SKIP/PASS if metrics absent",
+        },
+        CatalogEntry {
             id: "cb_v2_fallback",
             tier: 2,
             title: "no v2->v1 submitBlindedBlock fallbacks",

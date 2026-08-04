@@ -88,6 +88,7 @@ dies mid-run:
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
 | `cb_submit_blinded_block_matrix` | 2 → 1 on FAIL | CB Prometheus | ≥1 blinded-block delivery (200/202) |
 | `cb_status_matrix` | 2 → 1 on FAIL | CB Prometheus | status endpoint answering 200 |
+| `cb_relay_v2_unsupported` | 2 → 1 on FAIL | CB Prometheus | no v2 submit_block lost to a relay 404ing the v2 route |
 | `cb_v2_fallback` | 2 | CB Prometheus | no v2→v1 submitBlindedBlock fallbacks |
 | `cb_relay_latency` | 2 | CB Prometheus | p95 relay latency < 500 ms |
 
@@ -287,6 +288,22 @@ is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for t
   path); WARN if zero deliveries (proposer never chose a builder block — promoted to **FAIL under
   `--strict`**); FAIL on any 5xx.
 - **`cb_status_matrix`** — PASS if any 200; SKIP if no 200s; FAIL on any 5xx.
+
+### `cb_relay_v2_unsupported` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)
+
+Reads `pbs_submit_block_v2_unsupported_total{relay_id}`, which CB increments when a relay 404s the
+**v2** `submit_block` route. CB deliberately does NOT downgrade to v1 there (in v2 the relay publishes
+the block after an empty 202, so forwarding a v1 payload would be silently dropped by the beacon
+node), so every affected submission is LOST and the slot is typically missed.
+
+- **PASS** — counter zero or absent (Prometheus omits never-incremented families).
+- **FAIL** (escalated to tier 1) — any nonzero count, naming the relay(s).
+
+**Read a FAIL as a relay CONFIG problem first.** Found live on nethermind+prysm (2026-08-04): prysm
+submits to `/eth/v2/builder/blinded_blocks`, helix 404'd it, and every builder block was lost (11
+events, 11 missed slots) - but helix supports v2 fine; our generated
+`router_config.enabled_routes` simply omitted its `GetPayloadV2` route. Lighthouse never triggers this
+because it submits via v1.
 
 ### `cb_v2_fallback` — tier 2 (CB Prometheus)
 
