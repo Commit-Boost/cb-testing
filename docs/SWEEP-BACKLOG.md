@@ -162,6 +162,25 @@ pipeline flips from dead to healthy.
   `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
   genuine `cb_relay_latency PASS -> WARN` retained).
 
+### Law 7 FIRST DIVIDEND — nethermind+prysm cannot complete an MEV block (2026-08-04, live)
+The alt-pair scenario ran on its first devnet and **found a real cross-client failure that
+geth+lighthouse hides** — exactly what Law 7 predicted. Overall FAIL. The pipeline works right up to
+the last hop:
+- prysm asked CB for headers 40x, got **26 bids** (`cb_get_header_matrix` PASS); 128 validators
+  registered; relay received **1318 builder blocks**; chain finalized (epoch 5).
+- prysm then submitted **26 blinded blocks**, CB forwarded all 26 to helix, and **helix rejected
+  every one with 4xx** (`submit_blinded_block` relay_side `{"4xx": 26}`, beacon_side `{"5xx": 26}` =
+  CB returning 502 to prysm). **Zero payloads delivered**, 0% MEV rate. Also 17% missed slots.
+- **Cause NOT yet determined** — it is relay-side rejection of prysm-proposed blinded blocks (block
+  seen as invalid/late/misencoded by helix), not a proposer-side or wiring gap: the fork DOES wire
+  prysm (`--http-mev-relay` on the CL, `--enable-builder` on the VC) and prysm did everything asked
+  of it. Next step: re-run with `--keep` and read helix's rejection reason for a slot.
+- **Second dividend (a defect in our own harness, fixed):** `cb_submit_blinded_block_matrix`
+  reported "proposer never chose a builder block" — the exact opposite of what happened — because it
+  diagnosed purely from `200+202 == 0`. A wrong-component diagnosis is worse than none. Now split:
+  submissions-present-but-all-rejected FAILs naming the relay; genuinely-zero-submissions keeps the
+  original WARN.
+
 ### Law 7 (EL/CL matrix) — config-gen slice landed 2026-08-04
 `ElCl` axis threaded through participants AND every derived service name; new
 `cb-basic-nethermind-prysm` scenario. Caught in passing: extra-validation's `rpc_url` was hardcoded
