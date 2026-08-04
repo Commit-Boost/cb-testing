@@ -462,6 +462,72 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     }
 }
 
+/// Check the v2-unsupported counter: v2 submissions a relay could not serve.
+///
+/// `pbs_submit_block_v2_unsupported_total{relay_id}` ticks when a relay 404s
+/// the v2 `submit_block` route. CB deliberately does NOT downgrade to v1 there
+/// (in v2 the relay publishes the block after an empty 202, so a v1 payload
+/// would be silently dropped by the beacon node) — it fails the submission.
+///
+/// This is FATAL to the MEV pipeline for any CL that submits via v2: every
+/// builder block that proposer chooses is lost, and the slot is typically
+/// missed. Found live on nethermind+prysm (2026-08-04): prysm submits to
+/// `/eth/v2/builder/blinded_blocks` at ~256ms into the slot, helix 404s the v2
+/// route, CB returns 502, and 11 v2-unsupported events lined up with 11 missed
+/// slots. Lighthouse never triggers it because it submits via v1 — the exact
+/// class of client-pair-specific break Law 7 exists to surface.
+///
+/// ROOT CAUSE THAT TIME WAS OUR OWN CONFIG, not a helix limitation: helix has a
+/// `GetPayloadV2` route and our generated `router_config.enabled_routes` listed
+/// only `GetPayload`. Read a 404 on the v2 route as "v2 is DISABLED at the
+/// relay" first, and "the relay cannot do v2" only after the route list has
+/// actually been checked.
+///
+/// Missing counter == zero == PASS (Prometheus omits never-incremented
+/// families). Tier 2 -> escalated to tier 1 on FAIL by the caller, like the
+/// matrix checks: a relay that cannot serve the proposer's submissions is a
+/// real pipeline failure, not an annotation.
+pub fn check_v2_unsupported(scrape: &Scrape) -> CheckResult {
+    let id = "cb_relay_v2_unsupported";
+
+    let mut by_relay: BTreeMap<String, f64> = BTreeMap::new();
+    for s in &scrape.samples {
+        if s.metric != "pbs_submit_block_v2_unsupported_total" {
+            continue;
+        }
+        let relay = s
+            .labels
+            .get("relay_id")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let v = match &s.value {
+            prometheus_parse::Value::Counter(v)
+            | prometheus_parse::Value::Gauge(v)
+            | prometheus_parse::Value::Untyped(v) => *v,
+            _ => continue,
+        };
+        *by_relay.entry(relay).or_default() += v;
+    }
+
+    let total: f64 = by_relay.values().sum();
+    let data = serde_json::json!({ "by_relay": by_relay, "total": total as u64 });
+
+    if total == 0.0 {
+        CheckResult::pass(id, 2, "No v2-unsupported submissions").with_data(data)
+    } else {
+        let relays: Vec<&str> = by_relay.keys().map(|s| s.as_str()).collect();
+        CheckResult::fail(
+            id,
+            2,
+            format!(
+                "{total:.0} v2 submit_block(s) LOST: relay(s) {} 404 the v2 route and CB will not                  downgrade to v1 (v2 = the relay publishes the block; a v1 payload would be                  silently dropped). Every builder block the proposer chose was lost -- expect                  missed slots. CHECK THE RELAY ROUTE CONFIG FIRST: helix has a GetPayloadV2                  route that must be listed in router_config.enabled_routes -- a 404 here                  usually means v2 is merely DISABLED, not unsupported",
+                relays.join(", ")
+            ),
+        )
+        .with_data(data)
+    }
+}
+
 /// Check the v2 -> v1 fallback counter.
 ///
 /// `cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id}` ticks when CB
@@ -502,7 +568,14 @@ pub fn check_v2_fallback(scrape: &Scrape) -> CheckResult {
         // Covers both "counter exists and equals 0" and "counter missing
         // (never incremented)". Prometheus suppresses counter families with
         // no observations, so missing == zero.
-        CheckResult::pass(id, 2, "No v2->v1 fallbacks (relays support v2)").with_data(data)
+        // NOTE the claim this does NOT make: zero fallbacks does not mean the
+        // relays support v2. A relay that 404s the v2 route never reaches the
+        // fallback path at all — CB deliberately refuses to downgrade (v2
+        // semantics: the relay publishes the block, so a v1 payload would
+        // silently drop it) and errors instead. That condition is owned by
+        // `cb_relay_v2_unsupported` below. Saying "relays support v2" here was
+        // a false reassurance on a run where helix 404'd every v2 submission.
+        CheckResult::pass(id, 2, "No v2->v1 fallbacks recorded").with_data(data)
     } else {
         CheckResult::warn(
             id,
@@ -740,13 +813,18 @@ fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
         .collect();
 
     out.push(check_v2_fallback(scrape));
+    out.push(check_v2_unsupported(scrape));
     out.push(check_relay_latency(scrape, 500.0));
 
     // Tier-1 escalation: any matrix FAIL (from 5xx) should fail the overall
     // run. The matrix checks are tier 2, but 5xx is a real pipeline failure
-    // -- escalate it to tier 1 so report::exit_code sees it.
+    // -- escalate it to tier 1 so report::exit_code sees it. The same applies
+    // to v2-unsupported: every builder block the proposer chose was LOST, which
+    // is at least as fatal as a 5xx.
     for c in out.iter_mut() {
-        if c.status == CheckStatus::Fail && c.id.ends_with("_matrix") {
+        if c.status == CheckStatus::Fail
+            && (c.id.ends_with("_matrix") || c.id == "cb_relay_v2_unsupported")
+        {
             c.tier = 1;
         }
     }
@@ -1120,6 +1198,67 @@ cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id="r0"} 5
 "#;
         let scrape = parse(text);
         assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn v2_unsupported_nonzero_fails_and_names_the_relay() {
+        // The live nethermind+prysm shape: prysm submits via v2, helix 404s the
+        // v2 route, CB refuses to downgrade -> every builder block is lost.
+        let text = r#"# HELP pbs_submit_block_v2_unsupported_total x
+# TYPE pbs_submit_block_v2_unsupported_total counter
+pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
+"#;
+        let scrape = parse(text);
+        let r = check_v2_unsupported(&scrape);
+        assert_eq!(
+            r.status,
+            CheckStatus::Fail,
+            "lost submissions are not a WARN"
+        );
+        assert!(
+            r.detail.contains("mev_relay_0"),
+            "names the relay: {}",
+            r.detail
+        );
+        assert_eq!(r.data["total"], 11);
+    }
+
+    #[test]
+    fn v2_unsupported_missing_counter_passes() {
+        // Prometheus omits never-incremented families; absence == zero == fine.
+        assert_eq!(check_v2_unsupported(&parse("")).status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn v2_unsupported_escalates_to_tier1_on_fail() {
+        // A relay that cannot serve the proposer's submissions must gate the
+        // exit code, like a matrix 5xx.
+        let text = r#"# HELP pbs_submit_block_v2_unsupported_total x
+# TYPE pbs_submit_block_v2_unsupported_total counter
+pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 3
+"#;
+        let mut c = check_v2_unsupported(&parse(text));
+        assert_eq!(c.tier, 2, "authored at tier 2");
+        // Mirror run_metrics_checks' escalation rule.
+        if c.status == CheckStatus::Fail
+            && (c.id.ends_with("_matrix") || c.id == "cb_relay_v2_unsupported")
+        {
+            c.tier = 1;
+        }
+        assert_eq!(c.tier, 1, "must escalate so the run fails");
+    }
+
+    #[test]
+    fn v2_fallback_does_not_claim_relays_support_v2() {
+        // The false reassurance: zero fallbacks does NOT mean v2 is supported —
+        // a relay that 404s v2 never reaches the fallback path at all.
+        let r = check_v2_fallback(&parse(""));
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(
+            !r.detail.contains("support"),
+            "must not claim v2 support: {}",
+            r.detail
+        );
     }
 
     #[test]

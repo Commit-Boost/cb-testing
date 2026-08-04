@@ -53,6 +53,14 @@ router_config:
         replenish_ms: 50
         burst_size: 20
     - route: GetPayload
+    # The builder-spec v2 proposer route (submitBlindedBlockV2). REQUIRED for
+    # any CL that submits via v2 -- prysm does. Without it helix 404s
+    # /eth/v2/builder/blinded_blocks, CB (correctly) refuses to downgrade to v1
+    # (v2 semantics: the relay publishes the block, so a v1 payload would be
+    # silently dropped), returns 502, and EVERY builder block the proposer
+    # chose is lost. That read as "prysm can't do MEV" until the route list was
+    # checked -- see docs/SWEEP-BACKLOG.md (Law 7 first dividend, 2026-08-04).
+    - route: GetPayloadV2
     - route: RegisterValidators
     - route: Status
     - route: ProposerPayloadDelivered
