@@ -360,6 +360,134 @@ fn all_relays_dead_results(
 /// at check time (mid-run death the startup preflight couldn't catch), the tier-1
 /// delivery check FAILs (see `all_relays_dead_results`); otherwise the batch runs
 /// against the live relays.
+/// Aggregate per-relay `builder_blocks_received` results (pure, Law 4 seam).
+///
+/// PASS if ANY relay received blocks (the builder only submits to the relays it
+/// is configured for, so one silent relay is not a pipeline failure), summing
+/// the counts. Otherwise surface the WORST result via `CheckStatus: Ord`
+/// (Fail > Warn > Pass > Skip). Empty input cannot happen from the caller (it is
+/// guarded by a non-empty live-relay list) but is handled as a SKIP rather than
+/// panicking on `.max().unwrap()`.
+pub fn aggregate_builder_blocks(results: Vec<CheckResult>) -> CheckResult {
+    if results.is_empty() {
+        return CheckResult::skip(
+            "relay.builder_blocks_received",
+            2,
+            "No live relays to query",
+        );
+    }
+    if results.iter().any(|r| r.status == CheckStatus::Pass) {
+        let total: u64 = results
+            .iter()
+            .map(|r| r.data.get("count").and_then(|c| c.as_u64()).unwrap_or(0))
+            .sum();
+        let details: Vec<&str> = results.iter().map(|r| r.detail.as_str()).collect();
+        CheckResult::pass("relay.builder_blocks_received", 2, details.join("; "))
+            .with_data(serde_json::json!({ "count": total }))
+    } else {
+        // No Pass present by construction; `.max()` picks Fail over Warn over Skip.
+        results.into_iter().max_by_key(|r| r.status).unwrap()
+    }
+}
+
+/// Aggregate `mev_delivery_rate` results (pure, Law 4 seam).
+///
+/// This is a BEST-of aggregation (Pass wins), the OPPOSITE of the worst-status
+/// `CheckStatus: Ord`, and it deliberately collapses Skip => Fail: a Skip here
+/// means no relay could answer the data API at all, which is a failure to
+/// measure MEV delivery, not a benign no-op. Kept separate from `.max()` for
+/// exactly those two reasons.
+pub fn aggregate_mev_rate(results: Vec<CheckResult>) -> CheckResult {
+    let best = if results.iter().any(|r| r.status == CheckStatus::Pass) {
+        CheckStatus::Pass
+    } else if results.iter().any(|r| r.status == CheckStatus::Warn) {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Fail
+    };
+    let sum = |key: &str| -> u64 {
+        results
+            .iter()
+            .map(|r| r.data.get(key).and_then(|c| c.as_u64()).unwrap_or(0))
+            .sum()
+    };
+    let total_mev = sum("mev_blocks");
+    let total_blocks = sum("total_blocks");
+    let details: Vec<&str> = results.iter().map(|r| r.detail.as_str()).collect();
+    let data = serde_json::json!({
+        "mev_blocks": total_mev,
+        "total_blocks": total_blocks,
+        "rate": if total_blocks > 0 {
+            (total_mev as f64 / total_blocks as f64 * 10000.0).round() / 10000.0
+        } else { 0.0 },
+    });
+    let joined = details.join("; ");
+    match best {
+        CheckStatus::Pass => CheckResult::pass(
+            "relay.mev_delivery_rate",
+            2,
+            format!("MEV delivery rate across all relays: {joined}"),
+        ),
+        CheckStatus::Warn => CheckResult::warn(
+            "relay.mev_delivery_rate",
+            2,
+            format!("MEV delivery rate below threshold: {joined}"),
+        ),
+        _ => CheckResult::fail(
+            "relay.mev_delivery_rate",
+            2,
+            format!("No MEV deliveries across any relay: {joined}"),
+        ),
+    }
+    .with_data(data)
+}
+
+/// Aggregate per-relay `validator_registrations` to the WORST status (pure,
+/// Law 4 seam). `urls` is parallel to `per_relay` and only labels the detail.
+/// Returns `None` for empty input (the caller then emits no check at all, which
+/// is the documented "omitted entirely, not even SKIP" behavior).
+pub fn aggregate_registrations(per_relay: &[CheckResult], urls: &[String]) -> Option<CheckResult> {
+    if per_relay.is_empty() {
+        return None;
+    }
+    let worst = per_relay
+        .iter()
+        .map(|r| r.status)
+        .max()
+        .unwrap_or(CheckStatus::Pass);
+    let combined_detail = per_relay
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let url = urls.get(i).map(String::as_str).unwrap_or("?");
+            format!("[{url}] {}", r.detail)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let data = serde_json::json!({
+        "per_relay": per_relay
+            .iter()
+            .enumerate()
+            .map(|(i, r)| serde_json::json!({
+                "relay": urls.get(i).map(String::as_str).unwrap_or("?"),
+                "status": r.status.to_string(),
+                "detail": r.detail,
+                "data": r.data,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let id = "relay.validator_registrations";
+    Some(
+        match worst {
+            CheckStatus::Pass => CheckResult::pass(id, 3, combined_detail),
+            CheckStatus::Warn => CheckResult::warn(id, 3, combined_detail),
+            CheckStatus::Fail => CheckResult::fail(id, 3, combined_detail),
+            CheckStatus::Skip => CheckResult::skip(id, 3, combined_detail),
+        }
+        .with_data(data),
+    )
+}
+
 pub async fn run_relay_checks(
     relays: &[RelayClient],
     beacon: &BeaconClient,
@@ -406,24 +534,7 @@ pub async fn run_relay_checks(
         for relay in &live {
             bb_results.push(check_builder_blocks_received(relay, start_slot, end_slot).await);
         }
-        let any_pass = bb_results.iter().any(|r| r.status == CheckStatus::Pass);
-        if any_pass {
-            let total: usize = bb_results
-                .iter()
-                .map(|r| r.data.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize)
-                .sum();
-            let details: Vec<&str> = bb_results.iter().map(|r| r.detail.as_str()).collect();
-            results.push(
-                CheckResult::pass("relay.builder_blocks_received", 2, details.join("; "))
-                    .with_data(serde_json::json!({"count": total})),
-            );
-        } else {
-            // No relay passed: surface the worst result (Fail > Warn > Skip).
-            // `CheckStatus: Ord` (Fail > Warn > Pass > Skip) reproduces the old
-            // hand-rolled key; no Pass is present in this branch by construction.
-            let worst = bb_results.into_iter().max_by_key(|r| r.status).unwrap();
-            results.push(worst);
-        }
+        results.push(aggregate_builder_blocks(bb_results));
     }
 
     results.push(check_payloads_delivered_multi(&live, start_slot, end_slot).await);
@@ -436,69 +547,7 @@ pub async fn run_relay_checks(
         mv_results.push(
             check_mev_delivery_rate(&live, beacon, start_slot, end_slot, mev_threshold).await,
         );
-        // NOTE: this is a BEST-of aggregation (Pass wins), the OPPOSITE of the
-        // worst-status `CheckStatus: Ord`, and it collapses Skip => Fail (a Skip
-        // result, e.g. no relay supports the data API, lands in the `else`).
-        // It is deliberately NOT unified with `worst_status`/`.max()`: doing so
-        // would (a) invert the Pass/Fail preference and (b) turn a Skip verdict
-        // into the least-severe status instead of Fail.
-        let any_pass = mv_results.iter().any(|r| r.status == CheckStatus::Pass);
-        let best_status = if any_pass {
-            CheckStatus::Pass
-        } else if mv_results.iter().any(|r| r.status == CheckStatus::Warn) {
-            CheckStatus::Warn
-        } else {
-            CheckStatus::Fail
-        };
-        let total_mev: u64 = mv_results
-            .iter()
-            .map(|r| {
-                r.data
-                    .get("mev_blocks")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(0)
-            })
-            .sum();
-        let total_blocks: u64 = mv_results
-            .iter()
-            .map(|r| {
-                r.data
-                    .get("total_blocks")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(0)
-            })
-            .sum();
-        let details: Vec<&str> = mv_results.iter().map(|r| r.detail.as_str()).collect();
-        let data = serde_json::json!({
-            "mev_blocks": total_mev,
-            "total_blocks": total_blocks,
-            "rate": if total_blocks > 0 {
-                (total_mev as f64 / total_blocks as f64 * 10000.0).round() / 10000.0
-            } else { 0.0 },
-        });
-        results.push(
-            match best_status {
-                CheckStatus::Pass => CheckResult::pass(
-                    "relay.mev_delivery_rate",
-                    2,
-                    format!(
-                        "MEV delivery rate across all relays: {}",
-                        details.join("; ")
-                    ),
-                ),
-                CheckStatus::Warn => CheckResult::warn(
-                    "relay.mev_delivery_rate",
-                    2,
-                    format!("MEV delivery rate below threshold: {}", details.join("; ")),
-                ),
-                _ => CheckResult::fail(
-                    "relay.mev_delivery_rate",
-                    2,
-                    format!("No MEV deliveries across any relay: {}", details.join("; ")),
-                ),
-            }
-            .with_data(data),
-        );
+        results.push(aggregate_mev_rate(mv_results));
     }
 
     // Tier 3: per-relay validator registration, aggregated to the worst status.
@@ -508,52 +557,8 @@ pub async fn run_relay_checks(
             per_relay
                 .push(check_validator_registrations(relay.base_url(), http_client, pubkeys).await);
         }
-        // Aggregate: FAIL > WARN > PASS; details comma-joined.
-        if !per_relay.is_empty() {
-            // `CheckStatus: Ord` (Fail > Warn > Pass > Skip). The per-relay
-            // results here are only ever Pass/Warn/Fail (this branch is guarded
-            // by `!pubkeys.is_empty()`, so check_validator_registrations never
-            // returns Skip), so `.max()` reproduces the old fold exactly. The old
-            // fold's Skip+Pass=>Pass and empty=>Pass cases only diverge from
-            // `.max()` on all-Skip input, which is unreachable here.
-            let worst = per_relay
-                .iter()
-                .map(|r| r.status)
-                .max()
-                .unwrap_or(CheckStatus::Pass);
-            let combined_detail = per_relay
-                .iter()
-                .enumerate()
-                .map(|(i, r)| format!("[{}] {}", live[i].base_url(), r.detail))
-                .collect::<Vec<_>>()
-                .join("; ");
-            let data = serde_json::json!({
-                "per_relay": per_relay
-                    .iter()
-                    .zip(live.iter())
-                    .map(|(r, relay)| serde_json::json!({
-                        "relay": relay.base_url(),
-                        "status": r.status.to_string(),
-                        "detail": r.detail,
-                        "data": r.data,
-                    }))
-                    .collect::<Vec<_>>(),
-            });
-            let agg = match worst {
-                CheckStatus::Pass => {
-                    CheckResult::pass("relay.validator_registrations", 3, combined_detail)
-                }
-                CheckStatus::Warn => {
-                    CheckResult::warn("relay.validator_registrations", 3, combined_detail)
-                }
-                CheckStatus::Fail => {
-                    CheckResult::fail("relay.validator_registrations", 3, combined_detail)
-                }
-                CheckStatus::Skip => {
-                    CheckResult::skip("relay.validator_registrations", 3, combined_detail)
-                }
-            }
-            .with_data(data);
+        let urls: Vec<String> = live.iter().map(|r| r.base_url().to_string()).collect();
+        if let Some(agg) = aggregate_registrations(&per_relay, &urls) {
             results.push(agg);
         }
     }
@@ -564,6 +569,187 @@ pub async fn run_relay_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- aggregation seams (Law 4): these decide tier-1/2 verdicts across
+    // relays and were previously unreachable without a live devnet ----------
+
+    fn res(id: &str, st: CheckStatus, detail: &str, data: serde_json::Value) -> CheckResult {
+        let r = match st {
+            CheckStatus::Pass => CheckResult::pass(id, 2, detail),
+            CheckStatus::Fail => CheckResult::fail(id, 2, detail),
+            CheckStatus::Warn => CheckResult::warn(id, 2, detail),
+            CheckStatus::Skip => CheckResult::skip(id, 2, detail),
+        };
+        r.with_data(data)
+    }
+
+    #[test]
+    fn builder_blocks_one_pass_wins_and_sums_counts() {
+        // The builder only submits to the relays it is configured for, so one
+        // silent relay must not fail the check; counts sum across relays.
+        let out = aggregate_builder_blocks(vec![
+            res(
+                "x",
+                CheckStatus::Pass,
+                "r0: 10",
+                serde_json::json!({"count": 10}),
+            ),
+            res(
+                "x",
+                CheckStatus::Fail,
+                "r1: none",
+                serde_json::json!({"count": 0}),
+            ),
+        ]);
+        assert_eq!(out.status, CheckStatus::Pass);
+        assert_eq!(out.data["count"], 10);
+        assert!(
+            out.detail.contains("r0") && out.detail.contains("r1"),
+            "both detailed"
+        );
+    }
+
+    #[test]
+    fn builder_blocks_no_pass_surfaces_the_worst() {
+        let out = aggregate_builder_blocks(vec![
+            res("x", CheckStatus::Warn, "r0 warn", serde_json::json!({})),
+            res("x", CheckStatus::Fail, "r1 fail", serde_json::json!({})),
+        ]);
+        assert_eq!(out.status, CheckStatus::Fail, "Fail beats Warn");
+        assert_eq!(out.detail, "r1 fail");
+    }
+
+    #[test]
+    fn builder_blocks_empty_skips_instead_of_panicking() {
+        // Guards the old `.max().unwrap()` on an empty vec.
+        let out = aggregate_builder_blocks(vec![]);
+        assert_eq!(out.status, CheckStatus::Skip);
+    }
+
+    #[test]
+    fn mev_rate_is_best_of_not_worst_of() {
+        // Deliberately the OPPOSITE of CheckStatus::Ord: one relay measuring a
+        // healthy rate is enough.
+        let out = aggregate_mev_rate(vec![
+            res(
+                "m",
+                CheckStatus::Fail,
+                "r0 none",
+                serde_json::json!({"mev_blocks": 0, "total_blocks": 10}),
+            ),
+            res(
+                "m",
+                CheckStatus::Pass,
+                "r1 ok",
+                serde_json::json!({"mev_blocks": 8, "total_blocks": 10}),
+            ),
+        ]);
+        assert_eq!(out.status, CheckStatus::Pass, "Pass wins in best-of");
+        assert_eq!(out.data["mev_blocks"], 8);
+        assert_eq!(out.data["total_blocks"], 20);
+        assert_eq!(out.data["rate"], 0.4);
+    }
+
+    #[test]
+    fn mev_rate_collapses_skip_to_fail() {
+        // A Skip means NO relay could answer the data API: that is a failure to
+        // measure MEV delivery, not a benign no-op. This is why the seam is not
+        // unified with the worst-status `.max()` (which would rank Skip lowest).
+        let out = aggregate_mev_rate(vec![res(
+            "m",
+            CheckStatus::Skip,
+            "no data api",
+            serde_json::json!({}),
+        )]);
+        assert_eq!(out.status, CheckStatus::Fail);
+        assert!(out.detail.contains("No MEV deliveries"));
+    }
+
+    #[test]
+    fn mev_rate_warn_when_only_warns() {
+        let out = aggregate_mev_rate(vec![res(
+            "m",
+            CheckStatus::Warn,
+            "below threshold",
+            serde_json::json!({"mev_blocks": 1, "total_blocks": 10}),
+        )]);
+        assert_eq!(out.status, CheckStatus::Warn);
+        assert_eq!(out.data["rate"], 0.1);
+    }
+
+    #[test]
+    fn mev_rate_zero_blocks_does_not_divide_by_zero() {
+        let out = aggregate_mev_rate(vec![res(
+            "m",
+            CheckStatus::Fail,
+            "nothing",
+            serde_json::json!({"mev_blocks": 0, "total_blocks": 0}),
+        )]);
+        assert_eq!(out.data["rate"], 0.0);
+    }
+
+    #[test]
+    fn registrations_takes_the_worst_and_labels_each_relay() {
+        let urls = vec!["http://a".to_string(), "http://b".to_string()];
+        let out = aggregate_registrations(
+            &[
+                res(
+                    "v",
+                    CheckStatus::Pass,
+                    "all registered",
+                    serde_json::json!({}),
+                ),
+                res("v", CheckStatus::Warn, "3 missing", serde_json::json!({})),
+            ],
+            &urls,
+        )
+        .expect("non-empty input yields a check");
+        assert_eq!(out.status, CheckStatus::Warn, "worst wins");
+        assert!(out.detail.contains("[http://a]") && out.detail.contains("[http://b]"));
+        assert_eq!(out.data["per_relay"].as_array().unwrap().len(), 2);
+        assert_eq!(out.tier, 3);
+    }
+
+    #[test]
+    fn registrations_fail_beats_warn() {
+        let urls = vec!["http://a".to_string(), "http://b".to_string()];
+        let out = aggregate_registrations(
+            &[
+                res(
+                    "v",
+                    CheckStatus::Warn,
+                    "some missing",
+                    serde_json::json!({}),
+                ),
+                res(
+                    "v",
+                    CheckStatus::Fail,
+                    "none registered",
+                    serde_json::json!({}),
+                ),
+            ],
+            &urls,
+        )
+        .unwrap();
+        assert_eq!(out.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn registrations_empty_emits_no_check_at_all() {
+        // Documented behavior: omitted entirely, not even a SKIP.
+        assert!(aggregate_registrations(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn registrations_tolerates_short_url_list() {
+        // Defensive: a urls/per_relay length mismatch must not panic.
+        let out = aggregate_registrations(
+            &[res("v", CheckStatus::Pass, "ok", serde_json::json!({}))],
+            &[],
+        )
+        .unwrap();
+        assert!(out.detail.contains("[?]"));
+    }
 
     #[test]
     fn all_relays_dead_fails_tier1_not_skip() {
