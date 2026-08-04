@@ -15,7 +15,45 @@ use super::helix::HELIX_RELAY_CONFIG;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
 
-const COMMON_PARTICIPANTS: &str = "participants:\n  - el_type: geth\n    cl_type: lighthouse";
+/// An execution/consensus client pair. Law 7 ("coverage is a matrix, not a
+/// point"): everything used to hardcode geth+lighthouse, so a CB regression
+/// specific to another pair was invisible. The pair is threaded through BOTH
+/// the participants block and every service name derived from it — notably
+/// extra-validation's `rpc_url`, which the ethereum-package names
+/// `el-{index}-{el}-{cl}` (`src/el/el_launcher.star:177`). That coupling is
+/// exactly why a hardcoded rpc_url silently no-ops on an alternate pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElCl {
+    pub el: &'static str,
+    pub cl: &'static str,
+}
+
+impl ElCl {
+    /// The baked default pair every scenario used before Law 7.
+    pub const DEFAULT: ElCl = ElCl {
+        el: "geth",
+        cl: "lighthouse",
+    };
+    /// The alternate pair (the P3 slice: prove the parametrization is real).
+    pub const ALT: ElCl = ElCl {
+        el: "nethermind",
+        cl: "prysm",
+    };
+
+    /// The `participants:` fragment for this pair.
+    fn participants(&self) -> String {
+        format!(
+            "participants:\n  - el_type: {}\n    cl_type: {}",
+            self.el, self.cl
+        )
+    }
+
+    /// The first participant's EL RPC endpoint, as the ethereum-package names
+    /// it (`el-{index}-{el}-{cl}`, 1-indexed).
+    fn el_rpc_url(&self) -> String {
+        format!("http://el-1-{}-{}:8545", self.el, self.cl)
+    }
+}
 
 const COMMON_ADDITIONAL_SERVICES: &str =
     "additional_services:\n  - dora\n  - spamoor\n  - prometheus";
@@ -82,6 +120,7 @@ impl Default for Images {
 pub enum Scenario {
     Basic,
     MultipleRelays,
+    BasicAltClients,
     SkipSigverify,
     SigverifyDiff,
     SigverifyDiffControl,
@@ -93,8 +132,9 @@ pub enum Scenario {
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 8] = [
+    pub const ALL: [Scenario; 9] = [
         Scenario::Basic,
+        Scenario::BasicAltClients,
         Scenario::MultipleRelays,
         Scenario::SkipSigverify,
         Scenario::SigverifyDiff,
@@ -109,6 +149,7 @@ impl Scenario {
         match self {
             Scenario::Basic => "cb-basic",
             Scenario::MultipleRelays => "cb-multiple-relays",
+            Scenario::BasicAltClients => "cb-basic-nethermind-prysm",
             Scenario::SkipSigverify => "cb-skip-sigverify",
             Scenario::SigverifyDiff => "cb-sigverify-diff",
             Scenario::SigverifyDiffControl => "cb-sigverify-diff-control",
@@ -121,6 +162,16 @@ impl Scenario {
     /// Parse a scenario by name; `None` if unknown.
     pub fn from_name(name: &str) -> Option<Scenario> {
         Scenario::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    /// The EL/CL client pair this scenario runs on (Law 7). Everything else
+    /// stays on the baked default pair; the alt-clients scenario is the P3
+    /// slice proving the parametrization is real end to end.
+    pub fn el_cl(&self) -> ElCl {
+        match self {
+            Scenario::BasicAltClients => ElCl::ALT,
+            _ => ElCl::DEFAULT,
+        }
     }
 
     /// The leading comment block (verbatim from Python).
@@ -141,6 +192,13 @@ impl Scenario {
                  # subsidy list [1, 2] makes the builder submit DIVERGENT bid values\n\
                  # (rbuilder [[subsidy_overrides]]), so the best-bid selection is a\n\
                  # real discrimination, not a tie between identical bids."
+            }
+            Scenario::BasicAltClients => {
+                "# cb-basic-nethermind-prysm: cb-basic on an ALTERNATE EL/CL pair.\n\
+                 #\n\
+                 # Law 7 (coverage is a matrix, not a point): every other scenario runs\n\
+                 # geth+lighthouse, so a CB regression specific to another client pair is\n\
+                 # invisible. Same MEV pipeline assertions as cb-basic, different clients."
             }
             Scenario::SkipSigverify => {
                 "# cb-skip-sigverify: Signature verification disabled for header responses.\n\
@@ -197,6 +255,7 @@ impl Scenario {
     fn relays(&self) -> &'static [&'static str] {
         match self {
             Scenario::Basic
+            | Scenario::BasicAltClients
             | Scenario::SkipSigverify
             | Scenario::SigverifyDiff
             | Scenario::SigverifyDiffControl
@@ -209,7 +268,9 @@ impl Scenario {
     /// the mux scenario (the 256 per-node pubkey lists).
     fn cb_block(&self, keys_dir: &Path) -> Result<String> {
         Ok(match self {
-            Scenario::Basic | Scenario::MultipleRelays => cb_toml(&CbParams::basic()),
+            Scenario::Basic | Scenario::BasicAltClients | Scenario::MultipleRelays => {
+                cb_toml(&CbParams::basic())
+            }
             Scenario::SkipSigverify => cb_toml(&CbParams {
                 extra_pbs_lines: vec!["skip_sigverify = true".to_string()],
                 ..CbParams::basic()
@@ -226,7 +287,7 @@ impl Scenario {
             Scenario::ExtraValidation => cb_toml(&CbParams {
                 extra_pbs_lines: vec![
                     "extra_validation_enabled = true".to_string(),
-                    r#"rpc_url = "http://el-1-geth-lighthouse:8545""#.to_string(),
+                    format!(r#"rpc_url = "{}""#, self.el_cl().el_rpc_url()),
                 ],
                 ..CbParams::basic()
             }),
@@ -276,7 +337,7 @@ impl Scenario {
         let mev_params = build_mev_params(self.relays(), images, &cb_block, self.builder_subsidy());
         Ok([
             self.comment(),
-            COMMON_PARTICIPANTS,
+            &self.el_cl().participants(),
             COMMON_ADDITIONAL_SERVICES,
             "mev_type: custom",
             &mev_params,
@@ -388,6 +449,43 @@ mod tests {
             let produced = s.args_file_in(&images, Path::new("keys")).unwrap();
             assert_matches_golden(s.name(), &produced);
         }
+    }
+
+    #[test]
+    fn alt_client_pair_flows_into_participants() {
+        // Law 7: the pair is real config, not a label.
+        let out = Scenario::BasicAltClients
+            .args_file_in(&Images::default(), Path::new("keys"))
+            .unwrap();
+        assert!(
+            out.contains("el_type: nethermind"),
+            "alt EL in participants"
+        );
+        assert!(out.contains("cl_type: prysm"), "alt CL in participants");
+        // Every other scenario stays on the baked default pair.
+        let basic = Scenario::Basic
+            .args_file_in(&Images::default(), Path::new("keys"))
+            .unwrap();
+        assert!(basic.contains("el_type: geth") && basic.contains("cl_type: lighthouse"));
+    }
+
+    #[test]
+    fn extra_validation_rpc_url_derives_from_the_pair() {
+        // The coupling Law 7 exists to catch: the ethereum-package names the EL
+        // service el-{index}-{el}-{cl}, so a HARDCODED rpc_url silently points
+        // at a nonexistent service on any other pair (extra validation then
+        // no-ops, and feature.extra_validation would WARN). Derive it instead.
+        assert_eq!(
+            ElCl::DEFAULT.el_rpc_url(),
+            "http://el-1-geth-lighthouse:8545"
+        );
+        assert_eq!(ElCl::ALT.el_rpc_url(), "http://el-1-nethermind-prysm:8545");
+        // The default-pair scenario's rendered config still carries the
+        // original url byte-for-byte (no silent drift from the refactor).
+        let out = Scenario::ExtraValidation
+            .args_file_in(&Images::default(), Path::new("keys"))
+            .unwrap();
+        assert!(out.contains(r#"rpc_url = "http://el-1-geth-lighthouse:8545""#));
     }
 
     #[test]

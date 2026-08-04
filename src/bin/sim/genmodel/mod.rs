@@ -65,6 +65,10 @@ pub fn golden(scenario: &str) -> &'static str {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-multiple-relays.yml"
         )),
+        "cb-basic-nethermind-prysm" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/golden-configs/cb-basic-nethermind-prysm.yml"
+        )),
         "cb-skip-sigverify" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-skip-sigverify.yml"
