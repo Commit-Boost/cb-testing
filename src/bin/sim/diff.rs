@@ -6,11 +6,11 @@
 //! B, and did anything regress?" — the CI shape being: bump an image, re-run,
 //! `sim diff old.json new.json`, fail the pipeline if a check regressed.
 //!
-//! Verdict severity is `CheckStatus`'s own ordering (Fail > Warn > Pass > Skip).
-//! A regression is a check whose severity INCREASED. A check dropping to `Skip`
-//! (severity down) is shown but is NOT a regression — it is not a FAIL, and the
-//! report's own tier-1 gate, not this diff, owns the pass/fail verdict. The
-//! Pass->Skip coverage loss is still printed so a human sees it.
+//! A regression is a check whose severity INCREASED among real verdicts
+//! (Fail > Warn > Pass). Transitions in and out of `Skip` are COVERAGE changes,
+//! not severity changes — a Skip carries no verdict information, so neither
+//! direction is a regression, but both are printed so a human sees coverage
+//! move. The report's own tier-1 gate, not this diff, owns pass/fail.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,13 +20,39 @@ use cb_testnet_verifier::report::VerificationReport;
 use serde::Serialize;
 
 /// Direction of a single check's verdict change.
+///
+/// NOTE the `Skip` asymmetry, found by dogfooding this tool on the sigverify
+/// differential (2026-08-04): `CheckStatus`'s `Ord` ranks `Skip` BELOW `Pass`,
+/// which is right for worst-status AGGREGATION (a Skip must not win a fold over
+/// a Pass) but wrong for TRANSITIONS — a Skip is not "better than a Pass", it is
+/// NO INFORMATION. Ordering `SKIP -> PASS` as a severity increase reported a
+/// check that started running and passed as REGRESSED, and dragged a run that
+/// went FAIL -> PASS to an overall REGRESSION verdict. So transitions in and out
+/// of `Skip` are their own category: coverage, not severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
-    /// Severity increased (e.g. Pass -> Fail).
+    /// Severity increased among real verdicts (e.g. Pass -> Fail).
     Regressed,
-    /// Severity decreased (e.g. Fail -> Pass, or Pass -> Skip).
+    /// Severity decreased among real verdicts (e.g. Fail -> Pass).
     Improved,
+    /// A check STOPPED running (real verdict -> Skip). Not a regression (it is
+    /// not a FAIL), but surfaced: the run lost coverage it used to have.
+    CoverageLost,
+    /// A check STARTED running (Skip -> real verdict). Never a regression, even
+    /// when it starts by failing — the failure was there before, just unmeasured.
+    CoverageGained,
+}
+
+/// Classify a verdict transition. `from != to` is the caller's precondition.
+fn direction_of(from: CheckStatus, to: CheckStatus) -> Direction {
+    match (from, to) {
+        (CheckStatus::Skip, _) => Direction::CoverageGained,
+        (_, CheckStatus::Skip) => Direction::CoverageLost,
+        // Both are real verdicts: severity ordering applies as intended.
+        _ if to > from => Direction::Regressed,
+        _ => Direction::Improved,
+    }
 }
 
 /// A check whose verdict changed between the two reports.
@@ -75,8 +101,8 @@ pub struct DiffReport {
 
 impl DiffReport {
     /// True iff anything got a strictly-worse verdict: the overall result
-    /// regressed, or any individual check regressed. A check that merely went
-    /// SKIP (coverage loss) is not counted — it is not a FAIL.
+    /// regressed, or any individual check regressed among real verdicts.
+    /// Coverage changes (either direction across `Skip`) never count.
     pub fn has_regression(&self) -> bool {
         self.overall_regressed
             || self
@@ -106,11 +132,7 @@ pub fn diff_reports(a: &VerificationReport, b: &VerificationReport) -> DiffRepor
     for (id, &from_status) in &from {
         match to.get(id) {
             Some(&to_status) if to_status != from_status => {
-                let direction = if to_status > from_status {
-                    Direction::Regressed
-                } else {
-                    Direction::Improved
-                };
+                let direction = direction_of(from_status, to_status);
                 changed.push(CheckDelta {
                     id: id.clone(),
                     from: from_status,
@@ -135,7 +157,12 @@ pub fn diff_reports(a: &VerificationReport, b: &VerificationReport) -> DiffRepor
         })
         .collect();
 
-    let overall_regressed = b.result > a.result;
+    // Same classification as per-check: an overall result that moves across
+    // Skip is a coverage change, not a regression. (In practice `report.result`
+    // is only ever Pass or Fail, so this matches the raw severity compare on
+    // real reports — but it keeps the one rule in one place.)
+    let overall_regressed =
+        a.result != b.result && direction_of(a.result, b.result) == Direction::Regressed;
 
     DiffReport {
         from_overall: a.result,
@@ -256,6 +283,8 @@ fn print_pretty(a: &VerificationReport, b: &VerificationReport, diff: &DiffRepor
             let tag = match c.direction {
                 Direction::Regressed => "REGRESSED",
                 Direction::Improved => "improved ",
+                Direction::CoverageLost => "cov-lost ",
+                Direction::CoverageGained => "cov-gain ",
             };
             println!("  [{tag}] {}: {} -> {}", c.id, c.from, c.to);
         }
@@ -384,6 +413,35 @@ mod tests {
     }
 
     #[test]
+    fn skip_to_pass_is_coverage_gained_not_a_regression() {
+        // THE DOGFOOD BUG (2026-08-04): CheckStatus::Ord ranks Skip below Pass
+        // (right for worst-status folds), so this transition read as a severity
+        // INCREASE and reported a check that started running and passed as
+        // REGRESSED — dragging a run that went FAIL -> PASS to an overall
+        // REGRESSION verdict. Starting to run is never a regression.
+        let a = report(&[("x", CheckStatus::Skip)], None);
+        let b = report(&[("x", CheckStatus::Pass)], None);
+        let d = diff_reports(&a, &b);
+        assert_eq!(d.changed[0].direction, Direction::CoverageGained);
+        assert!(!d.has_regression(), "SKIP -> PASS must not be a regression");
+    }
+
+    #[test]
+    fn skip_to_fail_is_coverage_gained_not_a_regression() {
+        // Subtle: a check that starts running and immediately fails is NOT a
+        // regression either — the failure existed before, just unmeasured.
+        // (The report's own tier-1 gate still fails the run on its own terms.)
+        let a = report(&[("x", CheckStatus::Skip)], None);
+        let b = report(&[("x", CheckStatus::Fail)], None);
+        let d = diff_reports(&a, &b);
+        assert_eq!(d.changed[0].direction, Direction::CoverageGained);
+        assert!(
+            !d.has_regression(),
+            "newly-measured failure is not a regression"
+        );
+    }
+
+    #[test]
     fn pass_to_skip_is_shown_but_is_not_a_regression() {
         // Coverage loss: a check stopped running. Severity DROPPED (Skip < Pass)
         // so it is Improved-by-severity and does NOT fail the gate — the report's
@@ -393,6 +451,7 @@ mod tests {
         let d = diff_reports(&a, &b);
         assert_eq!(d.changed.len(), 1, "the coverage change is still surfaced");
         assert_eq!(d.changed[0].to, CheckStatus::Skip);
+        assert_eq!(d.changed[0].direction, Direction::CoverageLost);
         assert!(!d.has_regression(), "Skip is not a FAIL");
     }
 
