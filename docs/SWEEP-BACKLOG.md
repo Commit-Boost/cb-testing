@@ -162,6 +162,22 @@ pipeline flips from dead to healthy.
   `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
   genuine `cb_relay_latency PASS -> WARN` retained).
 
+### Law 7 alt-pair: layer 2 — helix accepts the v2 route but REJECTS the block (2026-08-04)
+The `GetPayloadV2` fix WORKED and is confirmed by the new check: `cb_relay_v2_unsupported` = PASS
+("No v2-unsupported submissions"), i.e. the 404-on-v2 is gone. But the pair still delivers zero
+payloads: `cb_submit_blinded_block_matrix` = FAIL, "the relay REJECTED all 25 blinded block(s)" - a
+genuine 4xx from a route that now exists. So the failure moved one layer down, from
+route-not-enabled to block-refused, and the cause is again unknown.
+- Both new diagnostics behaved exactly as designed: `cb_relay_v2_unsupported` distinguished
+  "route missing" from "block rejected", and the rewritten submit_blinded_block detail correctly said
+  REJECTED rather than the old "proposer never chose a builder block".
+- Missed slots 14.1% (was 17.2%) - still far above the 0.00% that geth+lighthouse hits on the same box.
+- **NOT chased further yet**: this is a NEW scenario's open issue, not a regression in the established
+  ones, and the priority is the full MEV sweep. Next step when resumed: a `--keep` run reading helix's
+  own rejection reason for a slot on the v2 route (the same method that found the GetPayloadV2 gap).
+- **Treat `cb-basic-nethermind-prysm` as a KNOWN-FAIL scenario** until closed, like the sigverify
+  control arm - it documents a real interop gap rather than a broken harness.
+
 ### Law 7 FIRST DIVIDEND — nethermind+prysm cannot complete an MEV block (2026-08-04, live)
 The alt-pair scenario ran on its first devnet and **found a real cross-client failure that
 geth+lighthouse hides** — exactly what Law 7 predicted. Overall FAIL. The pipeline works right up to
