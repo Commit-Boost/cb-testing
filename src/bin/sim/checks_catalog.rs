@@ -239,7 +239,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             title: "no v2->v1 submitBlindedBlock fallbacks",
             data_source: CbPrometheus,
             feature_asserted: false,
-            severity_note: "WARN on any fallback; never FAIL; SKIP if metrics absent",
+            severity_note: "INERT - always SKIP: commit-boost registers no v2->v1 fallback counter, so the check could only ever PASS. Relay v2 support is owned by cb_relay_v2_unsupported",
         },
         CatalogEntry {
             id: "cb_relay_latency",

@@ -162,6 +162,29 @@ pipeline flips from dead to healthy.
   `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
   genuine `cb_relay_latency PASS -> WARN` retained).
 
+### RETRACTION + two dead checks found by a config-surface audit (2026-08-04)
+An independent audit of CB's config/metric surface caught two of our checks reading metric names that
+CANNOT exist, and one of them invalidates a claim made earlier the same day:
+- **`cb_relay_v2_unsupported` never fired.** CB's PBS registry is
+  `Registry::new_custom(Some("cb_pbs"))`, and this counter is *registered* as
+  `pbs_submit_block_v2_unsupported_total`, so the EXPOSED name is
+  `cb_pbs_pbs_submit_block_v2_unsupported_total` - a doubled `pbs_`, unlike every sibling metric
+  (`relay_status_code_total` -> `cb_pbs_relay_status_code_total`). We matched the registered name, so
+  the check reported PASS on every run by construction.
+- **RETRACTED:** "the GetPayloadV2 fix worked" was asserted on that check's PASS in the alt-pair run.
+  That PASS was structural, not evidence. The submit_blinded_block FAIL looks the SAME before and
+  after the route fix (26 rejected -> 25 rejected), so **whether enabling GetPayloadV2 changed
+  anything is now UNVERIFIED**. Re-test with the fixed check before claiming it again. The route
+  addition is still correct on its own merits (helix does expose `GetPayloadV2`), but its effect is
+  unproven.
+- **`cb_v2_fallback` was permanently green.** It read
+  `cb_pbs_submit_block_v2_fallback_to_v1_total`; commit-boost registers no `*fallback*` metric at all.
+  Absence was treated as "zero fallbacks == PASS", so it could never fail. Now returns SKIP naming
+  itself inert and pointing at the check that actually owns v2 support. A check that cannot fail is
+  worse than no check.
+- **Method rule bought here:** verify metric names against a REAL scrape, never against the
+  registration constant in CB's source - the registry prefix is applied at gather time.
+
 ### Law 7 alt-pair: layer 2 — helix accepts the v2 route but REJECTS the block (2026-08-04)
 The `GetPayloadV2` fix WORKED and is confirmed by the new check: `cb_relay_v2_unsupported` = PASS
 ("No v2-unsupported submissions"), i.e. the 404-on-v2 is gone. But the pair still delivers zero

@@ -462,6 +462,14 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     }
 }
 
+/// The EXPOSED name of CB's v2-unsupported counter.
+///
+/// Note the doubled `pbs_`: the PBS registry is `Registry::new_custom(Some(
+/// "cb_pbs"))`, which prefixes every metric, and this counter is *registered*
+/// as `pbs_submit_block_v2_unsupported_total` - unlike its siblings, which are
+/// registered bare (`relay_status_code_total` -> `cb_pbs_relay_status_code_total`).
+const V2_UNSUPPORTED_METRIC: &str = "cb_pbs_pbs_submit_block_v2_unsupported_total";
+
 /// Check the v2-unsupported counter: v2 submissions a relay could not serve.
 ///
 /// `pbs_submit_block_v2_unsupported_total{relay_id}` ticks when a relay 404s
@@ -487,12 +495,19 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
 /// families). Tier 2 -> escalated to tier 1 on FAIL by the caller, like the
 /// matrix checks: a relay that cannot serve the proposer's submissions is a
 /// real pipeline failure, not an annotation.
+///
+/// **The metric name has a doubled `pbs_`** (see [`V2_UNSUPPORTED_METRIC`]).
+/// Matching CB's *registered* name instead of its *exposed* name made this
+/// check structurally unable to fire: it reported PASS on a run where CB had
+/// logged 11 v2-unsupported events, and that false PASS was read as evidence
+/// that a relay-route fix had worked. Verify metric names against a real
+/// scrape, never against the registration constant in CB's source.
 pub fn check_v2_unsupported(scrape: &Scrape) -> CheckResult {
     let id = "cb_relay_v2_unsupported";
 
     let mut by_relay: BTreeMap<String, f64> = BTreeMap::new();
     for s in &scrape.samples {
-        if s.metric != "pbs_submit_block_v2_unsupported_total" {
+        if s.metric != V2_UNSUPPORTED_METRIC {
             continue;
         }
         let relay = s
@@ -530,62 +545,28 @@ pub fn check_v2_unsupported(scrape: &Scrape) -> CheckResult {
 
 /// Check the v2 -> v1 fallback counter.
 ///
-/// `cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id}` ticks when CB
-/// tried the v2 endpoint and got 404, falling back to v1. A non-zero value
-/// means the relay is behind on the builder-specs v2 upgrade.
+/// **This check is INERT and reports SKIP.** It reads
+/// `cb_pbs_submit_block_v2_fallback_to_v1_total`, and no such counter exists in
+/// commit-boost: nothing named `*fallback*` is registered anywhere in
+/// `crates/pbs/src/metrics.rs`. Because the check treated "counter absent" as
+/// "zero fallbacks == PASS", it returned PASS on every run since it was written:
+/// a check that cannot fail, which is worse than no check, and which also
+/// claimed "relays support v2" on a run where the relay was 404ing v2.
 ///
-/// Missing counter == zero fallbacks == PASS. (Prometheus doesn't emit
-/// counter families that never incremented, so absence is the success case.)
-///
-/// Always WARN (never FAIL): this is infrastructure drift, not a pipeline
-/// failure. Strict mode doesn't change it because the v1 fallback still works.
+/// It is kept (rather than deleted) as a SKIP so the id stays in the report and
+/// the reason travels with it. CB does NOT downgrade v2 -> v1 on a 404 by
+/// design (v2 semantics: the relay publishes the block, so a v1 payload would
+/// be silently dropped) - it fails loud and increments the v2-UNSUPPORTED
+/// counter instead, which is what [`check_v2_unsupported`] reads. If a real
+/// fallback counter ever lands, restore the logic and re-point the name.
 pub fn check_v2_fallback(scrape: &Scrape) -> CheckResult {
-    let id = "cb_v2_fallback";
-
-    let mut by_relay: BTreeMap<String, f64> = BTreeMap::new();
-    for s in &scrape.samples {
-        if s.metric != "cb_pbs_submit_block_v2_fallback_to_v1_total" {
-            continue;
-        }
-        let relay = s
-            .labels
-            .get("relay_id")
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let v = match &s.value {
-            prometheus_parse::Value::Counter(v)
-            | prometheus_parse::Value::Gauge(v)
-            | prometheus_parse::Value::Untyped(v) => *v,
-            _ => continue,
-        };
-        *by_relay.entry(relay).or_default() += v;
-    }
-
-    let total: f64 = by_relay.values().sum();
-    let data = serde_json::json!({ "by_relay": by_relay, "total": total as u64 });
-
-    if total == 0.0 {
-        // Covers both "counter exists and equals 0" and "counter missing
-        // (never incremented)". Prometheus suppresses counter families with
-        // no observations, so missing == zero.
-        // NOTE the claim this does NOT make: zero fallbacks does not mean the
-        // relays support v2. A relay that 404s the v2 route never reaches the
-        // fallback path at all — CB deliberately refuses to downgrade (v2
-        // semantics: the relay publishes the block, so a v1 payload would
-        // silently drop it) and errors instead. That condition is owned by
-        // `cb_relay_v2_unsupported` below. Saying "relays support v2" here was
-        // a false reassurance on a run where helix 404'd every v2 submission.
-        CheckResult::pass(id, 2, "No v2->v1 fallbacks recorded").with_data(data)
-    } else {
-        CheckResult::warn(
-            id,
-            2,
-            format!(
-                "{total:.0} v2 submits fell back to v1; at least one relay doesn't support submitBlindedBlockV2"
-            ),
-        )
-        .with_data(data)
-    }
+    let _ = scrape;
+    CheckResult::skip(
+        "cb_v2_fallback",
+        2,
+        "inert: commit-boost registers no v2->v1 fallback counter, so this check could only ever \
+         PASS. Relay v2 support is owned by cb_relay_v2_unsupported",
+    )
 }
 
 /// Standard Prometheus-style histogram_quantile: find bucket where cumulative
@@ -1181,32 +1162,27 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn v2_fallback_zero_passes() {
-        let text = r#"# HELP cb_pbs_submit_block_v2_fallback_to_v1_total x
-# TYPE cb_pbs_submit_block_v2_fallback_to_v1_total counter
-cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id="r0"} 0
-"#;
-        let scrape = parse(text);
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Pass);
-    }
-
-    #[test]
-    fn v2_fallback_nonzero_warns() {
-        let text = r#"# HELP cb_pbs_submit_block_v2_fallback_to_v1_total x
-# TYPE cb_pbs_submit_block_v2_fallback_to_v1_total counter
-cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id="r0"} 5
-"#;
-        let scrape = parse(text);
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Warn);
+    fn v2_fallback_is_inert_and_says_so() {
+        // The metric it read does not exist in commit-boost, so the old logic
+        // could only ever return PASS. An always-green check is worse than no
+        // check: it also asserted "relays support v2" on a run where the relay
+        // was 404ing every v2 submission.
+        let r = check_v2_fallback(&parse(""));
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(r.detail.contains("inert"), "detail: {}", r.detail);
+        assert!(
+            r.detail.contains("cb_relay_v2_unsupported"),
+            "must point at the check that actually owns v2 support"
+        );
     }
 
     #[test]
     fn v2_unsupported_nonzero_fails_and_names_the_relay() {
         // The live nethermind+prysm shape: prysm submits via v2, helix 404s the
         // v2 route, CB refuses to downgrade -> every builder block is lost.
-        let text = r#"# HELP pbs_submit_block_v2_unsupported_total x
-# TYPE pbs_submit_block_v2_unsupported_total counter
-pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
+        let text = r#"# HELP cb_pbs_pbs_submit_block_v2_unsupported_total x
+# TYPE cb_pbs_pbs_submit_block_v2_unsupported_total counter
+cb_pbs_pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
 "#;
         let scrape = parse(text);
         let r = check_v2_unsupported(&scrape);
@@ -1233,9 +1209,9 @@ pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
     fn v2_unsupported_escalates_to_tier1_on_fail() {
         // A relay that cannot serve the proposer's submissions must gate the
         // exit code, like a matrix 5xx.
-        let text = r#"# HELP pbs_submit_block_v2_unsupported_total x
-# TYPE pbs_submit_block_v2_unsupported_total counter
-pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 3
+        let text = r#"# HELP cb_pbs_pbs_submit_block_v2_unsupported_total x
+# TYPE cb_pbs_pbs_submit_block_v2_unsupported_total counter
+cb_pbs_pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 3
 "#;
         let mut c = check_v2_unsupported(&parse(text));
         assert_eq!(c.tier, 2, "authored at tier 2");
@@ -1246,26 +1222,6 @@ pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 3
             c.tier = 1;
         }
         assert_eq!(c.tier, 1, "must escalate so the run fails");
-    }
-
-    #[test]
-    fn v2_fallback_does_not_claim_relays_support_v2() {
-        // The false reassurance: zero fallbacks does NOT mean v2 is supported —
-        // a relay that 404s v2 never reaches the fallback path at all.
-        let r = check_v2_fallback(&parse(""));
-        assert_eq!(r.status, CheckStatus::Pass);
-        assert!(
-            !r.detail.contains("support"),
-            "must not claim v2 support: {}",
-            r.detail
-        );
-    }
-
-    #[test]
-    fn v2_fallback_missing_counter_passes() {
-        // Missing counter == never incremented == zero fallbacks == PASS.
-        let scrape = parse("");
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Pass);
     }
 
     #[test]
