@@ -176,6 +176,30 @@ test: the prysm-originated body/encoding (prysm negotiates SSZ; CB gained SSZ su
 v1-originated one. Method: `--keep` run, read helix's own rejection reason for a v2 submission, and
 diff the CB request headers/content-type between the lighthouse and prysm paths.
 
+### OVERNIGHT SWEEP RESULTS (2026-08-04) — 8 established + 4 follow-ups
+**Sweep 1 (8 established scenarios, fixed helix config): 7 PASS, 1 expected-FAIL.**
+cb-basic, cb-mux, cb-skip-sigverify, cb-timing-games, cb-extra-validation, cb-sigverify-diff all PASS.
+cb-sigverify-diff-control FAILs **by design** (it is the control arm: same poisoned relay pubkey with
+skip_sigverify OFF, so zero payloads is the proof the differential is real). cb-multiple-relays FAILED
+on a false red (see below), was fixed, and **PASSES on re-run**.
+
+**Sweep 2 (4 follow-ups): 1 PASS, 1 expected-FAIL, 1 harness bug, 1 running.**
+- cb-multiple-relays re-run: **PASS** - confirms the beacon-side fix.
+- **cb-min-bid: expected-FAIL, and the feature check PASSED**:
+  `min_bid_eth enforced ✓ 221 bid(s) rejected below the 0.5 ETH floor, and no winner was under it`.
+  Zero payloads delivered is the DESIGNED outcome (the floor rejects every bid), so like
+  cb-sigverify-diff-control this is a fault-injection scenario whose overall verdict is FAIL by
+  construction. **Both belong on a known-expected-FAIL list** so a sweep summary is not misread.
+- **cb-signer: did not launch.** Starlark evaluation error, `string has no .files_artifact_uuid field
+  or method` at signer_launcher.star:104. main.star passes `el_cl_data_files_artifact_uuid` (already a
+  UUID string) while the web3signer launcher I copied receives the el_cl_genesis_data STRUCT. One-line
+  fix, comment added at the site. The signer is still UNPROVEN - it has never started.
+- cb-basic-nethermind-prysm: running (expected FAIL, known interop gap).
+
+**Method note:** a `.star` file that parses is not a `.star` file that runs - python-ast parsing caught
+syntax but not this type error. Only a devnet run exercises the launcher, so the signer needed its own
+run to find a one-line bug.
+
 ### Sweep finding: submit_blinded_block was reading the wrong side of the proxy (2026-08-04)
 `cb-multiple-relays` FAILED at 186/626 relay-side 5xx (29.7%) on a run that was otherwise flawless -
 65/65 payloads across 2 relays, 100% MEV rate, 65/65 hashes matched, best_bid verified over 65
