@@ -123,6 +123,7 @@ pub mod feature_fired;
 pub mod mux_routing;
 pub mod payload_matching;
 pub mod relay_pipeline;
+pub mod signer;
 
 #[cfg(test)]
 mod status_ord_tests {

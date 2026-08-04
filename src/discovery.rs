@@ -39,6 +39,10 @@ pub struct EnclaveServices {
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
     pub prometheus_url: Option<String>,
+    /// Commit-Boost SIGNER module endpoints (`cb-signer-*`). Deliberately a
+    /// SEPARATE pattern from `commit-boost-*`: that glob feeds cb_service_names,
+    /// which three checks iterate while shelling out a 200k-line log fetch each.
+    pub signer_urls: Vec<String>,
 }
 
 /// Run a kurtosis CLI command and return stdout.
@@ -377,6 +381,16 @@ pub fn classify_services(
             }
         }
 
+        if matches_pattern(&svc.name, "cb-signer-*") {
+            match pick(&["signer", "http"]) {
+                Some(url) => {
+                    info!("CB signer: {} -> {url}", svc.name);
+                    result.signer_urls.push(url);
+                }
+                None => warn!("CB signer '{}': no signer/http port", svc.name),
+            }
+        }
+
         if svc.name == "prometheus" {
             match pick(&["http"]) {
                 Some(url) => {
@@ -519,6 +533,45 @@ mod tests {
         assert_eq!(out.prometheus_url.as_deref(), Some("http://127.0.0.1:5555"));
         // The EL is not a beacon, a relay, or a CB service.
         assert_eq!(out.beacon_urls.len(), 1);
+    }
+
+    #[test]
+    fn classify_finds_the_signer_outside_the_commit_boost_glob() {
+        // The signer MUST NOT land in cb_service_names: three checks iterate
+        // that list shelling out `kurtosis service logs -n 200000` per name.
+        let out = classify_services(
+            &[
+                svc(
+                    "commit-boost-1-lighthouse-geth",
+                    &[("http", "http://cb:18550")],
+                ),
+                svc(
+                    "cb-signer-1-lighthouse-geth",
+                    &[("signer", "http://sg:20000")],
+                ),
+            ],
+            no_fallback,
+        );
+        assert_eq!(out.signer_urls, vec!["http://sg:20000"]);
+        assert_eq!(
+            out.cb_service_names,
+            vec!["commit-boost-1-lighthouse-geth"],
+            "the signer must NOT be swept into cb_service_names"
+        );
+        assert_eq!(out.cb_pbs_urls.len(), 1, "and must not be treated as a PBS");
+    }
+
+    #[test]
+    fn no_signer_service_is_not_an_error() {
+        // Every scenario except cb-signer runs without one.
+        let out = classify_services(
+            &[svc(
+                "commit-boost-1-lighthouse-geth",
+                &[("http", "http://cb:1")],
+            )],
+            no_fallback,
+        );
+        assert!(out.signer_urls.is_empty());
     }
 
     #[test]
