@@ -91,3 +91,65 @@ pub async fn probe_all(
     }
     dead
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_urls_match_each_service_kind() {
+        // These paths are the liveness contract with three different servers.
+        // A wrong path returns 404 - which `probe` counts as ALIVE (only
+        // transport errors mean death), so a typo here would make the death
+        // detector permanently blind rather than fail loudly.
+        assert_eq!(
+            HealthTarget::new("b", "http://cl:5052", ServiceKind::Beacon).probe_url(),
+            "http://cl:5052/eth/v1/node/health"
+        );
+        assert_eq!(
+            HealthTarget::new("r", "http://relay:4040", ServiceKind::Relay).probe_url(),
+            "http://relay:4040/relay/v1/data/bidtraces/proposer_payload_delivered?limit=1"
+        );
+        assert_eq!(
+            HealthTarget::new("c", "http://cb:18550", ServiceKind::CbPbs).probe_url(),
+            "http://cb:18550/eth/v1/builder/status"
+        );
+    }
+
+    #[test]
+    fn trailing_slash_never_produces_a_double_slash() {
+        // URLs are built by concatenation; `//` 404s on some servers, which
+        // would again read as "alive" and blind the detector.
+        let t = HealthTarget::new("b", "http://cl:5052/", ServiceKind::Beacon);
+        assert_eq!(t.base_url, "http://cl:5052");
+        assert!(!t.probe_url().contains("5052//"));
+    }
+
+    #[tokio::test]
+    async fn probe_reports_transport_failure_as_death() {
+        // Port 1 on localhost refuses instantly: the one condition that must
+        // count as dead. No network dependency beyond loopback.
+        let client = reqwest::Client::new();
+        let t = HealthTarget::new("dead", "http://127.0.0.1:1", ServiceKind::Beacon);
+        assert!(probe(&client, &t).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn probe_all_returns_the_labels_that_failed() {
+        let client = reqwest::Client::new();
+        let targets = vec![
+            HealthTarget::new("dead-a", "http://127.0.0.1:1", ServiceKind::Beacon),
+            HealthTarget::new("dead-b", "http://127.0.0.1:1", ServiceKind::Relay),
+        ];
+        let failed = probe_all(&client, &targets).await;
+        assert_eq!(failed.len(), 2);
+        assert!(failed.contains(&"dead-a".to_string()));
+        assert!(failed.contains(&"dead-b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn probe_all_with_no_targets_reports_nothing_dead() {
+        let client = reqwest::Client::new();
+        assert!(probe_all(&client, &[]).await.is_empty());
+    }
+}
