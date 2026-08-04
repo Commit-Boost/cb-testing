@@ -156,6 +156,19 @@ with `kurtosis enclave rm -f <enclave>`.
   the final confirmation, never the debugger.**
 
 ## Known traps (hard-won; do not re-derive)
+
+**Never let a grep's SILENCE mean success.** `cargo test ... | grep "test result:"` prints nothing
+when the build fails, which reads identically to "no output, fine". A broken test suite was committed
+this way (2026-08-04). Gate on the EXIT CODE, not on matched lines:
+```bash
+set -o pipefail
+cargo test --all-targets 2>&1 | grep -E "^test result:"; echo "TEST_EXIT=$?"
+cargo clippy --all-targets -- -D warnings >/dev/null 2>&1; echo "CLIPPY_EXIT=$?"
+cargo fmt --check >/dev/null 2>&1; echo "FMT_EXIT=$?"
+```
+This is the same defect class the harness keeps finding in itself: a check that cannot distinguish
+"no signal" from "bad signal". Apply it to devnet runs too - an empty log tail is not a passing run.
+
 - **CB's synthetic status codes 555 and 556 are NOT relay-served.** 555 = `TIMEOUT_ERROR_CODE`, CB's own
   client-side deadline cancellation; 556 = WS transport error. They bucket separately (`timeout`,
   `transport`) and are excluded from the 5xx denominator. Counting them as relay 5xx tier-1-FAILed a fully
