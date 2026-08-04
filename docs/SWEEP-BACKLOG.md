@@ -176,6 +176,30 @@ test: the prysm-originated body/encoding (prysm negotiates SSZ; CB gained SSZ su
 v1-originated one. Method: `--keep` run, read helix's own rejection reason for a v2 submission, and
 diff the CB request headers/content-type between the lighthouse and prysm paths.
 
+### NORTH STAR REACHED: the CB signer module runs on Kurtosis (2026-08-04)
+`signer.pubkeys` **PASS**: *"signer loaded all 128 validator key(s) and authenticated the module JWT"*,
+on a run whose overall verdict is also PASS. First time the Commit-Boost signer has ever been
+exercised on a Kurtosis devnet - the ethereum-package had zero signer support.
+
+What the single assertion actually proves, by construction:
+- the container launched and bound its port (the port `wait` would have failed the run otherwise),
+- it read the devnet's EXISTING validator keystores - no new key material - and decrypted **all 128**,
+  which is exactly `num_validator_keys_per_node`; the teku-keys/teku-secrets choice was the difference
+  between this and a healthy signer holding ZERO keys,
+- a hand-rolled HS256 module JWT authenticated, so the route binding and the null `payload_hash` claim
+  were both right,
+- and PBS was undisturbed by `[signer]`/`[[modules]]` in the shared config.
+
+Cost after the adversarial grill: ONE devnet run, spent on a one-line type error
+(`el_cl_genesis_data` is a UUID string in main.star, not the struct the web3signer launcher receives).
+Every trap the grill named - the 0600 `secrets/` dir, the 127.0.0.1 host default, the silent exit-0,
+the 429 self-poison, the `commit-boost-*` name collision - was avoided before it could fire.
+
+**Caveat:** the signer's own container logs were NOT captured (my capture script's grep matched the
+enclave name instead of the service, and the script tore the enclave down despite `--keep`). So
+`loaded_consensus=N` was never read as independent corroboration. The evidence is the check itself,
+which FAILs on zero keys by construction and reported the exact expected count.
+
 ### OVERNIGHT SWEEP RESULTS (2026-08-04) — 8 established + 4 follow-ups
 **Sweep 1 (8 established scenarios, fixed helix config): 7 PASS, 1 expected-FAIL.**
 cb-basic, cb-mux, cb-skip-sigverify, cb-timing-games, cb-extra-validation, cb-sigverify-diff all PASS.

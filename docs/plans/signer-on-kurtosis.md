@@ -2,6 +2,17 @@
 status: live
 ---
 
+> **REACHED 2026-08-04 — VALIDATED LIVE.** `signer.pubkeys PASS: signer loaded all 128
+> validator key(s) and authenticated the module JWT`. The Commit-Boost signer module runs on
+> Kurtosis for the first time, reusing the devnet's own validator keystores, and the MEV run it
+> rides alongside still PASSes overall (so adding `[signer]`+`[[modules]]` to the shared config does
+> not disturb PBS, as the grill predicted). 128 = exactly the devnet's `num_validator_keys_per_node`.
+>
+> Cost after the grill: ONE devnet run, spent on a one-line type error
+> (`el_cl_genesis_data` is a UUID string in main.star, not the struct the web3signer launcher
+> receives). Every other trap the grill named was avoided before it could fire.
+>
+> Original status line follows.
 > **BUILT 2026-08-04, NOT YET VALIDATED LIVE.** All three pieces are in:
 > config-gen (`CbParams.signer` + the `cb-signer` scenario), the fork launcher
 > (`ethereum-package/src/mev/commit-boost/signer/signer_launcher.star`, launched
