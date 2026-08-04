@@ -162,6 +162,23 @@ pipeline flips from dead to healthy.
   `overall_regressed`. Verified against the two real reports (2 false REGRESSEDs -> cov-gain, the one
   genuine `cb_relay_latency PASS -> WARN` retained).
 
+### UN-RETRACTED with real evidence: GetPayloadV2 DID change behavior (2026-08-04, sweep)
+The retraction below was correct that the false PASS proved nothing. The sweep then supplied proper
+evidence from the DELIVERY counters, which no broken check was involved in:
+- **pre-fix** (route disabled), three separate runs: `submit_blinded_block: 222 v1 (200), 0 v2 (202)`
+- **post-fix** (route enabled), cb-basic: `submit_blinded_block: 0 v1 (200), 222 v2 (202)`
+
+A complete flip, on **lighthouse** - so enabling helix's `GetPayloadV2` changed the relay-side path for
+every scenario, not just the prysm one. CB submits to the relay's v2 route and gets 202 Accepted where
+it previously used v1 throughout. The route addition is therefore confirmed effective; what remains
+unexplained is only why nethermind+prysm still has its blocks REJECTED on that now-working route.
+
+**Sweep caveat - scenarios do not all run the same binary.** `run-and-verify.sh` rebuilds `cb-verify`
+at the start of EACH scenario, so a sweep spanning code changes mixes versions. cb-basic ran before
+the v2-metric fixes landed, so its `cb_relay_v2_unsupported PASS` and `cb_v2_fallback PASS` come from
+the BROKEN checks; later scenarios use the fixed ones (v2_fallback now SKIPs). Compare check-by-check
+across a sweep only when the binary is pinned, or re-run the early scenarios after the code settles.
+
 ### RETRACTION + two dead checks found by a config-surface audit (2026-08-04)
 An independent audit of CB's config/metric surface caught two of our checks reading metric names that
 CANNOT exist, and one of them invalidates a claim made earlier the same day:
