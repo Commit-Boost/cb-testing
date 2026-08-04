@@ -323,9 +323,17 @@ is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for t
 - **`cb_register_validator_matrix`** — PASS if 200s and zero 4xx (100% accepted); WARN if a mix of
   200 and 4xx (some batches rejected — normal early on; the beacon-side 502 translation is surfaced);
   FAIL if only 4xx; SKIP if no registrations observed; FAIL on any 5xx.
-- **`cb_submit_blinded_block_matrix`** — PASS if any (200 + 202) deliveries (200 = v1 path, 202 = v2
-  path); WARN if zero deliveries (proposer never chose a builder block — promoted to **FAIL under
-  `--strict`**); FAIL on any 5xx.
+- **`cb_submit_blinded_block_matrix`** — judged on the **BEACON side** (what CB returned to the CL),
+  not the relay side. PASS if CB served any (200 + 202) to the beacon node; **FAIL on a beacon-side
+  5xx** (the proposer did not get its payload); WARN on zero deliveries. Relay-side codes are reported
+  as context only.
+  **Why the exception:** CB asks EVERY configured relay for the payload, but only the auction winner
+  has it, so the losing relays answer 4xx/5xx *by construction*. On a 2-relay run with divergent
+  subsidies (one relay wins every slot) that produced a 29.7% relay-side 5xx rate and FAILED a run
+  which delivered 65/65 payloads with 100% MEV rate and 0 missed slots, while the beacon side was
+  220x 202 with zero failures. The discriminator still catches the real failure: on nethermind+prysm
+  the beacon side was 26x 5xx (CB returning 502 to the CL). Falls back to relay-side logic when no
+  beacon-side samples exist.
 - **`cb_status_matrix`** — PASS if any 200; SKIP if no 200s; FAIL on any 5xx.
 
 ### `cb_relay_v2_unsupported` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)

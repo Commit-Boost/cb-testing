@@ -231,7 +231,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             title: "at least one blinded-block delivery (200/202)",
             data_source: CbPrometheus,
             feature_asserted: false,
-            severity_note: "tier 2 -> ESCALATES to tier 1 on FAIL (5xx); SKIP if metrics absent",
+            severity_note: "judged on the BEACON side (what CB returned to the CL), NOT the relay side: losing relays cannot serve a payload they never won and 4xx/5xx from them is expected. FAIL on a beacon-side 5xx; escalates to tier 1",
         },
         CatalogEntry {
             id: "cb_status_matrix",

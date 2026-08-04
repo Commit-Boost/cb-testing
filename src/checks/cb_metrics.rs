@@ -259,6 +259,23 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     // relay/CB-to-relay link produces a high fraction of 5xx (FAIL); a few 5xx
     // against many good requests is transient warmup (WARN, surfaced but non-fatal).
     // `--strict` still promotes the transient case to FAIL for zero-tolerance CI.
+    // submit_blinded_block is judged on the BEACON side, not the relay side.
+    // CB asks EVERY configured relay for the payload, but only the relay that
+    // won the auction has it - the others answer 4xx/5xx by construction, and
+    // that is not a pipeline failure. Measured on a healthy 2-relay run where
+    // one relay wins every auction by design (divergent subsidies):
+    //   mev_relay_0 (always loses): 202x1,   4xx x219, 5xx x185
+    //   mev_relay_1 (always wins):  202x219, 4xx x1,   5xx x1
+    //   beacon side:                202x220  <- CB served the CL every time
+    // The relay-side rate was 29.7% and FAILED a run that delivered 65/65
+    // payloads with 100% MEV rate and 0 missed slots. The beacon side is the
+    // signal that actually matters: did the proposer get its payload? It also
+    // still catches the real failure - on the nethermind+prysm run the beacon
+    // side was 26x 5xx (CB returning 502 to the CL), which must FAIL.
+    if endpoint == "submit_blinded_block" && stats.beacon_totals.values().sum::<f64>() > 0.0 {
+        return classify_submit_blinded_block_beacon_side(id, tier, stats, data);
+    }
+
     if r5xx > 0.0 {
         // Timeouts (555) are deliberately EXCLUDED from this denominator: the
         // 5xx rate is "fraction of COMPLETED relay responses that were errors",
@@ -460,6 +477,61 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
         }
         _ => CheckResult::skip(id, tier, format!("Unknown endpoint: {endpoint}")).with_data(data),
     }
+}
+
+/// Verdict for `submit_blinded_block` from the BEACON side: what CB returned to
+/// the consensus client. Delivered means the proposer got its payload.
+///
+/// Relay-side codes are reported as diagnostic context but never gate the
+/// verdict - see the call site for why (losing relays error by construction).
+fn classify_submit_blinded_block_beacon_side(
+    id: String,
+    tier: u8,
+    stats: &EndpointStats,
+    data: serde_json::Value,
+) -> CheckResult {
+    let b200 = stats.beacon_get("200");
+    let b202 = stats.beacon_get("202");
+    let b4xx = stats.beacon_get("4xx");
+    let b5xx = stats.beacon_get("5xx");
+    let delivered = b200 + b202;
+    let relay_5xx = stats.relay_get("5xx");
+    let relay_4xx = stats.relay_get("4xx");
+    let ctx = format!(
+        "(relay-side {relay_4xx:.0} 4xx / {relay_5xx:.0} 5xx are the non-winning relays, expected)"
+    );
+
+    if b5xx > 0.0 {
+        return CheckResult::fail(
+            id,
+            tier,
+            format!(
+                "submit_blinded_block: CB returned {b5xx:.0} 5xx to the beacon node - the proposer \
+                 did NOT get its payload for those slots ({delivered:.0} delivered) {ctx}"
+            ),
+        )
+        .with_data(data);
+    }
+    if delivered > 0.0 {
+        return CheckResult::pass(
+            id,
+            tier,
+            format!(
+                "submit_blinded_block: {delivered:.0} payload(s) served to the beacon node \
+                 ({b200:.0} v1 200, {b202:.0} v2 202), 0 failures {ctx}"
+            ),
+        )
+        .with_data(data);
+    }
+    CheckResult::warn(
+        id,
+        tier,
+        format!(
+            "submit_blinded_block: 0 payloads served to the beacon node ({b4xx:.0} 4xx) - the \
+             proposer never chose a builder block {ctx}"
+        ),
+    )
+    .with_data(data)
 }
 
 /// The EXPOSED name of CB's v2-unsupported counter.
@@ -817,6 +889,11 @@ fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
 mod tests {
     use super::*;
 
+    /// Shorthand: the endpoint's own classifier via the public entry point.
+    fn classify_submit_blinded_block(s: &EndpointStats) -> CheckResult {
+        classify_endpoint("submit_blinded_block", s, false)
+    }
+
     fn parse(text: &str) -> Scrape {
         let lines = text.lines().map(|l| Ok(l.to_owned()));
         Scrape::parse(lines).expect("valid prometheus text")
@@ -1122,6 +1199,73 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
         s.add_relay("r0", "204", 1.0);
         let r = classify_endpoint("submit_blinded_block", &s, true);
         assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    // --- submit_blinded_block is judged on the BEACON side ------------------
+    // Both fixtures below are REAL data from live runs with opposite outcomes,
+    // which is what makes this discriminator trustworthy rather than a guess.
+
+    #[test]
+    fn multi_relay_losing_relay_errors_do_not_fail_a_healthy_run() {
+        // Measured on a 2-relay run where relay_1 wins every auction by design
+        // (divergent subsidies), so relay_0 cannot serve any payload it never
+        // won. Relay-side rate was 29.7% and FAILED a run that delivered 65/65
+        // payloads, 100% MEV rate, 0 missed slots.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "202", 1.0);
+        s.add_relay("mev_relay_0", "400", 219.0);
+        s.add_relay("mev_relay_0", "500", 185.0);
+        s.add_relay("mev_relay_1", "202", 219.0);
+        s.add_relay("mev_relay_1", "400", 1.0);
+        s.add_relay("mev_relay_1", "500", 1.0);
+        s.add_beacon("202", 220.0);
+
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(
+            r.status,
+            CheckStatus::Pass,
+            "CB served the CL 220 times; losing-relay errors are expected: {}",
+            r.detail
+        );
+        assert!(r.detail.contains("220 payload(s) served"));
+        assert!(
+            r.detail.contains("expected"),
+            "explains the relay-side noise"
+        );
+    }
+
+    #[test]
+    fn beacon_side_5xx_still_fails() {
+        // The nethermind+prysm shape: CB returned 502 to the CL 26 times, i.e.
+        // the proposer genuinely did not get its payload. Must FAIL - this is
+        // what proves the exemption did not blind the check.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        s.add_beacon("502", 26.0);
+
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.detail.contains("did NOT get its payload"));
+    }
+
+    #[test]
+    fn beacon_side_no_deliveries_warns() {
+        let mut s = EndpointStats::default();
+        s.add_beacon("404", 5.0);
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("never chose"));
+    }
+
+    #[test]
+    fn without_beacon_samples_it_falls_back_to_the_relay_side() {
+        // Metrics can be partial; with no beacon-side data the old relay-side
+        // logic still applies rather than silently passing.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Fail, "relay rejected everything");
+        assert!(r.detail.contains("REJECTED"));
     }
 
     #[test]
