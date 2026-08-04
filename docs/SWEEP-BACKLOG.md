@@ -176,6 +176,21 @@ test: the prysm-originated body/encoding (prysm negotiates SSZ; CB gained SSZ su
 v1-originated one. Method: `--keep` run, read helix's own rejection reason for a v2 submission, and
 diff the CB request headers/content-type between the lighthouse and prysm paths.
 
+### Overnight sweep plan + results-so-far (2026-08-04)
+Two chained sweeps so the box runs continuously; sweep 2 WAITS for sweep 1 rather than competing for
+the devnet (two live enclaves risks the cgroup-OOM class already paid for).
+- **Sweep 1** (the 8 established scenarios, on the fixed helix config): cb-basic **PASS**,
+  cb-mux **PASS** (mux.routing verified all 224 routing decisions; the two WARNs are correct by
+  design - best_bid cannot compete when each validator is pinned to one relay, and 6.7% 5xx is under
+  the H2 threshold). Remaining: skip-sigverify, multiple-relays, timing-games, extra-validation,
+  sigverify-diff + its control.
+- **Sweep 2** (the three scenarios added after sweep 1 launched): cb-signer FIRST (the North Star,
+  wholly unproven), then cb-min-bid, then cb-basic-nethermind-prysm (known-fail, for the record).
+  The signer run banks the container's own logs before teardown - `loaded_consensus=N` and any
+  key-loading warnings are the diagnosis if the count assertion fails, and they die with the enclave.
+- **Caveat repeated:** run-and-verify.sh rebuilds cb-verify per scenario, so scenarios launched
+  before a code change use the older binary. Compare check-by-check only within a settled tree.
+
 ### UN-RETRACTED with real evidence: GetPayloadV2 DID change behavior (2026-08-04, sweep)
 The retraction below was correct that the false PASS proved nothing. The sweep then supplied proper
 evidence from the DELIVERY counters, which no broken check was involved in:
