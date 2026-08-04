@@ -382,7 +382,13 @@ impl Scenario {
     /// `keys/node-{0,1}-pubkeys.json` under `keys_dir` for the mux scenario only.
     pub fn args_file_in(&self, images: &Images, keys_dir: &Path) -> Result<String> {
         let cb_block = self.cb_block(keys_dir)?;
-        let mev_params = build_mev_params(self.relays(), images, &cb_block, self.builder_subsidy());
+        let mev_params = build_mev_params(
+            self.relays(),
+            images,
+            &cb_block,
+            self.builder_subsidy(),
+            matches!(self, Scenario::Signer),
+        );
         Ok([
             self.comment(),
             &self.el_cl().participants(),
@@ -417,7 +423,13 @@ fn poisoned_relay_url() -> String {
 
 // --- mev_params assembly (ports build_mev_params) ---------------------------
 
-fn build_mev_params(relays: &[&str], images: &Images, cb_block: &str, subsidy: &str) -> String {
+fn build_mev_params(
+    relays: &[&str],
+    images: &Images,
+    cb_block: &str,
+    subsidy: &str,
+    signer: bool,
+) -> String {
     let mut lines: Vec<String> = vec!["mev_params:".to_string()];
 
     if relays.len() > 1 {
@@ -445,6 +457,12 @@ fn build_mev_params(relays: &[&str], images: &Images, cb_block: &str, subsidy: &
 
     lines.push(String::new());
     lines.push(format!("  mev_builder_subsidy: {subsidy}"));
+    if signer {
+        // Opt-in knob consumed by the fork's main.star: launch a CB SIGNER
+        // container beside the PBS sidecar, reusing this participant's
+        // validator keystores.
+        lines.push("  commit_boost_signer: true".to_string());
+    }
     lines.push(String::new());
 
     // helix block scalar: indent non-empty lines 4 spaces, blanks stay empty.

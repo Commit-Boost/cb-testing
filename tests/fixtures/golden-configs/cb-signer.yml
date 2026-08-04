@@ -33,6 +33,7 @@ mev_params:
   mev_builder_cl_image: sigp/lighthouse:latest
 
   mev_builder_subsidy: 1
+  commit_boost_signer: true
 
   helix_relay_config: |
     instance_id: "helix-kurtosis-test"
