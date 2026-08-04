@@ -86,6 +86,71 @@ CONTENTS are the raw password). If that artifact can be mounted, the signer need
 config - they never touch env vars, TOML, Docker, or the CLI. Reuse their ASSERTIONS; the startup
 path is untested territory that our launcher would be the first to exercise.
 
+## GRILL VERDICT (2026-08-04, independent adversarial review) — BUILD MODIFIED
+
+The review KILLED two choices in this doc and corrected one research error. Build with these five
+changes; do not build the version above.
+
+**1. KILL - the key layout silently loads ZERO keys.** `secrets/` is created with `chmod 0600 -R`
+(`validator_keystore_generator.star:113-118`), which strips the execute bit from the DIRECTORY, so
+uid 10001 cannot traverse it. CB's lighthouse loader is `filter_map` + `warn!`, so this presents as
+`loaded_consensus=0` with a healthy process and a 200 on `/status`. Proof it is real: the package
+forces the nimbus VC to `User(uid=0, gid=0)` (`src/vc/nimbus.star:142`) SPECIFICALLY because it reads
+that 0600 dir, and six other launchers do the same. **Use `format = "teku"` over `teku-keys` +
+`teku-secrets`** - `teku-secrets` is never chmodded and web3signer (non-root) reads it today, which is
+what actually keeps that launcher alive (not the 0777 on teku-keys). Preflight with one
+`kurtosis service shell <enclave> vc-1-... && ls -la /validator-keys/node-0-keystores/` before writing
+any starlark.
+
+**2. KILL - Option A (participant_network.star) is a dead end.** The CB config artifact does not exist
+yet at that point; it is rendered downstream inside `commit_boost_mev_boost.launch`
+(`main.star:537`). Option A would force a second, divergent TOML - the exact surgery we were avoiding.
+**Build at Option B**: thread `node_keystore_files` through `new_participant` (~5 lines) so
+`main.star`'s MEV loop has the keystores, the genesis artifact, the timestamp and the rendered config
+in one scope.
+
+**3. `pbs.with_signer` IS DEAD CODE in the shipped binary.** It is read only in
+`load_pbs_custom_config` (`config/pbs.rs:424`), which the `pbs` subcommand never calls
+(`bin/commit-boost.rs:67` calls `load_pbs_config`). CB's own `config.example.toml:16` says "(not used
+in the default PBS image)". So there is NO ordering constraint and no `CB_SIGNER_URL` to thread - and
+"PBS uses the signer" is not an available escalation. The only in-CB end-to-end path is a separate
+commit-module container; not v1.
+
+**4. CORRECTION to failure mode 1 above:** a MISSING `[[modules]]` bails LOUDLY
+(`config/signer.rs:378`, `.ok_or_eyre("No modules defined in the config")`). The silent `Ok(())` exit
+is only reachable with an explicit `modules = []`. Mitigation is not a log assertion but a port spec
+with `wait="15s"` (as `mev_boost_launcher.star:11-22` already does), which turns the silent-exit class
+into a loud `kurtosis run` failure since the emptiness check precedes the listener bind.
+
+**5. The ladder was mostly vanity. Collapse it to three rungs:**
+- port `wait="15s"` at launch (catches the silent-exit class)
+- **JWT-authed `GET /signer/v1/get_pubkeys` with a COUNT assertion** - this is the smallest honest
+  test: it subsumes liveness, module registration, JWT auth AND key loading in one HTTP call, and it
+  is by construction the assertion that the permissions bug in (1) would fail.
+- one `request_signature/bls` determinism differential: 96 bytes, byte-identical across two identical
+  requests (BLS is deterministic), and DIFFERENT for a different `signing_id`. A real differential
+  without needing a BLS verifier.
+
+Dropped: `GET /status` (an unconditional `Ok(StatusCode::OK)` with zero logic - and the metrics server
+exposes a SECOND unconditional /status, so scraping the wrong port is an even emptier green); and the
+`loaded_consensus` log grep (log-only - `crates/signer/src/metrics.rs` registers exactly one metric,
+`signer_status_code_total`, with no key-count gauge - AND ANSI-colored by default, so the field is not
+a contiguous substring; strictly weaker than the HTTP count).
+
+**Two traps that would burn an afternoon:**
+- **Rate-limit self-poisoning:** three wrong-secret probes trip `jwt_auth_fail_limit=3` and 429 the
+  harness's own NAT source IP for `jwt_auth_fail_timeout_seconds=300`. Run negative controls LAST and
+  set `CB_SIGNER_JWT_AUTH_FAIL_TIMEOUT_SECONDS=5`.
+- **Service naming:** `src/discovery.rs` sweeps `commit-boost-*` into `cb_service_names`, and three
+  checks then shell `kurtosis service logs -n 200000` per name. Name it **`cb-signer-*`** and give it
+  explicit discovery, or every check pays an extra full log fetch.
+
+Also confirmed cheap: one TOML/one artifact works (the signer mounts the same per-participant config
+artifact); per-participant key paths ride `CB_SIGNER_LOADER_KEYS_DIR`/`_SECRETS_DIR` env vars rather
+than template vars (the template only has .Network/.Port/.Relays/.Timestamp); `[[modules]].docker_image`
+causes no Kurtosis pull; the chain spec is already mounted at `/network-configs`. Gate the new TOML
+blocks behind an opt-in `CbParams` field so the other eight golden fixtures stay untouched.
+
 ## Open questions before building
 - Which ethereum-package artifact holds the validator keystores, and can it be mounted read-only into
   a second container without disturbing the VC? (research pending)
