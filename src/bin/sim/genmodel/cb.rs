@@ -25,6 +25,55 @@ pub struct CbParams {
     /// Kurtosis service DNS (`helix-relay-N:4040`) makes the literal url
     /// resolvable in-enclave without knowing the relay's IP at generate time.
     pub literal_relay_url: Option<String>,
+    /// When `Some`, append the `[signer]` + `[[modules]]` blocks. OPT-IN so the
+    /// nine existing golden fixtures stay byte-identical: the signer sections
+    /// are appended AFTER `[logs.file]`, which is valid TOML (interleaving is
+    /// not, once `[[relays]]` has opened an array-of-tables).
+    pub signer: Option<SignerParams>,
+}
+
+/// The `[signer]` + `[[modules]]` knobs. Deliberately minimal: everything CB
+/// does not require is left at its default.
+///
+/// The key PATHS are intentionally absent - CB reads them from
+/// `CB_SIGNER_LOADER_KEYS_DIR` / `CB_SIGNER_LOADER_SECRETS_DIR`, which override
+/// the TOML (`signer/loader.rs`). That matters because the paths are
+/// per-participant (`node-<idx>-keystores/...`) and the config template only
+/// carries `.Network/.Port/.Relays/.Timestamp`, so they could not be templated
+/// in anyway. The TOML keeps placeholder paths purely to satisfy the schema.
+#[derive(Debug, Clone)]
+pub struct SignerParams {
+    /// Listen port. CB defaults to 20000.
+    pub port: u16,
+    /// Keystore format. **Must be `teku`** on a Kurtosis devnet: the
+    /// ethereum-package's `secrets/` dir is `chmod 0600 -R` (mode 600,
+    /// root-owned, NO execute bit - verified live), so the CB container's uid
+    /// 10001 cannot traverse it and would load ZERO keys while looking healthy.
+    /// `teku-secrets` is 755 and `teku-keys` is 777, which is also the pair the
+    /// package's own web3signer launcher uses.
+    pub keys_format: String,
+    /// The single commit module. At least one `[[modules]]` entry is REQUIRED:
+    /// with none, `load_module_signing_configs` bails loudly, and with an empty
+    /// list the service exits 0 silently.
+    pub module_id: String,
+    /// 32-byte hex, non-zero, unique per module; mixed into the signing root.
+    pub module_signing_id: String,
+}
+
+impl SignerParams {
+    /// The devnet defaults: port 20000, teku keystores, one commit module.
+    pub fn devnet() -> Self {
+        Self {
+            port: 20000,
+            keys_format: "teku".to_string(),
+            module_id: "TEST_MODULE".to_string(),
+            // Arbitrary but fixed: a stable signing_id keeps BLS signatures
+            // deterministic across runs, which is what the signature
+            // differential assertion relies on.
+            module_signing_id: "0x6a33a23ef26a4836979edff86c493a69b26ccf0b4a16491a815a13787657431b"
+                .to_string(),
+        }
+    }
 }
 
 impl CbParams {
@@ -37,6 +86,7 @@ impl CbParams {
             extra_pbs_lines: Vec::new(),
             per_relay_lines: Vec::new(),
             literal_relay_url: None,
+            signer: None,
         }
     }
 }
@@ -97,6 +147,26 @@ pub fn cb_toml(p: &CbParams) -> String {
     lines.push(String::new());
     lines.push("[logs.file]".to_string());
     lines.push("enabled = false".to_string());
+
+    if let Some(sg) = &p.signer {
+        lines.push(String::new());
+        lines.push("[signer]".to_string());
+        lines.push(format!("port = {}", sg.port));
+        lines.push(String::new());
+        lines.push("[signer.local.loader]".to_string());
+        // Placeholders only: CB_SIGNER_LOADER_{KEYS,SECRETS}_DIR override these
+        // at runtime with the real per-participant artifact paths.
+        lines.push(format!(r#"format = "{}""#, sg.keys_format));
+        lines.push(r#"keys_path = "/keystores/teku-keys""#.to_string());
+        lines.push(r#"secrets_path = "/keystores/teku-secrets""#.to_string());
+        lines.push(String::new());
+        lines.push("[[modules]]".to_string());
+        lines.push(format!(r#"id = "{}""#, sg.module_id));
+        lines.push(r#"type = "commit""#.to_string());
+        lines.push(format!(r#"signing_id = "{}""#, sg.module_signing_id));
+        // Required field, never read by the running signer (only by `cb init`).
+        lines.push(r#"docker_image = "unused""#.to_string());
+    }
 
     lines.join("\n")
 }
@@ -193,6 +263,7 @@ mod tests {
                 "frequency_get_header_ms = 200".to_string(),
             ],
             literal_relay_url: None,
+            signer: None,
         };
         let block = extract_block_scalar(golden("cb-timing-games"), "commit_boost_config");
         assert_eq!(cb_toml(&params), block);
@@ -219,6 +290,76 @@ mod tests {
         };
         let block = extract_block_scalar(golden("cb-extra-validation"), "commit_boost_config");
         assert_eq!(cb_toml(&params), block);
+    }
+
+    #[test]
+    fn signer_blocks_are_opt_in_and_change_nothing_when_absent() {
+        // The whole point of making it Option: the nine pre-existing goldens
+        // must stay byte-identical, so a signer scenario cannot churn them.
+        let without = cb_toml(&CbParams::basic());
+        assert!(!without.contains("[signer]"));
+        assert!(!without.contains("[[modules]]"));
+    }
+
+    #[test]
+    fn signer_blocks_render_after_the_logs_sections() {
+        // TOML ordering is load-bearing: once [[relays]] has opened an
+        // array-of-tables, interleaving new top-level tables is invalid.
+        // Appending after [logs.file] is the only safe placement.
+        let out = cb_toml(&CbParams {
+            signer: Some(SignerParams::devnet()),
+            ..CbParams::basic()
+        });
+        let relays_at = out.find("[[relays]]").expect("relays present");
+        let logs_at = out.find("[logs.file]").expect("logs present");
+        let signer_at = out.find("[signer]").expect("signer present");
+        let modules_at = out.find("[[modules]]").expect("modules present");
+        assert!(relays_at < logs_at, "relays before logs");
+        assert!(logs_at < signer_at, "signer AFTER the logs sections");
+        assert!(signer_at < modules_at, "[signer] before [[modules]]");
+    }
+
+    #[test]
+    fn signer_uses_teku_keystores_not_the_unreadable_lighthouse_pair() {
+        // Verified live: the package's secrets/ dir is mode 600 root-owned (no
+        // execute bit), so CB's uid 10001 cannot traverse it and would start
+        // healthy holding ZERO keys. teku-secrets is 755, teku-keys 777.
+        let out = cb_toml(&CbParams {
+            signer: Some(SignerParams::devnet()),
+            ..CbParams::basic()
+        });
+        assert!(
+            out.contains(r#"format = "teku""#),
+            "must be the teku format"
+        );
+        assert!(out.contains("teku-keys") && out.contains("teku-secrets"));
+        assert!(
+            !out.contains(r#"keys_path = "/keystores/keys""#),
+            "must NOT use the unreadable lighthouse keys/secrets pair"
+        );
+    }
+
+    #[test]
+    fn signer_emits_a_module_because_none_is_fatal() {
+        // With NO [[modules]] the signer bails loudly; with an EMPTY list it
+        // exits 0 silently. Either way a module entry is mandatory, and every
+        // field of it is required (no serde defaults).
+        let out = cb_toml(&CbParams {
+            signer: Some(SignerParams::devnet()),
+            ..CbParams::basic()
+        });
+        assert!(out.contains(r#"id = "TEST_MODULE""#));
+        assert!(out.contains(r#"type = "commit""#));
+        assert!(
+            out.contains("signing_id = \"0x"),
+            "signing_id must be present and hex"
+        );
+        assert!(
+            out.contains(r#"docker_image = "unused""#),
+            "required even though unread"
+        );
+        // signing_id must be non-zero: CB rejects the zero value.
+        assert!(!out.contains(&format!("signing_id = \"0x{}\"", "0".repeat(64))));
     }
 
     #[test]

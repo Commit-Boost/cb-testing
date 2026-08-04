@@ -10,7 +10,7 @@ use std::path::Path;
 
 use eyre::{Result, WrapErr};
 
-use super::cb::{CbParams, cb_toml, cb_toml_mux};
+use super::cb::{CbParams, SignerParams, cb_toml, cb_toml_mux};
 use super::helix::HELIX_RELAY_CONFIG;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
@@ -122,6 +122,7 @@ pub enum Scenario {
     MultipleRelays,
     BasicAltClients,
     MinBid,
+    Signer,
     SkipSigverify,
     SigverifyDiff,
     SigverifyDiffControl,
@@ -133,11 +134,12 @@ pub enum Scenario {
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 10] = [
+    pub const ALL: [Scenario; 11] = [
         Scenario::Basic,
         Scenario::BasicAltClients,
         Scenario::MultipleRelays,
         Scenario::MinBid,
+        Scenario::Signer,
         Scenario::SkipSigverify,
         Scenario::SigverifyDiff,
         Scenario::SigverifyDiffControl,
@@ -153,6 +155,7 @@ impl Scenario {
             Scenario::MultipleRelays => "cb-multiple-relays",
             Scenario::BasicAltClients => "cb-basic-nethermind-prysm",
             Scenario::MinBid => "cb-min-bid",
+            Scenario::Signer => "cb-signer",
             Scenario::SkipSigverify => "cb-skip-sigverify",
             Scenario::SigverifyDiff => "cb-sigverify-diff",
             Scenario::SigverifyDiffControl => "cb-sigverify-diff-control",
@@ -216,6 +219,20 @@ impl Scenario {
                  # deny_unknown_fields, so a renamed/misspelled key is IGNORED rather\n\
                  # than rejected. If bids still win here, the key was silently dropped."
             }
+            Scenario::Signer => {
+                "# cb-signer: the Commit-Boost SIGNER module, which has never been\n\
+                 # testable on Kurtosis (the ethereum-package had no config support).\n\
+                 #\n\
+                 # Adds [signer] + [[modules]] to the CB config. The signer container\n\
+                 # reuses the devnet's existing validator keystores in TEKU format:\n\
+                 # secrets/ is chmod 0600 root-owned (no execute bit), so CB's uid 10001\n\
+                 # cannot traverse it and would load ZERO keys while looking healthy;\n\
+                 # teku-secrets is 755 and teku-keys 777 (verified on a live enclave).\n\
+                 #\n\
+                 # PBS reads the same file: [signer]/[[modules]] are Option fields it\n\
+                 # parses and drops, and pbs.with_signer is dead code in the shipped\n\
+                 # binary, so nothing about the PBS path changes."
+            }
             Scenario::SkipSigverify => {
                 "# cb-skip-sigverify: Signature verification disabled for header responses.\n\
                  #\n\
@@ -273,6 +290,7 @@ impl Scenario {
             Scenario::Basic
             | Scenario::BasicAltClients
             | Scenario::MinBid
+            | Scenario::Signer
             | Scenario::SkipSigverify
             | Scenario::SigverifyDiff
             | Scenario::SigverifyDiffControl
@@ -288,6 +306,10 @@ impl Scenario {
             Scenario::Basic | Scenario::BasicAltClients | Scenario::MultipleRelays => {
                 cb_toml(&CbParams::basic())
             }
+            Scenario::Signer => cb_toml(&CbParams {
+                signer: Some(SignerParams::devnet()),
+                ..CbParams::basic()
+            }),
             Scenario::MinBid => cb_toml(&CbParams {
                 extra_pbs_lines: vec!["min_bid_eth = 0.5".to_string()],
                 ..CbParams::basic()
@@ -322,6 +344,7 @@ impl Scenario {
                     "frequency_get_header_ms = 200".to_string(),
                 ],
                 literal_relay_url: None,
+                signer: None,
             }),
             Scenario::Mux => {
                 let node0 = load_pubkeys(keys_dir, 0)?;
