@@ -102,6 +102,18 @@ what actually keeps that launcher alive (not the 0777 on teku-keys). Preflight w
 `kurtosis service shell <enclave> vc-1-... && ls -la /validator-keys/node-0-keystores/` before writing
 any starlark.
 
+**1b. EMPIRICALLY CONFIRMED on a live enclave (2026-08-04), before writing any starlark.**
+`kurtosis service exec <enclave> vc-1-geth-lighthouse "stat -c '%n %a %U:%G' ..."`:
+```
+/validator-keys/secrets       600  root:root   drw-------
+/validator-keys/teku-secrets  755  root:root   drwxr-xr-x
+/validator-keys/teku-keys     777  root:root   drwxrwxrwx
+```
+`secrets/` has NO execute bit and is root-owned, so uid 10001 cannot even traverse it - the signer
+would have started healthy and loaded ZERO keys. Kurtosis does NOT chown on mount (everything is
+`root:root` inside the container), which also confirms why six other launchers force `User(uid=0)`.
+**`teku-keys` + `teku-secrets` are both readable by a non-root uid. Use them.**
+
 **2. KILL - Option A (participant_network.star) is a dead end.** The CB config artifact does not exist
 yet at that point; it is rendered downstream inside `commit_boost_mev_boost.launch`
 (`main.star:537`). Option A would force a second, divergent TOML - the exact surgery we were avoiding.
