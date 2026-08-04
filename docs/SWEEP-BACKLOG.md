@@ -176,6 +176,24 @@ test: the prysm-originated body/encoding (prysm negotiates SSZ; CB gained SSZ su
 v1-originated one. Method: `--keep` run, read helix's own rejection reason for a v2 submission, and
 diff the CB request headers/content-type between the lighthouse and prysm paths.
 
+### Sweep finding: submit_blinded_block was reading the wrong side of the proxy (2026-08-04)
+`cb-multiple-relays` FAILED at 186/626 relay-side 5xx (29.7%) on a run that was otherwise flawless -
+65/65 payloads across 2 relays, 100% MEV rate, 65/65 hashes matched, best_bid verified over 65
+competitive slots, 0 missed slots. Per-relay data settled it in one look:
+```
+mev_relay_0 (subsidy 1, LOSES every auction): 202x1,   4xx x219, 5xx x185
+mev_relay_1 (subsidy 2, WINS every auction):  202x219, 4xx x1,   5xx x1
+beacon side:                                  202x220   <- CB served the CL every time
+```
+CB asks EVERY relay for the payload; only the winner has it, so losers error by construction. **My own
+divergent-bid feature caused the false red**: making relay_1 win every slot means relay_0 now fails
+every slot, taking the rate from 18% (wins split) to 29.7% and across the 25% line. Fixed by judging
+the endpoint on the BEACON side (did the proposer get its payload?), keeping relay-side codes as
+context. NOT a loosening - the nethermind+prysm run's beacon side is 26x 5xx and still FAILs, and both
+fixtures are pinned as tests. **Lesson, same shape as the 555 and 556 findings: an expected, benign
+condition counted as a relay error.** Three for three now; when a rate-based check fires, ask first
+whether the denominator contains events that are correct by design.
+
 ### Overnight sweep plan + results-so-far (2026-08-04)
 Two chained sweeps so the box runs continuously; sweep 2 WAITS for sweep 1 rather than competing for
 the devnet (two live enclaves risks the cgroup-OOM class already paid for).
