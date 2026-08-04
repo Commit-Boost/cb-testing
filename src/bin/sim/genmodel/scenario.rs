@@ -83,6 +83,8 @@ pub enum Scenario {
     Basic,
     MultipleRelays,
     SkipSigverify,
+    SigverifyDiff,
+    SigverifyDiffControl,
     ExtraValidation,
     TimingGames,
     Mux,
@@ -91,10 +93,12 @@ pub enum Scenario {
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 6] = [
+    pub const ALL: [Scenario; 8] = [
         Scenario::Basic,
         Scenario::MultipleRelays,
         Scenario::SkipSigverify,
+        Scenario::SigverifyDiff,
+        Scenario::SigverifyDiffControl,
         Scenario::TimingGames,
         Scenario::ExtraValidation,
         Scenario::Mux,
@@ -106,6 +110,8 @@ impl Scenario {
             Scenario::Basic => "cb-basic",
             Scenario::MultipleRelays => "cb-multiple-relays",
             Scenario::SkipSigverify => "cb-skip-sigverify",
+            Scenario::SigverifyDiff => "cb-sigverify-diff",
+            Scenario::SigverifyDiffControl => "cb-sigverify-diff-control",
             Scenario::ExtraValidation => "cb-extra-validation",
             Scenario::TimingGames => "cb-timing-games",
             Scenario::Mux => "cb-mux",
@@ -143,6 +149,23 @@ impl Scenario {
                  # correctness for speed — useful to verify that the path exists and is\n\
                  # reachable under load."
             }
+            Scenario::SigverifyDiff => {
+                "# cb-sigverify-diff: the skip_sigverify DIFFERENTIAL (treatment arm).\n\
+                 #\n\
+                 # CB's [[relays]] entry is a LITERAL url whose pubkey is a valid BLS\n\
+                 # key that is NOT the helix relay's signing key, so CB's signature\n\
+                 # validation would reject every bid. With skip_sigverify = true the\n\
+                 # validation is skipped and bids flow anyway - an auction winner in\n\
+                 # this scenario is positive proof the skip codepath fired. Compare\n\
+                 # with cb-sigverify-diff-control (same poison, skip OFF, zero bids)."
+            }
+            Scenario::SigverifyDiffControl => {
+                "# cb-sigverify-diff-control: the skip_sigverify differential (control\n\
+                 # arm). Same wrong-pubkey literal relay url as cb-sigverify-diff but\n\
+                 # withOUT skip_sigverify - CB rejects every bid (PubkeyMismatch), so\n\
+                 # the run is EXPECTED to fail payload delivery. `sim diff` against the\n\
+                 # treatment run shows the flip that proves the feature discriminates."
+            }
             Scenario::ExtraValidation => {
                 "# cb-extra-validation: Enable extra validation of get_header responses\n\
                  # via a local execution layer client.\n\
@@ -173,7 +196,11 @@ impl Scenario {
     /// `mev_relay_image` — matching the Python scenario dicts.
     fn relays(&self) -> &'static [&'static str] {
         match self {
-            Scenario::Basic | Scenario::SkipSigverify | Scenario::ExtraValidation => &["helix"],
+            Scenario::Basic
+            | Scenario::SkipSigverify
+            | Scenario::SigverifyDiff
+            | Scenario::SigverifyDiffControl
+            | Scenario::ExtraValidation => &["helix"],
             Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => &["helix", "helix"],
         }
     }
@@ -185,6 +212,15 @@ impl Scenario {
             Scenario::Basic | Scenario::MultipleRelays => cb_toml(&CbParams::basic()),
             Scenario::SkipSigverify => cb_toml(&CbParams {
                 extra_pbs_lines: vec!["skip_sigverify = true".to_string()],
+                ..CbParams::basic()
+            }),
+            Scenario::SigverifyDiff => cb_toml(&CbParams {
+                extra_pbs_lines: vec!["skip_sigverify = true".to_string()],
+                literal_relay_url: Some(poisoned_relay_url()),
+                ..CbParams::basic()
+            }),
+            Scenario::SigverifyDiffControl => cb_toml(&CbParams {
+                literal_relay_url: Some(poisoned_relay_url()),
                 ..CbParams::basic()
             }),
             Scenario::ExtraValidation => cb_toml(&CbParams {
@@ -203,6 +239,7 @@ impl Scenario {
                     "target_first_request_ms = 100".to_string(),
                     "frequency_get_header_ms = 200".to_string(),
                 ],
+                literal_relay_url: None,
             }),
             Scenario::Mux => {
                 let node0 = load_pubkeys(keys_dir, 0)?;
@@ -248,6 +285,25 @@ impl Scenario {
         .join("\n\n")
             + "\n")
     }
+}
+
+// --- sigverify differential fault injection ---------------------------------
+
+/// A VALID BLS pubkey (validator key from the standard preregistered mnemonic)
+/// that is NOT the helix relay's signing key (`DEFAULT_MEV_PUBKEY` in the
+/// ethereum-package, 0xa55c1285...). Putting it in CB's [[relays]] url makes
+/// validate_signature reject every bid from the real relay (PubkeyMismatch) -
+/// unless skip_sigverify is on. Must be a real curve point or CB fails at
+/// config parse; a mnemonic validator key is guaranteed valid.
+pub const WRONG_RELAY_PUBKEY: &str = "0xaaf6c1251e73fb600624937760fef218aace5b253bf068ed45398aeb29d821e4d2899343ddcbbe37cb3f6cf500dff26c";
+
+/// The literal poisoned relay url. Service DNS: with the 1-participant common
+/// scenario + the auto-appended builder participant, main.star launches the
+/// single helix instance as `helix-relay-2` (index = participant_count 2 +
+/// relay_index 0), listening on the fixed in-enclave port 4040 - confirmed by
+/// the live 2-helix runs (helix-relay-2/-3).
+fn poisoned_relay_url() -> String {
+    format!("http://{WRONG_RELAY_PUBKEY}@helix-relay-2:4040")
 }
 
 // --- mev_params assembly (ports build_mev_params) ---------------------------

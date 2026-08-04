@@ -83,7 +83,7 @@ dies mid-run:
 | `mux.routing` | 1 | CB logs | every checked getHeader routed per the `[[mux]]` config |
 | `feature.timing_games` | 1 | CB logs | timing-games codepath fired (≥1 `TG:` debug line); config-gated |
 | `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
-| `feature.skip_sigverify` | 1 | CB logs | skip-sigverify enabled; **WARN-only** (not runtime-confirmable); config-gated |
+| `feature.skip_sigverify` | 1 | CB logs | skip-sigverify fired (differential: wrong-pubkey relay + auction winners); WARN in plain scenarios |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
 | `cb_submit_blinded_block_matrix` | 2 → 1 on FAIL | CB Prometheus | ≥1 blinded-block delivery (200/202) |
@@ -243,10 +243,14 @@ Each is emitted **only when its feature is enabled** — an off feature produces
   (`send_timed_get_header`), else **WARN** (enabled but unobserved — maybe no getHeader in the window).
 - **`feature.extra_validation`** (`extra_validation_enabled`) — **PASS** on ≥1 `fetched parent block`
   / `fetching parent block` line, else **WARN**.
-- **`feature.skip_sigverify`** (`skip_sigverify`) — **always WARN**. This is a *negative* codepath
-  (sigverify is simply not called; no success log or metric), indistinguishable from OFF on the happy
-  path. Honestly reports "not runtime-confirmable" rather than a false green. Confirming it needs a
-  bad-signature-injecting relay in the helix mock.
+- **`feature.skip_sigverify`** (`skip_sigverify`) — a *negative* codepath (sigverify simply not
+  called; no success log or metric), indistinguishable from OFF on the happy path — so in plain
+  scenarios it stays an honest **WARN**. The **cb-sigverify-diff scenario arms a real differential**:
+  CB's `[[relays]]` url carries a valid-but-WRONG pubkey (a mnemonic validator key, not helix's
+  `DEFAULT_MEV_PUBKEY`), so `validate_signature` would reject every bid (PubkeyMismatch) — with the
+  poison detected and ≥1 "auction winner" in CB logs (winners are post-validation), the check
+  **PASSes**: bids winning is only possible if the skip fired. `cb-sigverify-diff-control` (same
+  poison, skip OFF) is the expected-FAIL control arm; `sim diff` between the two runs shows the flip.
 
 A marker feature enabled-but-unobserved is WARN, never FAIL (no-false-red — the same discipline as
 `mux.routing`). All three are non-fatal (only a tier-1 FAIL fails the run).

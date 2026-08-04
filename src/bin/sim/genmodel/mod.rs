@@ -46,7 +46,7 @@ pub fn extract_block_scalar(yaml: &str, key: &str) -> String {
     body.join("\n")
 }
 
-/// The six golden configs. The three single-relay ones (cb-basic,
+/// The golden configs (one per scenario). The three single-relay ones (cb-basic,
 /// cb-skip-sigverify, cb-extra-validation) are the exact Python output that
 /// produced the green e2e run. The three multi-relay ones (cb-multiple-relays,
 /// cb-timing-games, cb-mux) were REGENERATED for the intended two-Helix-instance
@@ -68,6 +68,14 @@ pub fn golden(scenario: &str) -> &'static str {
         "cb-skip-sigverify" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-skip-sigverify.yml"
+        )),
+        "cb-sigverify-diff" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/golden-configs/cb-sigverify-diff.yml"
+        )),
+        "cb-sigverify-diff-control" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/golden-configs/cb-sigverify-diff-control.yml"
         )),
         "cb-extra-validation" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

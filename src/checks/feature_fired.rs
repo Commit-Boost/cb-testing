@@ -147,22 +147,91 @@ pub fn classify_marker_feature(feature: Feature, proof_count: usize) -> CheckRes
     }
 }
 
-/// Pure verdict for `skip_sigverify`: enabled, but with no positive runtime
-/// signal. Always WARN — honest that we cannot confirm the branch executed.
-pub fn classify_skip_sigverify() -> CheckResult {
-    CheckResult::warn(
-        Feature::SkipSigverify.id(),
-        1,
-        "skip_sigverify is enabled, but it is a negative codepath (signature verification is \
-         simply not called) that emits no success log or metric. On the happy path (valid \
-         mock-relay signatures) it is indistinguishable from OFF, so it cannot be positively \
-         confirmed at runtime without a bad-signature-injecting relay. Not asserting either way.",
-    )
-    .with_data(serde_json::json!({
+/// The helix relay's signing pubkey (`DEFAULT_MEV_PUBKEY` in the
+/// ethereum-package fork — a fixed constant of the devnet topology). A CB
+/// `[[relays]]` url carrying any OTHER pubkey is the sigverify-differential
+/// fault injection: CB's validate_signature would reject every bid from the
+/// real relay, so a bid winning the auction proves the skip fired.
+const HELIX_RELAY_PUBKEY: &str = "0xa55c1285d84ba83a5ad26420cd5ad3091e49c55a813eee651cd467db38a8c8e63192f47955e9376f6b42f6d190571cb5";
+
+/// Detect the fault injection (pure): does any `[[relays]]` url in the CB
+/// config template carry a pubkey that is NOT the helix relay's signing key?
+pub fn has_poisoned_relay_pubkey(template: &str) -> bool {
+    let helix = HELIX_RELAY_PUBKEY.to_lowercase();
+    template.lines().any(|line| {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("url = ") else {
+            return false;
+        };
+        let url = rest.trim_matches('"');
+        // scheme://<pubkey>@host — extract the userinfo if present.
+        let Some((_, after_scheme)) = url.split_once("://") else {
+            return false;
+        };
+        match after_scheme.split_once('@') {
+            Some((pubkey, _)) => pubkey.to_lowercase() != helix,
+            None => false,
+        }
+    })
+}
+
+/// Pure verdict for `skip_sigverify` (Law 4 seam).
+///
+/// Without the fault injection (`poisoned = false`) the feature is a negative
+/// codepath with no positive runtime signal — honest WARN, never a false green.
+///
+/// With a poisoned relay pubkey in the CB config, the differential becomes
+/// real: CB's validate_signature would reject every bid from the real relay
+/// (PubkeyMismatch), so `auction_winners > 0` is positive proof the skip
+/// codepath fired — with sigverify on, zero bids could have won.
+pub fn classify_skip_sigverify(poisoned: bool, auction_winners: usize) -> CheckResult {
+    let id = Feature::SkipSigverify.id();
+    if !poisoned {
+        return CheckResult::warn(
+            id,
+            1,
+            "skip_sigverify is enabled, but it is a negative codepath (signature verification is \
+             simply not called) that emits no success log or metric. On the happy path (valid \
+             relay signatures) it is indistinguishable from OFF, so it cannot be positively \
+             confirmed at runtime. Run the cb-sigverify-diff scenario (wrong-pubkey relay url) \
+             for a real differential. Not asserting either way.",
+        )
+        .with_data(serde_json::json!({
+            "feature": "skip sigverify",
+            "config_key": "skip_sigverify",
+            "verifiable_at_runtime": false,
+            "poisoned_relay": false,
+        }));
+    }
+
+    let data = serde_json::json!({
         "feature": "skip sigverify",
         "config_key": "skip_sigverify",
-        "verifiable_at_runtime": false,
-    }))
+        "verifiable_at_runtime": true,
+        "poisoned_relay": true,
+        "auction_winners": auction_winners,
+    });
+    if auction_winners > 0 {
+        CheckResult::pass(
+            id,
+            1,
+            format!(
+                "skip_sigverify fired ✓ {auction_winners} auction winner(s) despite a \
+                 wrong-pubkey relay url — with signature verification ON every bid would have \
+                 been rejected (PubkeyMismatch), so bids winning proves the skip codepath ran"
+            ),
+        )
+        .with_data(data)
+    } else {
+        CheckResult::warn(
+            id,
+            1,
+            "skip_sigverify enabled with the wrong-pubkey relay url (differential armed) but \
+             ZERO auction winners observed — cannot distinguish 'skip did not fire' from 'no \
+             bids in the window'. NOT asserting the feature ran.",
+        )
+        .with_data(data)
+    }
 }
 
 /// Run the feature-fired checks for every feature the CB config enables.
@@ -176,29 +245,46 @@ pub async fn run_feature_checks(
 ) -> Vec<CheckResult> {
     let mut out = Vec::new();
     for feature in detect_enabled_features(template) {
-        out.push(check_one(enclave, cb_service_names, feature).await);
+        out.push(check_one(enclave, cb_service_names, feature, template).await);
     }
     out
 }
 
-async fn check_one(enclave: &str, cb_service_names: &[String], feature: Feature) -> CheckResult {
+async fn check_one(
+    enclave: &str,
+    cb_service_names: &[String],
+    feature: Feature,
+    template: &str,
+) -> CheckResult {
     if feature == Feature::SkipSigverify {
-        return classify_skip_sigverify();
+        let poisoned = has_poisoned_relay_pubkey(template);
+        // An auction winner is a bid that SURVIVED validation (CB only logs
+        // "auction winner" for responses that made it out of validation), so
+        // with a poisoned relay pubkey it is the positive skip-fired signal.
+        let winners = if poisoned {
+            count_log_lines(enclave, cb_service_names, &["auction winner"])
+        } else {
+            0
+        };
+        return classify_skip_sigverify(poisoned, winners);
     }
 
-    let mut proof_count = 0usize;
+    let proof_count = count_log_lines(enclave, cb_service_names, feature.proof_markers());
+    classify_marker_feature(feature, proof_count)
+}
+
+/// Count non-empty CB log lines matching any of `keywords` across services.
+fn count_log_lines(enclave: &str, cb_service_names: &[String], keywords: &[&str]) -> usize {
+    let mut count = 0usize;
     for service in cb_service_names {
-        match fetch_filtered_logs(enclave, service, feature.proof_markers()) {
+        match fetch_filtered_logs(enclave, service, keywords) {
             Ok(logs) => {
-                proof_count += logs.lines().filter(|l| !l.trim().is_empty()).count();
+                count += logs.lines().filter(|l| !l.trim().is_empty()).count();
             }
-            Err(e) => warn!(
-                "feature check ({}): failed to fetch logs from '{service}': {e}",
-                feature.label()
-            ),
+            Err(e) => warn!("feature check: failed to fetch logs from '{service}': {e}"),
         }
     }
-    classify_marker_feature(feature, proof_count)
+    count
 }
 
 #[cfg(test)]
@@ -273,11 +359,53 @@ mod tests {
     }
 
     #[test]
-    fn skip_sigverify_is_always_an_honest_warn() {
-        let r = classify_skip_sigverify();
+    fn skip_sigverify_unpoisoned_is_an_honest_warn() {
+        // Without the fault injection there is still no positive signal.
+        let r = classify_skip_sigverify(false, 0);
         assert_eq!(r.status, CheckStatus::Warn);
         assert_eq!(r.id, "feature.skip_sigverify");
         assert_eq!(r.data["verifiable_at_runtime"], false);
+        // Even a nonzero winner count proves nothing when unpoisoned (valid
+        // signatures win auctions with sigverify ON too).
+        assert_eq!(classify_skip_sigverify(false, 33).status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn skip_sigverify_poisoned_with_winners_is_positive_proof() {
+        // The differential: wrong-pubkey relay + bids winning = skip fired.
+        let r = classify_skip_sigverify(true, 12);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["auction_winners"], 12);
+        assert!(r.detail.contains("fired"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn skip_sigverify_poisoned_without_winners_warns() {
+        // Armed but unobserved: could be no traffic, not a false green.
+        let r = classify_skip_sigverify(true, 0);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("NOT asserting"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn poisoned_relay_detection_both_sides() {
+        // The real helix pubkey → not poisoned.
+        let clean =
+            format!("[[relays]]\nurl = \"http://{HELIX_RELAY_PUBKEY}@helix-relay-2:4040\"\n");
+        assert!(!has_poisoned_relay_pubkey(&clean));
+        // Any other pubkey → poisoned (this is the cb-sigverify-diff shape).
+        let poisoned = "[[relays]]\nurl = \"http://0xaaf6c1251e73fb600624937760fef218aace5b253bf068ed45398aeb29d821e4d2899343ddcbbe37cb3f6cf500dff26c@helix-relay-2:4040\"\n";
+        assert!(has_poisoned_relay_pubkey(poisoned));
+        // Case-insensitive on the pubkey hex.
+        let upper = format!(
+            "url = \"http://{}@helix-relay-2:4040\"",
+            HELIX_RELAY_PUBKEY.to_uppercase().replace("0X", "0x")
+        );
+        assert!(!has_poisoned_relay_pubkey(&upper));
+        // A templated url ({{ $relay }}) has no userinfo → not poisoned.
+        assert!(!has_poisoned_relay_pubkey("url = \"{{ $relay }}\""));
+        // No relays at all → not poisoned.
+        assert!(!has_poisoned_relay_pubkey("[pbs]\nport = 18550\n"));
     }
 
     #[test]

@@ -188,10 +188,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
         CatalogEntry {
             id: "feature.skip_sigverify",
             tier: 1,
-            title: "skip-sigverify enabled (NOT runtime-confirmable)",
+            title: "skip-sigverify codepath fired (differential via wrong-pubkey relay)",
             data_source: CbLogs,
             feature_asserted: true,
-            severity_note: "emitted only when skip_sigverify is enabled; ALWAYS WARN — a negative codepath with no positive log/metric, indistinguishable from OFF without a bad-signature relay",
+            severity_note: "emitted only when skip_sigverify is enabled; PASS only in the cb-sigverify-diff scenario (wrong-pubkey relay url + >=1 auction winner proves the skip); plain scenarios stay an honest WARN (negative codepath, no positive signal)",
         },
         CatalogEntry {
             id: "cb_get_header_matrix",

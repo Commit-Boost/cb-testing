@@ -17,6 +17,14 @@ pub struct CbParams {
     pub extra_pbs_lines: Vec<String>,
     /// Extra lines appended inside the `{{ range }}` relay loop (per relay).
     pub per_relay_lines: Vec<String>,
+    /// When `Some`, the `{{ range }}` relay loop is REPLACED by a single
+    /// literal `[[relays]]` block with this exact url — the fault-injection
+    /// seam for the sigverify differential (a wrong-but-valid pubkey in the
+    /// url makes CB's signature validation reject every bid from the real
+    /// relay; `skip_sigverify = true` is then the only way bids flow).
+    /// Kurtosis service DNS (`helix-relay-N:4040`) makes the literal url
+    /// resolvable in-enclave without knowing the relay's IP at generate time.
+    pub literal_relay_url: Option<String>,
 }
 
 impl CbParams {
@@ -28,6 +36,7 @@ impl CbParams {
             timeout_get_payload_ms: 4000,
             extra_pbs_lines: Vec::new(),
             per_relay_lines: Vec::new(),
+            literal_relay_url: None,
         }
     }
 }
@@ -59,16 +68,29 @@ pub fn cb_toml(p: &CbParams) -> String {
     lines.push(r#"host = "0.0.0.0""#.to_string());
     lines.push("start_port = 9090".to_string());
     lines.push(String::new());
-    lines.push("{{ range $index, $relay := .Relays }}".to_string());
-    lines.push("[[relays]]".to_string());
-    lines.push(r#"id = "mev_relay_{{$index}}""#.to_string());
-    lines.push(r#"url = "{{ $relay }}""#.to_string());
+    match &p.literal_relay_url {
+        // Fault-injection: one literal [[relays]] entry, no template loop.
+        Some(url) => {
+            lines.push("[[relays]]".to_string());
+            lines.push(r#"id = "mev_relay_0""#.to_string());
+            lines.push(format!(r#"url = "{url}""#));
+            for line in &p.per_relay_lines {
+                lines.push(line.clone());
+            }
+        }
+        None => {
+            lines.push("{{ range $index, $relay := .Relays }}".to_string());
+            lines.push("[[relays]]".to_string());
+            lines.push(r#"id = "mev_relay_{{$index}}""#.to_string());
+            lines.push(r#"url = "{{ $relay }}""#.to_string());
 
-    for line in &p.per_relay_lines {
-        lines.push(line.clone());
+            for line in &p.per_relay_lines {
+                lines.push(line.clone());
+            }
+
+            lines.push("{{- end }}".to_string());
+        }
     }
-
-    lines.push("{{- end }}".to_string());
     lines.push(String::new());
     lines.push("[logs.stdout]".to_string());
     lines.push(r#"level = "debug""#.to_string());
@@ -170,6 +192,7 @@ mod tests {
                 "target_first_request_ms = 100".to_string(),
                 "frequency_get_header_ms = 200".to_string(),
             ],
+            literal_relay_url: None,
         };
         let block = extract_block_scalar(golden("cb-timing-games"), "commit_boost_config");
         assert_eq!(cb_toml(&params), block);
