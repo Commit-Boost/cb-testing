@@ -2,6 +2,14 @@
 status: live
 ---
 
+> **BUILT 2026-08-04, NOT YET VALIDATED LIVE.** All three pieces are in:
+> config-gen (`CbParams.signer` + the `cb-signer` scenario), the fork launcher
+> (`ethereum-package/src/mev/commit-boost/signer/signer_launcher.star`, launched
+> from `main.star`), and the assertion (`src/checks/signer.rs`, wired into the
+> run pipeline). Built to the GRILL VERDICT below, not to the original sketch.
+> The remaining work is a devnet run of `cb-signer`; until then nothing here is
+> proven to work end to end.
+
 # Signer module on Kurtosis (North Star)
 
 **Why this is a North Star:** CB's signer module has never been testable on Kurtosis - the

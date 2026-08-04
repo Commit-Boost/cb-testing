@@ -157,6 +157,13 @@ with `kurtosis enclave rm -f <enclave>`.
 
 ## Known traps (hard-won; do not re-derive)
 
+**The signer runs as uid 10001 and the devnet's `secrets/` dir is mode 600 root-owned.** Kurtosis does
+NOT chown files-artifacts on mount, so a non-root container cannot even traverse it, and CB's keystore
+loaders skip unreadable entries with `warn!` rather than failing - producing a healthy signer holding
+ZERO keys. Use the `teku-keys` + `teku-secrets` pair (755/777), which is also what the package's own
+web3signer launcher relies on. Verified live; six package launchers force `User(uid=0)` for the same
+reason.
+
 **Never let a grep's SILENCE mean success.** `cargo test ... | grep "test result:"` prints nothing
 when the build fails, which reads identically to "no output, fine". A broken test suite was committed
 this way (2026-08-04). Gate on the EXIT CODE, not on matched lines:
