@@ -349,6 +349,103 @@ mod tests {
         }
     }
 
+    /// The interchange contract: a report written to disk by a verification run
+    /// must be readable back by `sim diff`. These two live in different crates
+    /// (lib writes, the sim bin reads) and are only connected by serde derives,
+    /// so nothing but a round-trip proves the pipeline actually composes.
+    #[test]
+    fn saved_report_round_trips_back_into_a_report() {
+        let dir =
+            std::env::temp_dir().join(format!("cb-report-rt-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut report = report_from(vec![(1, CheckStatus::Pass), (2, CheckStatus::Warn)]);
+        report.enclave = "rt-enclave".to_string();
+        report.observation_window = Some(ObservationWindow {
+            start_slot: 160,
+            end_slot: 224,
+        });
+        report.provenance = Some(Provenance {
+            config_path: Some("configs/generated/cb-basic.yml".to_string()),
+            config_hash: Some("abc123def456".to_string()),
+            images: vec![ImageRef {
+                role: "mev_boost".to_string(),
+                name: "commit-boost/commit-boost:kurtosis".to_string(),
+                id: Some("sha256:deadbeef".to_string()),
+            }],
+        });
+
+        save_json_report(&report, dir.to_str().unwrap());
+
+        let path = dir.join("rt-enclave.json");
+        let raw =
+            std::fs::read_to_string(&path).expect("save_json_report must write <enclave>.json");
+        let back: VerificationReport = serde_json::from_str(&raw)
+            .expect("a saved report must deserialize (sim diff reads it)");
+
+        assert_eq!(back.enclave, "rt-enclave");
+        assert_eq!(back.result, report.result);
+        assert_eq!(back.checks.len(), 2);
+        assert_eq!(back.observation_window.unwrap().end_slot, 224);
+        let prov = back
+            .provenance
+            .expect("provenance must survive the round trip");
+        assert_eq!(prov.config_hash.as_deref(), Some("abc123def456"));
+        assert_eq!(prov.images[0].id.as_deref(), Some("sha256:deadbeef"));
+        // The wire name is `result`, not `status` - sim diff and any external
+        // consumer key on it.
+        assert!(
+            raw.contains("\"result\""),
+            "checks serialize their status as `result`"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_is_a_no_op_when_the_directory_does_not_exist() {
+        // Documented behavior: saving never fails the run, it warns. A verify
+        // that has already finished must not die on a bad --output-dir.
+        let report = report_from(vec![(1, CheckStatus::Pass)]);
+        save_json_report(&report, "/nonexistent/dir/for/cb/report");
+        // Reaching here without panicking IS the assertion.
+    }
+
+    #[test]
+    fn short_hash_is_deterministic_and_fixed_width() {
+        let a = short_hash(b"the same bytes");
+        let b = short_hash(b"the same bytes");
+        let c = short_hash(b"different bytes");
+        assert_eq!(a, b, "same input must give the same config_hash");
+        assert_ne!(a, c, "different configs must be distinguishable");
+        assert_eq!(a.len(), 12, "12 hex chars, as `sim diff` prints them");
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn short_hash_handles_empty_input() {
+        assert_eq!(short_hash(b"").len(), 12);
+    }
+
+    #[test]
+    fn print_report_json_and_terminal_both_run() {
+        // Smoke: neither renderer may panic on a report carrying every status,
+        // a FAIL with data (the terminal path prints data lines for fails), an
+        // observation window and provenance.
+        let mut report = report_from(vec![
+            (1, CheckStatus::Pass),
+            (1, CheckStatus::Fail),
+            (2, CheckStatus::Warn),
+            (3, CheckStatus::Skip),
+        ]);
+        report.observation_window = Some(ObservationWindow {
+            start_slot: 1,
+            end_slot: 2,
+        });
+        print_report(&report, true);
+        print_report(&report, false);
+    }
+
     #[test]
     fn exit_code_no_tier1_checks_is_2() {
         // No tier-1 checks ran at all => setup/discovery failure.
