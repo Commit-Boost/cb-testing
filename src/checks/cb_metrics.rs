@@ -426,8 +426,22 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
                     ),
                 )
                 .with_data(data)
+            } else if r4xx > 0.0 {
+                // The proposer DID choose builder blocks — the relay refused
+                // them. Diagnosing this as "proposer never chose" (which the
+                // old 200+202==0 branch did) sends an operator to the wrong
+                // component entirely. Found live on the nethermind+prysm pair
+                // (2026-08-04): 26 blinded blocks forwarded, 26 relay 4xx.
+                CheckResult::fail(
+                    id,
+                    tier,
+                    format!(
+                        "submit_blinded_block: the relay REJECTED all {r4xx:.0} blinded block(s)                          the proposer submitted (0 deliveries, {r4xx:.0} 4xx from relay) -- the                          proposer DID choose builder blocks; the break is relay-side (block                          invalid/late/unsigned as the relay sees it), not proposer-side"
+                    ),
+                )
+                .with_data(data)
             } else {
-                let msg = "submit_blinded_block: 0 deliveries (200+202=0); proposer never chose a builder block. Pass --strict to treat as failure".to_string();
+                let msg = "submit_blinded_block: 0 deliveries and 0 submissions -- the proposer never chose a builder block. Pass --strict to treat as failure".to_string();
                 if strict {
                     CheckResult::fail(id, tier, msg.replace("Pass --strict ", "(--strict) "))
                         .with_data(data)
@@ -995,20 +1009,45 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn classify_submit_blinded_block_zero_warn() {
+    fn classify_submit_blinded_block_no_submissions_warn() {
+        // Genuinely zero submissions: the proposer never chose a builder block.
+        // (204s are the "no bid" shape; no 4xx = nothing was ever submitted.)
         let mut s = EndpointStats::default();
-        s.add_relay("r0", "400", 1.0);
+        s.add_relay("r0", "204", 1.0);
         let r = classify_endpoint("submit_blinded_block", &s, false);
         assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("never chose"), "detail: {}", r.detail);
         assert!(r.detail.contains("--strict"));
     }
 
     #[test]
-    fn classify_submit_blinded_block_zero_strict_fails() {
+    fn classify_submit_blinded_block_no_submissions_strict_fails() {
         let mut s = EndpointStats::default();
-        s.add_relay("r0", "400", 1.0);
+        s.add_relay("r0", "204", 1.0);
         let r = classify_endpoint("submit_blinded_block", &s, true);
         assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn classify_submit_blinded_block_relay_rejected_is_not_never_chose() {
+        // The live nethermind+prysm shape: 26 blinded blocks submitted, ALL
+        // rejected 4xx by the relay. The old code called this "proposer never
+        // chose a builder block" — a wrong diagnosis pointing at the wrong
+        // component. Must FAIL and name the relay as the rejecter.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        let r = classify_endpoint("submit_blinded_block", &s, false);
+        assert_eq!(
+            r.status,
+            CheckStatus::Fail,
+            "relay refusing every block is not a WARN"
+        );
+        assert!(r.detail.contains("REJECTED"), "detail: {}", r.detail);
+        assert!(
+            !r.detail.contains("never chose"),
+            "must NOT misdiagnose as proposer-side: {}",
+            r.detail
+        );
     }
 
     #[test]
