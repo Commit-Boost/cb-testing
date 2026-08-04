@@ -822,6 +822,43 @@ mod tests {
         Scrape::parse(lines).expect("valid prometheus text")
     }
 
+    /// Every commit-boost metric name these checks depend on, and how it is
+    /// derived. Audited end-to-end on 2026-08-04 after TWO checks were found
+    /// reading names that could never exist.
+    ///
+    /// The rule: CB builds its registries with `Registry::new_custom(Some(..))`,
+    /// which prefixes EVERY metric at gather time. Most PBS metrics are
+    /// registered bare (`relay_status_code_total` -> `cb_pbs_relay_status_code_total`),
+    /// but two carry their own prefix and therefore end up DOUBLED:
+    ///   `cb_pbs`    + `pbs_submit_block_v2_unsupported_total`
+    ///                 -> cb_pbs_pbs_submit_block_v2_unsupported_total
+    ///   `cb_signer` + `signer_status_code_total`
+    ///                 -> cb_signer_signer_status_code_total   (not read yet -
+    ///                    remember this if a signer metrics check is ever added)
+    ///
+    /// This test pins the names so an "obvious tidy-up" of the doubled prefix
+    /// breaks loudly instead of silently disabling a check. It cannot detect a
+    /// rename on CB's side - only a real scrape can, which is why the rule is:
+    /// verify metric names against a scrape, never against CB's source constant.
+    #[test]
+    fn metric_names_match_cb_exposed_names() {
+        assert_eq!(
+            V2_UNSUPPORTED_METRIC, "cb_pbs_pbs_submit_block_v2_unsupported_total",
+            "the doubled pbs_ is CORRECT: prefix cb_pbs + registered name pbs_submit_block_..."
+        );
+        // The three read by collect_endpoint_stats / check_relay_latency.
+        for name in [
+            "cb_pbs_relay_status_code_total",
+            "cb_pbs_beacon_node_status_code_total",
+            "cb_pbs_relay_latency",
+        ] {
+            assert!(
+                name.starts_with("cb_pbs_"),
+                "{name} must carry the registry prefix"
+            );
+        }
+    }
+
     #[test]
     fn bucket_code_categories() {
         assert_eq!(bucket_code("200"), "200");
