@@ -5,7 +5,27 @@ correctness) of the cb-testing harness after the P1/P2/P3 + 2-helix work landed.
 each carries a rough **value**, **effort** (S/M/L), and file:line. The **Do-first** list at the top is the
 cross-cutting priority order.
 
-## Do-first (highest leverage, in order)
+## Do-first — ALL FIVE CLOSED (verified 2026-08-04 against the code, not against this list)
+
+**Do not work these.** Every item was fixed after this section was written, and the section was
+never revised. A stale do-first list is a false GREEN in the planning layer: it sent a fresh session
+at three already-fixed bugs before anyone checked the code.
+
+1. **CLOSED** — C1 relay-death false-green fixed in `72e39ba` (ancestor of HEAD).
+   `all_relays_dead_results` FAILs the tier-1 delivery check; test
+   `all_relays_dead_fails_tier1_not_skip`. The fix works by making the CHECK fail, NOT by changing
+   `exit_code`'s treatment of tier-1 SKIP (still pass — see `exit_code_tier1_skip_alone_is_0`).
+2. **CLOSED** — H2 warmup-5xx false-red fixed with a FRACTION gate, `MAX_5XX_RATE = 0.25`
+   (`cb_metrics.rs:286`), not a counter delta. `--strict` still fails on any 5xx.
+3. **CLOSED** — README + `.env.example` now mark the flashbots relay image "no longer used".
+4. **CLOSED** — the dead-flashbots-Postgres salvage query is gone from `discovery.rs`; `relay.rs`
+   pagination is order-agnostic and defensive against a relay that ignores the cursor.
+5. **CLOSED** — `docs/CHECKS.md`, `docs/ARCH.md`, `docs/fork-delta.md`, `docs/plans/INDEX.md` exist.
+
+**Rule this bought:** a do-first entry must carry the evidence that would falsify it (a commit, a
+test name, a grep). Verify against the code before working anything off this list.
+
+## Do-first, original text (historical — see closures above)
 1. **[BUG/CRITICAL] Relay death mid-window → false GREEN.** `relay_pipeline.rs:296-333` + `report.rs:136`.
    If relays are alive at preflight but OOM-die during the observation window (the exact scenario this repo
    exists to catch), the tier-1 relay checks emit SKIP, and `exit_code` treats a tier-1 SKIP as pass →
