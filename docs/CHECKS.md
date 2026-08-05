@@ -39,6 +39,29 @@ misbehaving pipeline green. **Parse the JSON and inspect each check's `result` f
 on the exit code alone. If you want any of these `WARN`s to be fatal, that is a policy decision that
 has to be made explicitly (see the P3 notes and Known gaps below); today they are not.
 
+### `inconclusive`: armed and unmeasured (`--require-feature-proof`)
+
+One class of `WARN` is not an anomaly at all, it is a **failure to measure**. A Law 3 feature check
+that arms a differential and then observes nothing has proved nothing about the feature, yet tier-1
+`WARN` is non-fatal, so the scenario exits 0 and a sweep counts it as a win. Those checks now carry
+`"inconclusive": true` in their JSON, and **`--require-feature-proof`** makes a tier-1 inconclusive
+check exit `1`.
+
+The flag is **off by default**, so the contract above is unchanged for existing callers. Turn it on
+in sweeps. The three sites it covers:
+
+| check | inconclusive when |
+| --- | --- |
+| `feature.<marker>` | enabled in CB config, ZERO proof markers in CB debug logs |
+| `feature.skip_sigverify` | differential ARMED (wrong-pubkey relay url) but zero auction winners |
+| `feature.min_bid` | floor set but ZERO bids rejected |
+
+Deliberately **not** marked: `feature.skip_sigverify` in a plain (unpoisoned) scenario. That is a
+negative codepath which emits nothing when it fires, so it is structurally unconfirmable rather than
+unmeasured, and marking it would turn every scenario carrying `skip_sigverify` permanently red.
+Relay equivocation in `payload_hash_match` also stays a plain `WARN`: it is a real observation, not
+the absence of one.
+
 One escalation exists: the `cb_metrics` matrix checks are authored at tier 2 but are **promoted to
 tier 1 when they FAIL** (`src/checks/cb_metrics.rs:636-641`), because a 5xx from a relay is a real
 pipeline failure. So a matrix 5xx does gate the exit code even though the check's nominal tier is 2.

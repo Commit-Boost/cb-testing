@@ -101,6 +101,18 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Fail the run when a tier-1 feature check armed a differential and then
+    /// observed nothing (Law 3).
+    ///
+    /// Off by default to preserve the documented exit contract (tier-1 WARN is
+    /// non-fatal). But that contract means a scenario can report "NOT asserting
+    /// the feature ran" and still exit 0, so a sweep counts a vacuous scenario as
+    /// a win. Turn this on in sweeps. It does NOT affect checks that are
+    /// structurally unable to confirm their feature, e.g. skip_sigverify on the
+    /// happy path.
+    #[arg(long)]
+    require_feature_proof: bool,
+
     /// Strict mode: promote soft warnings to FAIL. Affects:
     ///
     /// - get_header with zero 200s but some 204s (relay alive but no bids
@@ -614,7 +626,7 @@ async fn run_verification(cli: &Cli) -> i32 {
 
     report::print_report(&report, cli.json);
     save_report(&report);
-    report::exit_code(&report)
+    report::exit_code_with_policy(&report, cli.require_feature_proof)
 }
 
 /// Poll the beacon node until the devnet is ready for verification.

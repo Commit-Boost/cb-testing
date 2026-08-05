@@ -63,6 +63,21 @@ pub struct CheckResult {
     pub detail: String,
     #[serde(default = "empty_data")]
     pub data: serde_json::Value,
+
+    /// The check was ARMED and produced no evidence either way.
+    ///
+    /// Distinct from an annotative WARN. A Law 3 feature check that sets up a
+    /// differential and then observes nothing has not found a benign anomaly, it
+    /// has failed to measure: the scenario ran, proved nothing, and would
+    /// otherwise exit 0 because tier-1 WARN is non-fatal. `--require-feature-proof`
+    /// makes a tier-1 inconclusive check fail the run.
+    ///
+    /// Do NOT set this for a check that is structurally unable to confirm its
+    /// feature (e.g. `skip_sigverify` on the happy path, a negative codepath that
+    /// emits nothing when it fires). That is an honest WARN, not a failure to
+    /// measure, and flagging it would make the scenario permanently red.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inconclusive: bool,
 }
 
 fn empty_data() -> serde_json::Value {
@@ -77,6 +92,7 @@ impl CheckResult {
             status: CheckStatus::Pass,
             detail: detail.into(),
             data: empty_data(),
+            inconclusive: false,
         }
     }
 
@@ -87,6 +103,7 @@ impl CheckResult {
             status: CheckStatus::Fail,
             detail: detail.into(),
             data: empty_data(),
+            inconclusive: false,
         }
     }
 
@@ -97,6 +114,7 @@ impl CheckResult {
             status: CheckStatus::Warn,
             detail: detail.into(),
             data: empty_data(),
+            inconclusive: false,
         }
     }
 
@@ -107,11 +125,18 @@ impl CheckResult {
             status: CheckStatus::Skip,
             detail: detail.into(),
             data: empty_data(),
+            inconclusive: false,
         }
     }
 
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = data;
+        self
+    }
+
+    /// Mark this check as armed-but-unmeasured. See [`CheckResult::inconclusive`].
+    pub fn mark_inconclusive(mut self) -> Self {
+        self.inconclusive = true;
         self
     }
 }

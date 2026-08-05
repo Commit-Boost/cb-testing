@@ -180,11 +180,33 @@ pub fn tier1_failed(checks: &[CheckResult]) -> bool {
 /// - 1: any tier-1 check failed
 /// - 2: setup/discovery failure (no tier-1 checks ran)
 pub fn exit_code(report: &VerificationReport) -> i32 {
+    exit_code_with_policy(report, false)
+}
+
+/// A tier-1 check that was armed and measured nothing. See
+/// [`crate::checks::CheckResult::inconclusive`].
+pub fn tier1_inconclusive(checks: &[CheckResult]) -> bool {
+    checks.iter().any(|c| c.tier == 1 && c.inconclusive)
+}
+
+/// `exit_code` plus the opt-in Law 3 rule.
+///
+/// With `require_feature_proof`, a tier-1 check that armed a differential and
+/// then observed nothing fails the run. Without it that check is an annotative
+/// WARN and the run exits 0 — the historical contract in docs/CHECKS.md.
+///
+/// This exists because tier-1 WARN is non-fatal, so a scenario whose whole
+/// purpose is to exercise one feature could report "NOT asserting the feature
+/// ran" and still exit 0, and a sweep would count it as a win.
+pub fn exit_code_with_policy(report: &VerificationReport, require_feature_proof: bool) -> i32 {
     let has_tier1 = report.checks.iter().any(|c| c.tier == 1);
     if !has_tier1 {
         return 2;
     }
     if tier1_failed(&report.checks) {
+        return 1;
+    }
+    if require_feature_proof && tier1_inconclusive(&report.checks) {
         return 1;
     }
     0
@@ -490,6 +512,65 @@ mod tests {
         // A tier-1 check exists and passes; a tier-2 Fail must not flip to 1.
         let report = report_from(vec![(1, CheckStatus::Pass), (2, CheckStatus::Fail)]);
         assert_eq!(exit_code(&report), 0);
+    }
+
+    /// Build a report whose single tier-1 WARN is marked inconclusive: the
+    /// "armed a differential and measured nothing" shape.
+    fn report_with_inconclusive_tier1() -> VerificationReport {
+        let mut report = report_from(vec![(1, CheckStatus::Pass), (1, CheckStatus::Warn)]);
+        report.checks[1] = report.checks[1].clone().mark_inconclusive();
+        report
+    }
+
+    // Contract: default policy is unchanged. A tier-1 inconclusive WARN still
+    // exits 0, so existing callers and the docs/CHECKS.md contract are intact.
+    #[test]
+    fn inconclusive_tier1_is_not_fatal_by_default() {
+        let report = report_with_inconclusive_tier1();
+        assert_eq!(exit_code(&report), 0);
+        assert_eq!(exit_code_with_policy(&report, false), 0);
+    }
+
+    // Contract: with --require-feature-proof, an armed-but-unmeasured tier-1
+    // check fails the run. This is the Law 3 rule: a scenario that proved
+    // nothing must not be counted as a win.
+    #[test]
+    fn inconclusive_tier1_fails_under_require_feature_proof() {
+        let report = report_with_inconclusive_tier1();
+        assert_eq!(exit_code_with_policy(&report, true), 1);
+        assert!(tier1_inconclusive(&report.checks));
+    }
+
+    // Contract: the flag only promotes INCONCLUSIVE. A plain tier-1 WARN (an
+    // annotative anomaly like relay equivocation) stays non-fatal even under the
+    // strict policy, so turning the flag on does not redden honest warnings.
+    #[test]
+    fn plain_tier1_warn_stays_green_under_require_feature_proof() {
+        let report = report_from(vec![(1, CheckStatus::Pass), (1, CheckStatus::Warn)]);
+        assert!(!tier1_inconclusive(&report.checks));
+        assert_eq!(exit_code_with_policy(&report, true), 0);
+    }
+
+    // Contract: an inconclusive check at tier 2/3 is never fatal — the rule is
+    // scoped to tier 1, matching the rest of the exit contract.
+    #[test]
+    fn inconclusive_below_tier1_is_never_fatal() {
+        let mut report = report_from(vec![(1, CheckStatus::Pass), (2, CheckStatus::Warn)]);
+        report.checks[1] = report.checks[1].clone().mark_inconclusive();
+        assert!(!tier1_inconclusive(&report.checks));
+        assert_eq!(exit_code_with_policy(&report, true), 0);
+    }
+
+    // Contract: a real tier-1 FAIL still wins over the inconclusive rule, and
+    // "no tier-1 checks ran" is still 2 rather than being masked by the flag.
+    #[test]
+    fn fail_and_no_tier1_precedence_unchanged_under_the_flag() {
+        let mut failing = report_from(vec![(1, CheckStatus::Fail)]);
+        failing.checks[0] = failing.checks[0].clone().mark_inconclusive();
+        assert_eq!(exit_code_with_policy(&failing, true), 1);
+
+        let no_tier1 = report_from(vec![(2, CheckStatus::Warn)]);
+        assert_eq!(exit_code_with_policy(&no_tier1, true), 2);
     }
 
     #[test]

@@ -144,6 +144,7 @@ pub fn classify_marker_feature(feature: Feature, proof_count: usize) -> CheckRes
             ),
         )
         .with_data(data)
+        .mark_inconclusive()
     }
 }
 
@@ -231,6 +232,7 @@ pub fn classify_skip_sigverify(poisoned: bool, auction_winners: usize) -> CheckR
              bids in the window'. NOT asserting the feature ran.",
         )
         .with_data(data)
+        .mark_inconclusive()
     }
 }
 
@@ -320,6 +322,7 @@ pub fn classify_min_bid(
         ),
     )
     .with_data(data)
+        .mark_inconclusive()
 }
 
 /// Run the feature-fired checks for every feature the CB config enables.
@@ -584,5 +587,80 @@ mod tests {
             "extra_validation_enabled"
         );
         assert_eq!(Feature::SkipSigverify.config_key(), "skip_sigverify");
+    }
+
+    // --- inconclusive marking (Law 3) -----------------------------------
+    //
+    // These verdicts are tier-1 WARN, which `exit_code` treats as pass. The
+    // `inconclusive` flag is what lets `--require-feature-proof` tell "the
+    // experiment produced no signal" apart from "a benign anomaly was noted",
+    // so which sites carry it IS the contract.
+
+    // Contract: feature enabled but ZERO proof markers = armed and unmeasured.
+    #[test]
+    fn zero_proof_markers_is_inconclusive() {
+        let r = classify_marker_feature(Feature::ExtraValidation, 0);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(
+            r.inconclusive,
+            "zero proof markers proves nothing: {}",
+            r.detail
+        );
+    }
+
+    // Contract: proof markers seen = a real positive assertion.
+    #[test]
+    fn seen_proof_markers_is_conclusive() {
+        let r = classify_marker_feature(Feature::ExtraValidation, 3);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(!r.inconclusive);
+    }
+
+    // Contract: the differential was ARMED (poisoned relay) and saw no winners,
+    // so it measured nothing.
+    #[test]
+    fn armed_sigverify_differential_with_no_winners_is_inconclusive() {
+        let r = classify_skip_sigverify(true, 0);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.inconclusive);
+    }
+
+    // Contract: the UNPOISONED case is structurally unconfirmable, not a failure
+    // to measure. It must NOT be marked, or every plain scenario carrying
+    // skip_sigverify would turn red under --require-feature-proof.
+    #[test]
+    fn unpoisoned_sigverify_is_warn_but_not_inconclusive() {
+        let r = classify_skip_sigverify(false, 0);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(
+            !r.inconclusive,
+            "a negative codepath that cannot be observed is an honest WARN, not an unmeasured one"
+        );
+    }
+
+    // Contract: a floor with zero rejections cannot separate "silently ignored"
+    // from "every bid legitimately cleared it".
+    #[test]
+    fn min_bid_with_zero_rejections_is_inconclusive() {
+        let r = classify_min_bid(0.5, 0, &[1.0, 2.0]);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.inconclusive);
+    }
+
+    // Contract: rejections observed = the floor demonstrably applied.
+    #[test]
+    fn min_bid_with_rejections_is_conclusive() {
+        let r = classify_min_bid(0.5, 4, &[1.0]);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(!r.inconclusive);
+    }
+
+    // Contract: a winner UNDER the floor is a hard FAIL and never inconclusive.
+    // That is evidence, not the absence of it.
+    #[test]
+    fn min_bid_violation_is_a_fail_not_inconclusive() {
+        let r = classify_min_bid(0.5, 0, &[0.1]);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(!r.inconclusive);
     }
 }
