@@ -1,8 +1,11 @@
-# cb-sigverify-diff-control: the skip_sigverify differential (control
-# arm). Same wrong-pubkey literal relay url as cb-sigverify-diff but
-# withOUT skip_sigverify - CB rejects every bid (PubkeyMismatch), so
-# the run is EXPECTED to fail payload delivery. `sim diff` against the
-# treatment run shows the flip that proves the feature discriminates.
+# cb-ws-stream-nokey: NEGATIVE CONTROL for the ws criteria.
+#
+# Stream configured with NO api key: helix refuses every handshake
+# ("no api key registered for this proposer"), every slot falls back
+# to HTTP, MEV stays green - and feature.ws_header_stream goes
+# INCONCLUSIVE. EXPECTED to fail under --require-feature-proof; that
+# failure is this scenario's proof that the criteria discriminate.
+# Not part of the green sweep.
 
 participants:
   - el_type: geth
@@ -137,9 +140,12 @@ mev_params:
     host = "0.0.0.0"
     start_port = 9090
 
+    {{ range $index, $relay := .Relays }}
     [[relays]]
-    id = "mev_relay_0"
-    url = "http://0xaaf6c1251e73fb600624937760fef218aace5b253bf068ed45398aeb29d821e4d2899343ddcbbe37cb3f6cf500dff26c@helix-relay-2:4040"
+    id = "mev_relay_{{$index}}"
+    url = "{{ $relay }}"
+    get_header = "stream"
+    {{- end }}
 
     [logs.stdout]
     level = "debug"

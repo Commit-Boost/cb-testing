@@ -30,6 +30,12 @@ pub enum Feature {
     /// validate the header; emits `"fetching parent block"` / `"fetched parent
     /// block"` DEBUG logs on no other codepath.
     ExtraValidation,
+    /// `get_header = "stream"` (per-relay). getHeader rides a websocket bid
+    /// stream instead of HTTP polling; CB logs
+    /// `"received new header from ws stream"` on no other codepath. The HTTP
+    /// FALLBACK (merged with the feature) means a broken stream still passes
+    /// every MEV check silently - this marker check is the only discriminator.
+    WsHeaderStream,
     /// `skip_sigverify = true` (`[pbs]`). A negative codepath: signature
     /// verification is simply not called, with NO success log or metric. On the
     /// happy path (valid mock-relay signatures) ON is indistinguishable from OFF
@@ -39,9 +45,10 @@ pub enum Feature {
 }
 
 /// Every feature we know how to check, in report order.
-pub const ALL_FEATURES: [Feature; 3] = [
+pub const ALL_FEATURES: [Feature; 4] = [
     Feature::TimingGames,
     Feature::ExtraValidation,
+    Feature::WsHeaderStream,
     Feature::SkipSigverify,
 ];
 
@@ -51,6 +58,7 @@ impl Feature {
         match self {
             Feature::TimingGames => "feature.timing_games",
             Feature::ExtraValidation => "feature.extra_validation",
+            Feature::WsHeaderStream => "feature.ws_header_stream",
             Feature::SkipSigverify => "feature.skip_sigverify",
         }
     }
@@ -60,7 +68,17 @@ impl Feature {
         match self {
             Feature::TimingGames => "enable_timing_games",
             Feature::ExtraValidation => "extra_validation_enabled",
+            Feature::WsHeaderStream => "get_header",
             Feature::SkipSigverify => "skip_sigverify",
+        }
+    }
+
+    /// The config VALUE that arms the feature. Most features are boolean
+    /// toggles; `get_header` is a string transport selector.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Feature::WsHeaderStream => "stream",
+            _ => "true",
         }
     }
 
@@ -70,6 +88,7 @@ impl Feature {
         match self {
             Feature::TimingGames => &["TG:"],
             Feature::ExtraValidation => &["fetched parent block", "fetching parent block"],
+            Feature::WsHeaderStream => &[WS_STREAM_MARKER],
             Feature::SkipSigverify => &[],
         }
     }
@@ -79,6 +98,7 @@ impl Feature {
         match self {
             Feature::TimingGames => "timing games",
             Feature::ExtraValidation => "extra validation",
+            Feature::WsHeaderStream => "ws header stream",
             Feature::SkipSigverify => "skip sigverify",
         }
     }
@@ -89,22 +109,77 @@ impl Feature {
 pub fn detect_enabled_features(template: &str) -> Vec<Feature> {
     ALL_FEATURES
         .into_iter()
-        .filter(|f| config_enables(template, f.config_key()))
+        .filter(|f| config_enables(template, f.config_key(), f.config_value()))
         .collect()
 }
 
-/// True iff `template` has an uncommented `key = true` line.
-fn config_enables(template: &str, key: &str) -> bool {
+/// True iff `template` has an uncommented `key = <value>` line.
+fn config_enables(template: &str, key: &str, value: &str) -> bool {
     template.lines().any(|line| {
         let t = line.trim();
         if t.starts_with('#') {
             return false;
         }
         match t.split_once('=') {
-            Some((k, v)) => k.trim() == key && v.trim().trim_matches('"') == "true",
+            Some((k, v)) => k.trim() == key && v.trim().trim_matches('"') == value,
             None => false,
         }
     })
+}
+
+/// CB's proof line for a bid received over the websocket stream — a stream
+/// header can ONLY exist because the relay delivered it, so this single marker
+/// proves the full relay->CB stream path (no separate relay-side check needed).
+pub const WS_STREAM_MARKER: &str = "received new header from ws stream";
+/// CB's warn line when a stream attempt degrades to HTTP.
+pub const WS_FALLBACK_MARKER: &str = "falling back to http get_header";
+
+/// Pure verdict for the stream-vs-fallback balance (Law 4 seam).
+///
+/// The HTTP fallback makes a broken stream invisible to every MEV check, so
+/// the COUNT is the signal, not delivery. Thresholds are measured, not
+/// guessed: a healthy 220-slot run (CB e622a5e + helix :main)
+/// showed exactly ONE fallback — the first slot's registration-TOFU race
+/// ("proposer not registered"), gone 12s later.
+///
+/// - 0 fallbacks                  -> PASS
+/// - 1 fallback, stream served    -> PASS (the startup race; count reported)
+/// - >1 fallback, stream served   -> WARN, degraded stream
+/// - fallbacks, stream NEVER served -> WARN (annotative only: the marker check
+///   already carries `inconclusive` for the armed-but-unproven feature, so the
+///   red under --require-feature-proof comes from there, not double-flagged)
+pub fn classify_ws_fallback(streamed: usize, fallbacks: usize) -> CheckResult {
+    let id = "feature.ws_stream_fallback";
+    let data = serde_json::json!({
+        "streamed_headers": streamed,
+        "fallbacks": fallbacks,
+        "fallback_marker": WS_FALLBACK_MARKER,
+    });
+    match (streamed, fallbacks) {
+        (_, 0) => CheckResult::pass(id, 2, "stream transport: zero HTTP fallbacks ✓"),
+        (s, 1) if s > 0 => CheckResult::pass(
+            id,
+            2,
+            format!(
+                "stream served {s} header(s) with 1 HTTP fallback (the startup registration race; expected)"
+            ),
+        ),
+        (s, f) if s > 0 => CheckResult::warn(
+            id,
+            2,
+            format!(
+                "stream DEGRADED: {f} HTTP fallbacks alongside {s} streamed header(s) - the                  stream is flapping; MEV checks stay green via the fallback, so this count is                  the only signal"
+            ),
+        ),
+        (_, f) => CheckResult::warn(
+            id,
+            2,
+            format!(
+                "stream NEVER served: all getHeader traffic degraded to HTTP ({f} fallback                  warn(s)). The feature.ws_header_stream check carries the inconclusive flag                  for this run"
+            ),
+        ),
+    }
+    .with_data(data)
 }
 
 /// Pure verdict for a log-marker feature (timing-games / extra-validation).
@@ -337,6 +412,13 @@ pub async fn run_feature_checks(
     let mut out = Vec::new();
     for feature in detect_enabled_features(template) {
         out.push(check_one(enclave, cb_service_names, feature, template).await);
+    }
+    // The stream/fallback balance is a COUNT comparison, not a marker check,
+    // so it sits beside the per-feature loop.
+    if detect_enabled_features(template).contains(&Feature::WsHeaderStream) {
+        let streamed = count_log_lines(enclave, cb_service_names, &[WS_STREAM_MARKER]);
+        let fallbacks = count_log_lines(enclave, cb_service_names, &[WS_FALLBACK_MARKER]);
+        out.push(classify_ws_fallback(streamed, fallbacks));
     }
     // min_bid_eth is a VALUE knob, not a boolean toggle, so it sits outside the
     // Feature enum; it is only emitted when a floor is actually configured.
@@ -597,6 +679,50 @@ mod tests {
     // so which sites carry it IS the contract.
 
     // Contract: feature enabled but ZERO proof markers = armed and unmeasured.
+    // Contract: `get_header = "stream"` (a string knob, unlike the boolean
+    // features) arms WsHeaderStream; plain http does not.
+    #[test]
+    fn stream_transport_arms_ws_feature() {
+        let t = "[pbs]\nport = 1\n[[relays]]\nget_header = \"stream\"\n";
+        assert!(detect_enabled_features(t).contains(&Feature::WsHeaderStream));
+        let t2 = "[[relays]]\nget_header = \"http\"\n";
+        assert!(!detect_enabled_features(t2).contains(&Feature::WsHeaderStream));
+        // commented-out lines never arm
+        let t3 = "# get_header = \"stream\"\n";
+        assert!(!detect_enabled_features(t3).contains(&Feature::WsHeaderStream));
+    }
+
+    // Contract: the fallback verdict thresholds, measured on a 220-slot
+    // healthy run = exactly one startup-race fallback).
+    #[test]
+    fn ws_fallback_thresholds() {
+        use crate::checks::CheckStatus;
+        // zero fallbacks: clean pass
+        assert_eq!(classify_ws_fallback(220, 0).status, CheckStatus::Pass);
+        // the startup race: still a pass, count reported
+        let r = classify_ws_fallback(220, 1);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["fallbacks"], 1);
+        // flapping stream: warn, NOT inconclusive (real observation)
+        let r = classify_ws_fallback(200, 7);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(!r.inconclusive);
+        // stream never served: warn, and NOT inconclusive here - the marker
+        // check owns the inconclusive flag, this must not double-flag
+        let r = classify_ws_fallback(0, 64);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(!r.inconclusive, "double-flagging would make one failure two");
+    }
+
+    // Contract: the marker strings match CB main's actual log lines (pinned
+    // from a live run; if CB rewords them, this is the place that
+    // must fail).
+    #[test]
+    fn ws_marker_strings_pinned() {
+        assert_eq!(WS_STREAM_MARKER, "received new header from ws stream");
+        assert_eq!(WS_FALLBACK_MARKER, "falling back to http get_header");
+    }
+
     #[test]
     fn zero_proof_markers_is_inconclusive() {
         let r = classify_marker_feature(Feature::ExtraValidation, 0);

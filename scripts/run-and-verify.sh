@@ -23,6 +23,7 @@ JSON_DIR_FLAG=""
 STRICT_FLAG=""
 LIVE_METRICS_FLAG=""
 SKIP_FINALIZATION_FLAG=""
+REQUIRE_FEATURE_PROOF_FLAG=""
 TIMEOUT=3600
 MIN_EPOCHS=2
 TARGET_EPOCH=7
@@ -44,6 +45,7 @@ usage() {
     echo "  --timeout SECS      Readiness timeout (default: 1500)"
     echo "  --min-epochs N      Observation window in epochs (default: 2)"
     echo "  --target-epoch N    Observation window starts at this epoch (default: 5)"
+    echo "  --require-feature-proof  Fail when an armed tier-1 feature check proves nothing (Law 3)"
     echo "  -v, --verbose       Verbose logging"
     echo "  -h, --help          Show this help"
     exit 0
@@ -60,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --strict)     STRICT_FLAG="--strict"; shift;;
         --live-metrics) LIVE_METRICS_FLAG="--live-metrics"; shift;;
         --skip-finalization) SKIP_FINALIZATION_FLAG="--skip-finalization-check"; shift;;
+        --require-feature-proof) REQUIRE_FEATURE_PROOF_FLAG="--require-feature-proof"; shift;;
         --timeout)    TIMEOUT="$2"; shift 2;;
         --min-epochs) MIN_EPOCHS="$2"; shift 2;;
         --target-epoch) TARGET_EPOCH="$2"; shift 2;;
@@ -198,4 +201,5 @@ echo ""
     $STRICT_FLAG \
     $LIVE_METRICS_FLAG \
     $SKIP_FINALIZATION_FLAG \
+    $REQUIRE_FEATURE_PROOF_FLAG \
     $VERBOSE

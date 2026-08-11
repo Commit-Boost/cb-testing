@@ -128,13 +128,23 @@ pub enum Scenario {
     SigverifyDiffControl,
     ExtraValidation,
     TimingGames,
+    /// getHeader over the websocket bid stream (CB `get_header = "stream"` +
+    /// helix HeaderStream route). The api key rides relay `headers`, so
+    /// registration TOFU-binds it and the stream authenticates.
+    WsStream,
+    /// NEGATIVE CONTROL: stream configured but NO api key. helix refuses every
+    /// handshake, every slot falls back to HTTP, MEV stays green - and
+    /// feature.ws_header_stream goes INCONCLUSIVE, which is the point: this
+    /// scenario exists to prove the criteria discriminate. Expected to FAIL
+    /// under --require-feature-proof; not part of the green sweep.
+    WsStreamNoKey,
     Mux,
 }
 
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 11] = [
+    pub const ALL: [Scenario; 13] = [
         Scenario::Basic,
         Scenario::BasicAltClients,
         Scenario::MultipleRelays,
@@ -145,6 +155,8 @@ impl Scenario {
         Scenario::SigverifyDiffControl,
         Scenario::TimingGames,
         Scenario::ExtraValidation,
+        Scenario::WsStream,
+        Scenario::WsStreamNoKey,
         Scenario::Mux,
     ];
 
@@ -161,6 +173,8 @@ impl Scenario {
             Scenario::SigverifyDiffControl => "cb-sigverify-diff-control",
             Scenario::ExtraValidation => "cb-extra-validation",
             Scenario::TimingGames => "cb-timing-games",
+            Scenario::WsStream => "cb-ws-stream",
+            Scenario::WsStreamNoKey => "cb-ws-stream-nokey",
             Scenario::Mux => "cb-mux",
         }
     }
@@ -198,6 +212,26 @@ impl Scenario {
                  # subsidy list [1, 2] makes the builder submit DIVERGENT bid values\n\
                  # (rbuilder [[subsidy_overrides]]), so the best-bid selection is a\n\
                  # real discrimination, not a tie between identical bids."
+            }
+            Scenario::WsStream => {
+                "# cb-ws-stream: getHeader over the websocket bid stream.\n\
+                 #\n\
+                 # CB `get_header = \"stream\"` + helix HeaderStream route. The relay's\n\
+                 # X-Api-Key header rides validator registration, helix TOFU-binds it,\n\
+                 # and the stream authenticates. THE TRAP this scenario guards: the HTTP\n\
+                 # fallback keeps every MEV check green when the stream is broken, so\n\
+                 # feature.ws_header_stream (proof markers) is the real assertion - run\n\
+                 # under --require-feature-proof."
+            }
+            Scenario::WsStreamNoKey => {
+                "# cb-ws-stream-nokey: NEGATIVE CONTROL for the ws criteria.\n\
+                 #\n\
+                 # Stream configured with NO api key: helix refuses every handshake\n\
+                 # (\"no api key registered for this proposer\"), every slot falls back\n\
+                 # to HTTP, MEV stays green - and feature.ws_header_stream goes\n\
+                 # INCONCLUSIVE. EXPECTED to fail under --require-feature-proof; that\n\
+                 # failure is this scenario's proof that the criteria discriminate.\n\
+                 # Not part of the green sweep."
             }
             Scenario::BasicAltClients => {
                 "# cb-basic-nethermind-prysm: cb-basic on an ALTERNATE EL/CL pair.\n\
@@ -294,7 +328,9 @@ impl Scenario {
             | Scenario::SkipSigverify
             | Scenario::SigverifyDiff
             | Scenario::SigverifyDiffControl
-            | Scenario::ExtraValidation => &["helix"],
+            | Scenario::ExtraValidation
+            | Scenario::WsStream
+            | Scenario::WsStreamNoKey => &["helix"],
             Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => &["helix", "helix"],
         }
     }
@@ -345,6 +381,18 @@ impl Scenario {
                 ],
                 literal_relay_url: None,
                 signer: None,
+            }),
+            Scenario::WsStream => cb_toml(&CbParams {
+                per_relay_lines: vec![
+                    r#"get_header = "stream""#.to_string(),
+                    r#"headers = { X-Api-Key = "9d5c2f4e-1b7a-4c3d-8e6f-0a1b2c3d4e5f" }"#
+                        .to_string(),
+                ],
+                ..CbParams::basic()
+            }),
+            Scenario::WsStreamNoKey => cb_toml(&CbParams {
+                per_relay_lines: vec![r#"get_header = "stream""#.to_string()],
+                ..CbParams::basic()
             }),
             Scenario::Mux => {
                 let node0 = load_pubkeys(keys_dir, 0)?;

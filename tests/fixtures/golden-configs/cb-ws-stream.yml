@@ -1,8 +1,11 @@
-# cb-sigverify-diff-control: the skip_sigverify differential (control
-# arm). Same wrong-pubkey literal relay url as cb-sigverify-diff but
-# withOUT skip_sigverify - CB rejects every bid (PubkeyMismatch), so
-# the run is EXPECTED to fail payload delivery. `sim diff` against the
-# treatment run shows the flip that proves the feature discriminates.
+# cb-ws-stream: getHeader over the websocket bid stream.
+#
+# CB `get_header = "stream"` + helix HeaderStream route. The relay's
+# X-Api-Key header rides validator registration, helix TOFU-binds it,
+# and the stream authenticates. THE TRAP this scenario guards: the HTTP
+# fallback keeps every MEV check green when the stream is broken, so
+# feature.ws_header_stream (proof markers) is the real assertion - run
+# under --require-feature-proof.
 
 participants:
   - el_type: geth
@@ -137,9 +140,13 @@ mev_params:
     host = "0.0.0.0"
     start_port = 9090
 
+    {{ range $index, $relay := .Relays }}
     [[relays]]
-    id = "mev_relay_0"
-    url = "http://0xaaf6c1251e73fb600624937760fef218aace5b253bf068ed45398aeb29d821e4d2899343ddcbbe37cb3f6cf500dff26c@helix-relay-2:4040"
+    id = "mev_relay_{{$index}}"
+    url = "{{ $relay }}"
+    get_header = "stream"
+    headers = { X-Api-Key = "9d5c2f4e-1b7a-4c3d-8e6f-0a1b2c3d4e5f" }
+    {{- end }}
 
     [logs.stdout]
     level = "debug"

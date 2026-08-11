@@ -61,6 +61,7 @@ router_config:
     # chose is lost. That read as "prysm can't do MEV" until the route list was
     # checked -- see docs/SWEEP-BACKLOG.md (Law 7 first dividend, 2026-08-04).
     - route: GetPayloadV2
+    - route: HeaderStream
     - route: RegisterValidators
     - route: Status
     - route: ProposerPayloadDelivered
