@@ -1,0 +1,15 @@
+Name:            CB-Testnet
+UUID:            8f3c1a2b4d5e6f708192a3b4c5d6e7f8
+Status:          RUNNING
+Creation Time:   Thu, 30 Jul 2026 10:00:00 UTC
+Flags:
+
+========================================== Files Artifacts ==========================================
+UUID           Name
+1a2b3c4d       genesis-data
+5e6f7a8b       cl-genesis-data
+
+========================================== User Services ==========================================
+UUID                               Name                              Ports                                                        Status
+aaa111bbb222ccc333ddd444eee555f01  cl-1-lighthouse-geth              http: 4000/tcp -> http://127.0.0.1:32811                      RUNNING
+bbb222ccc333ddd444eee555fff666a02  mev-relay-helix                   <none>                                                       STOPPED

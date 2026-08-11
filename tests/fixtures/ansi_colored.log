@@ -1,0 +1,5 @@
+[2m2026-07-30T13:00:00.000Z[0m [32mINFO[0m [1mrelay[0m: booting
+[2m2026-07-30T13:00:00.500Z[0m [32mINFO[0m [1mrelay[0m: parsing flags
+[31mthread 'main' panicked at src/main.rs:10:5:[0m
+[31mexplicit panic: invalid --cores value: expected integer[0m
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

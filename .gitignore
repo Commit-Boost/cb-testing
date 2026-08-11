@@ -7,3 +7,6 @@ kurtosis-configs/
 scripts/kurtosis-configs/
 .env
 */__pycache__
+
+CB-Testnet.json
+.agent/

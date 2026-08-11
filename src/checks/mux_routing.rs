@@ -65,20 +65,28 @@ pub struct CbEvent {
 /// `Ok(None)` if no mux sections (check will SKIP),
 /// `Err` if parsing fails.
 pub fn extract_mux_from_config(path: &str) -> eyre::Result<Option<Vec<MuxEntry>>> {
+    let template = read_cb_config_template(path)?;
+    parse_mux_from_toml_template(&template)
+}
+
+/// Read the Commit-Boost config TOML template from a config path.
+///
+/// Supports `.toml` (raw CB config) and `.yml`/`.yaml` (Kurtosis config with the
+/// CB config embedded at `mev_params.commit_boost_config`). Shared by the mux
+/// check and the feature-fired checks, both of which scan the same template.
+pub fn read_cb_config_template(path: &str) -> eyre::Result<String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| eyre::eyre!("Failed to read config '{path}': {e}"))?;
 
-    let template = if path.ends_with(".toml") {
-        raw
+    if path.ends_with(".toml") {
+        Ok(raw)
     } else if path.ends_with(".yml") || path.ends_with(".yaml") {
-        extract_commit_boost_config_from_yaml(&raw)?
+        extract_commit_boost_config_from_yaml(&raw)
     } else {
-        return Err(eyre::eyre!(
+        Err(eyre::eyre!(
             "Unrecognized config format. Expected .toml (CB config) or .yml/.yaml (Kurtosis config), got: {path}"
-        ));
-    };
-
-    parse_mux_from_toml_template(&template)
+        ))
+    }
 }
 
 fn extract_commit_boost_config_from_yaml(raw: &str) -> eyre::Result<String> {
@@ -92,9 +100,7 @@ fn extract_commit_boost_config_from_yaml(raw: &str) -> eyre::Result<String> {
         .and_then(|p| p.get("commit_boost_config"))
         .and_then(|c| c.as_str())
         .ok_or_else(|| {
-            eyre::eyre!(
-                "No mev_params.commit_boost_config found in Kurtosis YAML config"
-            )
+            eyre::eyre!("No mev_params.commit_boost_config found in Kurtosis YAML config")
         })?;
 
     Ok(template.to_string())
@@ -190,8 +196,8 @@ fn parse_one_mux_section<'a>(
 
     let id = id.ok_or_else(|| eyre::eyre!("[[mux]] section missing 'id' field"))?;
     let relay_identity = relay_identity_from_mux_id(&id);
-    let pubkeys = pubkeys
-        .ok_or_else(|| eyre::eyre!("[[mux]] section '{id}' missing 'validator_pubkeys'"))?;
+    let pubkeys =
+        pubkeys.ok_or_else(|| eyre::eyre!("[[mux]] section '{id}' missing 'validator_pubkeys'"))?;
 
     Ok(Some(MuxEntry {
         id,
@@ -221,11 +227,11 @@ fn parse_mux_relay_body(
             continue;
         }
 
-        if let Some((key, raw_val)) = parse_key_value(trimmed) {
-            if key == "url" {
-                let val = raw_val.trim_matches('"');
-                return Ok(parse_relay_index_from_template(val));
-            }
+        if let Some((key, raw_val)) = parse_key_value(trimmed)
+            && key == "url"
+        {
+            let val = raw_val.trim_matches('"');
+            return Ok(parse_relay_index_from_template(val));
         }
     }
 
@@ -234,10 +240,7 @@ fn parse_mux_relay_body(
 
 fn parse_relay_index_from_template(val: &str) -> Option<usize> {
     let val = val.trim();
-    let stripped = val
-        .trim_start_matches("{{")
-        .trim_end_matches("}}")
-        .trim();
+    let stripped = val.trim_start_matches("{{").trim_end_matches("}}").trim();
     let parts: Vec<&str> = stripped.split_whitespace().collect();
     if parts.len() >= 3 && parts[0] == "index" && parts[1] == ".Relays" {
         parts[2].parse::<usize>().ok()
@@ -260,10 +263,7 @@ fn parse_pubkey_array(
     let mut accum = rest.to_string();
 
     if !accum.trim_end().ends_with(']') {
-        loop {
-            let Some(next) = lines.next() else {
-                break;
-            };
+        for next in lines.by_ref() {
             accum.push('\n');
             accum.push_str(next);
             if next.trim().ends_with(']') {
@@ -273,12 +273,12 @@ fn parse_pubkey_array(
     }
 
     let raw = accum.trim();
-    let start = raw.find('[').ok_or_else(|| {
-        eyre::eyre!("Could not find opening '[' in pubkey array: {raw:.50}...")
-    })?;
-    let end = raw.rfind(']').ok_or_else(|| {
-        eyre::eyre!("Could not find closing ']' in pubkey array: {raw:.50}...")
-    })?;
+    let start = raw
+        .find('[')
+        .ok_or_else(|| eyre::eyre!("Could not find opening '[' in pubkey array: {raw:.50}..."))?;
+    let end = raw
+        .rfind(']')
+        .ok_or_else(|| eyre::eyre!("Could not find closing ']' in pubkey array: {raw:.50}..."))?;
 
     let inner = &raw[start + 1..end];
     let mut pubkeys = Vec::new();
@@ -368,8 +368,8 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
                 found = line[pos + lvl.len() + 2..].to_string();
                 break;
             }
-            if line.starts_with(lvl) {
-                found = line[lvl.len()..].trim_start().to_string();
+            if let Some(stripped) = line.strip_prefix(lvl) {
+                found = stripped.trim_start().to_string();
                 break;
             }
         }
@@ -422,10 +422,18 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
             fields.insert(key.to_string(), val.clone());
 
             match key {
-                "slot" => { slot = val.parse().ok(); }
-                "validator" | "pubkey" => { validator = Some(normalize_pubkey(&val)); }
-                "relay_id" => { relay_id = Some(val); }
-                "mux_id" => { mux_id = Some(val); }
+                "slot" => {
+                    slot = val.parse().ok();
+                }
+                "validator" | "pubkey" => {
+                    validator = Some(normalize_pubkey(&val));
+                }
+                "relay_id" => {
+                    relay_id = Some(val);
+                }
+                "mux_id" => {
+                    mux_id = Some(val);
+                }
                 _ => {}
             }
         }
@@ -441,8 +449,6 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
     })
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Log fetching
 // ---------------------------------------------------------------------------
@@ -452,15 +458,51 @@ pub fn parse_cb_log_line(line: &str) -> Option<CbEvent> {
 /// Fetches all logs and filters client-side. The `--regex-match` flag is
 /// tried first as an optimization, but some kurtosis versions ignore it.
 pub fn fetch_service_logs(enclave: &str, service: &str) -> eyre::Result<String> {
-    info!(
-        "mux check: fetching logs from service '{service}' (enclave={enclave})..."
-    );
+    info!("mux check: fetching logs from service '{service}' (enclave={enclave})...");
 
+    // Filter to mux-relevant lines client-side.
+    let result = fetch_filtered_logs(
+        enclave,
+        service,
+        &[
+            "using mux config",
+            "received new header",
+            "auction winner",
+            "received unblinded block",
+            "CRITICAL: no payload",
+        ],
+    )?;
+
+    if result.is_empty() {
+        // The empty-log warning wants a sample of what WAS there, so re-fetch
+        // the raw logs. This only runs on the (rare) empty path.
+        let all_logs = fetch_raw_logs(enclave, service).unwrap_or_default();
+        let sample: String = all_logs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        warn!(
+            "mux check: service '{service}' returned no relevant log lines. \
+             Total: {} bytes. Sample:\n{}",
+            all_logs.len(),
+            sample
+        );
+    } else {
+        info!(
+            "mux check: service '{service}' returned {} relevant log line(s)",
+            result.lines().count()
+        );
+    }
+
+    Ok(result)
+}
+
+/// Fetch a service's raw logs (stdout+stderr combined), no filtering.
+fn fetch_raw_logs(enclave: &str, service: &str) -> eyre::Result<String> {
     let output = std::process::Command::new("kurtosis")
-        .args([
-            "service", "logs", enclave, service,
-            "-n", "200000",
-        ])
+        .args(["service", "logs", enclave, service, "-n", "200000"])
         .output()
         .map_err(|e| eyre::eyre!("Failed to run 'kurtosis service logs': {e}"))?;
 
@@ -476,41 +518,25 @@ pub fn fetch_service_logs(enclave: &str, service: &str) -> eyre::Result<String> 
     // Combine stdout and stderr — kurtosis writes to either depending on version.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let all_logs = format!("{}\n{}", stdout, stderr);
+    Ok(format!("{}\n{}", stdout, stderr))
+}
 
-    // Filter to relevant lines client-side.
+/// Fetch a service's logs and keep only lines containing one of `keywords`.
+///
+/// The shared log-fetch primitive: mux and the feature-fired checks both scan
+/// CB debug logs for a small set of marker strings. Returns the matching lines
+/// joined by newlines (empty string if none matched).
+pub fn fetch_filtered_logs(
+    enclave: &str,
+    service: &str,
+    keywords: &[&str],
+) -> eyre::Result<String> {
+    let all_logs = fetch_raw_logs(enclave, service)?;
     let result: String = all_logs
         .lines()
-        .filter(|line| {
-            line.contains("using mux config")
-                || line.contains("received new header")
-                || line.contains("auction winner")
-                || line.contains("received unblinded block")
-                || line.contains("CRITICAL: no payload")
-        })
+        .filter(|line| keywords.iter().any(|kw| line.contains(kw)))
         .collect::<Vec<_>>()
         .join("\n");
-
-    if result.is_empty() {
-        let sample: String = all_logs
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n");
-        warn!(
-            "mux check: service '{service}' returned no relevant log lines.              Total: {} bytes stdout, {} bytes stderr. Sample:\n{}",
-            stdout.len(),
-            stderr.len(),
-            sample
-        );
-    } else {
-        info!(
-            "mux check: service '{service}' returned {} relevant log line(s)",
-            result.lines().count()
-        );
-    }
-
     Ok(result)
 }
 
@@ -573,6 +599,27 @@ pub async fn check_mux_routing(
         }
     }
 
+    classify_mux_routing(entries, &expected_mux, &all_events)
+}
+
+/// Pure verdict logic for mux routing (the Law 4 test seam; the async wrapper
+/// above only gathers the logs). Contract:
+/// - no `[[mux]]` entries → SKIP
+/// - no mux-related log events at all → WARN (couldn't observe routing)
+/// - events seen but ZERO routing DECISIONS actually checked (no "using mux
+///   config" DEBUG event for a known pubkey) → WARN, NOT pass. This is the Law 3
+///   fix: we no longer report "verified" having verified nothing when CB debug
+///   logging is off. `[logs.stdout] level = "debug"` is required for mux scenarios.
+/// - a checked decision routed to the wrong mux → FAIL
+/// - otherwise → PASS, counting the routing decisions actually verified.
+pub fn classify_mux_routing(
+    entries: &[MuxEntry],
+    expected_mux: &HashMap<String, String>,
+    all_events: &[CbEvent],
+) -> CheckResult {
+    let mux_ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    let mux_detail = format!("muxes=[{}]", mux_ids.join(", "));
+
     // Filter to events relevant to mux verification.
     let mux_events: Vec<&CbEvent> = all_events
         .iter()
@@ -587,32 +634,34 @@ pub async fn check_mux_routing(
 
     let total_events = mux_events.len();
 
-    let data = serde_json::json!({
-        "total_mux_entries": entries.len(),
-        "total_log_events": total_events,
-        "pubkeys_verified": 0,
-        "violations": [],
-        "violation_count": 0,
-        "mux_entries_seen": [],
-    });
-
     if total_events == 0 {
         return CheckResult::warn(
             "mux.routing",
             1,
             format!(
-                "No mux-related log lines found in any CB PBS service. \
-                 No getHeader requests were recorded — mux config is valid \
-                 but routing could not be verified at runtime. muxes=[{}]",
-                entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(", ")
+                "No mux-related log lines found in any CB PBS service — routing could not be \
+                 verified at runtime (mux config parsed fine). {mux_detail}"
             ),
-        ).with_data(data);
+        )
+        .with_data(serde_json::json!({
+            "total_mux_entries": entries.len(),
+            "total_log_events": 0,
+            "pubkeys_verified": 0,
+            "routing_decisions_verified": 0,
+            "violations": [],
+            "violation_count": 0,
+            "mux_entries_seen": [],
+        }));
     }
 
-    // Verify: for each "using mux config" event, does the pubkey match?
+    // Verify: for each "using mux config" event for a KNOWN pubkey, does the
+    // routed mux match the expected mux? Count how many such decisions we
+    // actually checked — a match OR a violation both count; an event without a
+    // mux_id (e.g. "received new header") is NOT a verified routing decision.
     let mut violations: Vec<serde_json::Value> = Vec::new();
     let mut pubkeys_verified: HashSet<String> = HashSet::new();
     let mut mux_entries_seen: HashSet<String> = HashSet::new();
+    let mut routing_decisions_verified: usize = 0;
 
     for event in &mux_events {
         if let Some(ref mux_id) = event.mux_id {
@@ -622,35 +671,37 @@ pub async fn check_mux_routing(
         if let Some(ref pk_norm) = event.validator {
             pubkeys_verified.insert(pk_norm.clone());
 
-            if let Some(expected_mux_id) = expected_mux.get(pk_norm) {
-                if let Some(ref actual_mux_id) = event.mux_id {
-                    if actual_mux_id != expected_mux_id {
-                        let expected_relay = entries
-                            .iter()
-                            .find(|e| e.id == *expected_mux_id)
-                            .map(|e| e.relay_identity.as_str())
-                            .unwrap_or("?");
-                        let actual_relay = entries
-                            .iter()
-                            .find(|e| e.id == *actual_mux_id)
-                            .map(|e| e.relay_identity.as_str())
-                            .unwrap_or("?");
+            if let Some(expected_mux_id) = expected_mux.get(pk_norm)
+                && let Some(ref actual_mux_id) = event.mux_id
+            {
+                routing_decisions_verified += 1;
 
-                        violations.push(serde_json::json!({
-                            "slot": event.slot,
-                            "proposer_pubkey": format!("0x{pk_norm}"),
-                            "routed_to_mux": actual_mux_id,
-                            "routed_to_relay": actual_relay,
-                            "expected_mux": expected_mux_id,
-                            "expected_relay": expected_relay,
-                        }));
+                if actual_mux_id != expected_mux_id {
+                    let expected_relay = entries
+                        .iter()
+                        .find(|e| e.id == *expected_mux_id)
+                        .map(|e| e.relay_identity.as_str())
+                        .unwrap_or("?");
+                    let actual_relay = entries
+                        .iter()
+                        .find(|e| e.id == *actual_mux_id)
+                        .map(|e| e.relay_identity.as_str())
+                        .unwrap_or("?");
 
-                        warn!(
-                            "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
-                             '{expected_mux_id}' ({expected_relay}) but was routed to \
-                             '{actual_mux_id}' ({actual_relay})"
-                        );
-                    }
+                    violations.push(serde_json::json!({
+                        "slot": event.slot,
+                        "proposer_pubkey": format!("0x{pk_norm}"),
+                        "routed_to_mux": actual_mux_id,
+                        "routed_to_relay": actual_relay,
+                        "expected_mux": expected_mux_id,
+                        "expected_relay": expected_relay,
+                    }));
+
+                    warn!(
+                        "mux check: MISROUTING — pubkey 0x{pk_norm}.. should route to \
+                         '{expected_mux_id}' ({expected_relay}) but was routed to \
+                         '{actual_mux_id}' ({actual_relay})"
+                    );
                 }
             }
         }
@@ -660,13 +711,11 @@ pub async fn check_mux_routing(
         "total_mux_entries": entries.len(),
         "total_log_events": total_events,
         "pubkeys_verified": pubkeys_verified.len(),
+        "routing_decisions_verified": routing_decisions_verified,
         "violations": violations,
         "violation_count": violations.len(),
         "mux_entries_seen": mux_entries_seen.iter().cloned().collect::<Vec<_>>(),
     });
-
-    let mux_ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-    let mux_detail = format!("muxes=[{}]", mux_ids.join(", "));
 
     if !violations.is_empty() {
         CheckResult::fail(
@@ -679,15 +728,25 @@ pub async fn check_mux_routing(
             ),
         )
         .with_data(data)
+    } else if routing_decisions_verified == 0 {
+        CheckResult::warn(
+            "mux.routing",
+            1,
+            format!(
+                "{total_events} mux log event(s) seen but ZERO routing decisions could be \
+                 verified — need CB \"using mux config\" DEBUG logs (is `[logs.stdout] level = \
+                 \"debug\"` set, and are proposer pubkeys covered by the mux config?). NOT \
+                 asserting routing correctness. {mux_detail}"
+            ),
+        )
+        .with_data(data)
     } else {
         CheckResult::pass(
             "mux.routing",
             1,
             format!(
-                "All {} mux routing decision(s) verified ✓ CB PBS correctly routed \
-                 every getHeader request according to mux config. {}",
-                total_events,
-                mux_detail,
+                "All {routing_decisions_verified} mux routing decision(s) verified ✓ CB PBS routed \
+                 every checked getHeader request per mux config. {mux_detail}"
             ),
         )
         .with_data(data)
@@ -701,11 +760,95 @@ pub async fn check_mux_routing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::CheckStatus;
+
+    // --- classify_mux_routing verdict tests (Law 3/4: no false green) --------
+
+    fn entry(id: &str, relay: &str, pubkeys: &[&str]) -> MuxEntry {
+        MuxEntry {
+            id: id.to_string(),
+            relay_identity: relay.to_string(),
+            validator_pubkeys: pubkeys.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    fn event(message: &str, validator: Option<&str>, mux_id: Option<&str>) -> CbEvent {
+        CbEvent {
+            message: message.to_string(),
+            fields: HashMap::new(),
+            slot: Some(1),
+            validator: validator.map(|v| v.to_string()),
+            relay_id: None,
+            mux_id: mux_id.map(|m| m.to_string()),
+        }
+    }
+
+    fn expected(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(pk, mux)| (pk.to_string(), mux.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn mux_pass_when_a_routing_decision_is_verified() {
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        // A "using mux config" event: known pubkey routed to its expected mux.
+        let events = [event("using mux config", Some("aa"), Some("mux_0"))];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.data["routing_decisions_verified"], 1);
+    }
+
+    #[test]
+    fn mux_warn_when_events_seen_but_no_decision_verifiable() {
+        // The false-green case: log events exist ("received new header" has a
+        // validator but no mux_id), so NO routing decision is actually checked.
+        // Old code PASSed here; the fix WARNs.
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        let events = [event("received new header", Some("aa"), None)];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(
+            r.status,
+            CheckStatus::Warn,
+            "must NOT pass on zero verified decisions"
+        );
+        assert_eq!(r.data["routing_decisions_verified"], 0);
+        assert!(r.detail.contains("DEBUG"));
+    }
+
+    #[test]
+    fn mux_warn_when_no_events_at_all() {
+        let entries = [entry("mux_0", "helix", &["aa"])];
+        let exp = expected(&[("aa", "mux_0")]);
+        let r = classify_mux_routing(&entries, &exp, &[]);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert_eq!(r.data["total_log_events"], 0);
+    }
+
+    #[test]
+    fn mux_fail_on_misroute() {
+        let entries = [
+            entry("mux_0", "helix", &["aa"]),
+            entry("mux_1", "flashbots", &["bb"]),
+        ];
+        let exp = expected(&[("aa", "mux_0"), ("bb", "mux_1")]);
+        // pubkey aa expected at mux_0 but routed to mux_1 → violation.
+        let events = [event("using mux config", Some("aa"), Some("mux_1"))];
+        let r = classify_mux_routing(&entries, &exp, &events);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.data["violation_count"], 1);
+    }
 
     #[test]
     fn test_relay_identity_from_mux_id() {
         assert_eq!(relay_identity_from_mux_id("node_0_to_helix"), "helix");
-        assert_eq!(relay_identity_from_mux_id("node_1_to_flashbots"), "flashbots");
+        assert_eq!(
+            relay_identity_from_mux_id("node_1_to_flashbots"),
+            "flashbots"
+        );
         assert_eq!(relay_identity_from_mux_id("my_mux_entry"), "my_mux_entry");
         assert_eq!(relay_identity_from_mux_id("to_"), "to_");
     }
@@ -839,7 +982,10 @@ additional_services:
         assert_eq!(event.mux_id, Some("node_1_to_flashbots".to_string()));
         assert_eq!(event.slot, Some(160));
         assert!(event.validator.is_some());
-        assert_eq!(event.validator.unwrap(), "b2ad1574eaca33f1555308e24b27a095d24aed8f4af5302ea2c6ba2e50936d25ffea7047be94065eac630693c7f86757");
+        assert_eq!(
+            event.validator.unwrap(),
+            "b2ad1574eaca33f1555308e24b27a095d24aed8f4af5302ea2c6ba2e50936d25ffea7047be94065eac630693c7f86757"
+        );
     }
 
     #[test]
@@ -863,8 +1009,14 @@ additional_services:
         assert_eq!(event.message, "received new header");
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(521));
-        assert_eq!(event.fields.get("header_size_bytes"), Some(&"2891".to_string()));
-        assert_eq!(event.fields.get("value_eth"), Some(&"0.050439063999832000".to_string()));
+        assert_eq!(
+            event.fields.get("header_size_bytes"),
+            Some(&"2891".to_string())
+        );
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.050439063999832000".to_string())
+        );
     }
 
     #[test]
@@ -876,8 +1028,41 @@ additional_services:
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(34));
         assert!(event.validator.is_some());
-        assert_eq!(event.fields.get("header_size_bytes"), Some(&"3099".to_string()));
-        assert_eq!(event.fields.get("value_eth"), Some(&"0.042701386561497000".to_string()));
+        assert_eq!(
+            event.fields.get("header_size_bytes"),
+            Some(&"3099".to_string())
+        );
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.042701386561497000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_cb_log_line_ws_stream_variant() {
+        // CB with WS get_header streaming (commit-boost PR #483) logs
+        // "received new header from ws stream" — a SUPERSTRING of the HTTP
+        // message with different latency fields (connect_latency /
+        // first_bid_latency instead of latency) and no content_type. Our
+        // consumers filter with starts_with("received new header"), so the
+        // variant must (a) match that prefix and (b) yield the fields
+        // best_bid needs: relay_id, slot (span-rendered), value_eth.
+        let line = r#"2026-08-04T10:00:00.000000Z  INFO : received new header from ws stream relay_id="mux_helix" header_size_bytes=2891 connect_latency=12.3ms first_bid_latency=88.1ms validate_latency=1.2ms version=Fulu value_eth="0.050439063999832000" block_hash=0x15cd5f31333e1a8d42f0207cf1a61c65baf3d938836b07877a3a76b1cb890d11 updates=7 invalid_frames=0 req_id=8e5020cb-a893-42b3-a2f5-8f4c3f400c9e slot=521"#;
+
+        let event = parse_cb_log_line(line).expect("ws variant should parse");
+        assert!(
+            event.message.starts_with("received new header"),
+            "prefix filter must match the ws variant, got: {:?}",
+            event.message
+        );
+        assert_eq!(event.relay_id, Some("mux_helix".to_string()));
+        assert_eq!(event.slot, Some(521));
+        assert_eq!(
+            event.fields.get("value_eth"),
+            Some(&"0.050439063999832000".to_string())
+        );
+        // The HTTP-only fields are absent, not misparsed.
+        assert!(!event.fields.contains_key("latency"));
     }
 
     #[test]
@@ -918,8 +1103,13 @@ mod log_file_tests {
         ];
 
         for line in &lines {
-            let event = parse_cb_log_line(line).expect(&format!("should parse: {}", &line[..80]));
-            assert!(event.message.starts_with("using mux"), "message should start with 'using mux', got: {:?}", event.message);
+            let event =
+                parse_cb_log_line(line).unwrap_or_else(|| panic!("should parse: {}", &line[..80]));
+            assert!(
+                event.message.starts_with("using mux"),
+                "message should start with 'using mux', got: {:?}",
+                event.message
+            );
             assert!(event.mux_id.is_some(), "mux_id should be Some");
             assert!(event.slot.is_some(), "slot should be Some");
             assert!(event.validator.is_some(), "validator should be Some");
@@ -933,7 +1123,11 @@ mod log_file_tests {
 
         let event = parse_cb_log_line(line).expect("should parse line with ANSI codes");
         // The message should contain "using mux" (may have trailing ANSI codes)
-        assert!(event.message.contains("using mux"), "message should contain 'using mux', got: {:?}", event.message);
+        assert!(
+            event.message.contains("using mux"),
+            "message should contain 'using mux', got: {:?}",
+            event.message
+        );
         // mux_id should be parsed correctly despite ANSI codes
         assert_eq!(event.mux_id, Some("node_1_to_flashbots".to_string()));
         assert_eq!(event.slot, Some(2));
@@ -945,7 +1139,11 @@ mod log_file_tests {
         let line = "[16eac416a3014ec191173b9e95cc11a6] \x1b[2m2026-05-07T04:28:26.009013Z\x1b[0m \x1b[32mINFO\x1b[0m \x1b[1m\x1b[0m: received new header \x1b[3mrelay_id\x1b[0m\x1b[2m=\x1b[0m\"mux_helix\" \x1b[3mheader_size_bytes\x1b[0m\x1b[2m=\x1b[0m2891 \x1b[3mlatency\x1b[0m\x1b[2m=\x1b[0m6.1415ms \x1b[3mversion\x1b[0m\x1b[2m=\x1b[0mFulu \x1b[3mvalue_eth\x1b[0m\x1b[2m=\x1b[0m\"0.050439063999832000\" \x1b[2m\x1b[3mmethod\x1b[0m\x1b[2m=\x1b[0m/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey} \x1b[3mreq_id\x1b[0m\x1b[2m=\x1b[0m8e5020cb \x1b[3mslot\x1b[0m\x1b[2m=\x1b[0m521 \x1b[3mparent_hash\x1b[0m\x1b[2m=\x1b[0m0x969f22b3 \x1b[3mvalidator\x1b[0m\x1b[2m=\x1b[0m0x98213294\x1b[0m";
 
         let event = parse_cb_log_line(line).expect("should parse");
-        assert!(event.message.contains("received new header"), "message: {:?}", event.message);
+        assert!(
+            event.message.contains("received new header"),
+            "message: {:?}",
+            event.message
+        );
         assert_eq!(event.relay_id, Some("mux_helix".to_string()));
         assert_eq!(event.slot, Some(521));
     }
@@ -953,7 +1151,7 @@ mod log_file_tests {
     #[test]
     fn test_mux_event_filter() {
         // Test that the filter used in check_mux_routing matches parsed events
-        let lines = vec![
+        let lines = [
             "2026-05-07T04:28:26.004744Z DEBUG : using mux config mux_id=\"node_1_to_flashbots\" relays=1 pubkey=0x8ca49f0c slot=2 validator=0x8ca49f0c",
             "2026-05-07T04:28:26.009013Z INFO : received new header relay_id=\"mux_helix\" header_size_bytes=2891 slot=521 validator=0x98213294",
             "2026-05-07T04:28:26.011040Z INFO : auction winner relay_id=\"mux_helix\" value_eth=\"0.050439063999832000\" block_hash=0x15cd5f31 slot=521",
@@ -972,6 +1170,10 @@ mod log_file_tests {
             })
             .collect();
 
-        assert_eq!(mux_events.len(), 3, "3 of 4 events should be mux-related (not 'received header')");
+        assert_eq!(
+            mux_events.len(),
+            3,
+            "3 of 4 events should be mux-related (not 'received header')"
+        );
     }
 }

@@ -1,0 +1,163 @@
+# cb-basic: Single relay (helix) with default Commit-Boost config.
+#
+# Tests the core MEV pipeline through Commit-Boost with a single Helix
+# relay as the only relay endpoint.
+
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+
+additional_services:
+  - dora
+  - spamoor
+  - prometheus
+
+mev_type: custom
+
+mev_params:
+  mev_relay: helix
+  mev_sidecar: commit-boost
+  mev_builder: flashbots
+
+  helix_relay_image: ghcr.io/gattaca-com/helix-relay:main
+  mev_boost_image: commit-boost/commit-boost:kurtosis
+  mev_builder_image: ethpandaops/reth-rbuilder:develop
+  mev_builder_cl_image: sigp/lighthouse:latest
+
+  mev_builder_subsidy: 1
+
+  helix_relay_config: |
+    instance_id: "helix-kurtosis-test"
+
+    # NOTE: no network/genesis section. Current helix-relay:main removed the old
+    # `network_config: !Custom {dir_path, genesis_validator_root, genesis_time}`
+    # field entirely; the relay now fetches the chain spec + genesis from the
+    # beacon node at startup (GET eth/v1/config/spec + eth/v1/beacon/genesis, see
+    # beacon_client.get_chain_info -> main.rs load_chain_info). A `!Custom` YAML
+    # tag on that now-unknown key makes serde_yaml panic with
+    # "untagged and internally tagged enums do not support enum input".
+
+    postgres:
+      hostname: "{{ .POSTGRES_HOST_NAME }}"
+      port: {{ .POSTGRES_PORT }}
+      db_name: "{{ .POSTGRES_DB }}"
+      user: "{{ .POSTGRES_USER }}"
+      password: "{{ .POSTGRES_PASS }}"
+      region: 0
+      region_name: "LOCAL"
+
+    beacon_clients:
+      - url: "{{ .BEACON_URI }}"
+
+    gossip_payload_on_header: false
+
+    simulators:
+      - url: "{{ .BLOCKSIM_URI }}"
+        namespace: flashbots
+        is_merging_simulator: false
+        max_concurrent_tasks: 32
+
+    router_config:
+      enabled_routes:
+        - route: GetValidators
+        - route: SubmitBlock
+        - route: GetTopBid
+        - route: GetHeader
+          rate_limit:
+            replenish_ms: 50
+            burst_size: 20
+        - route: GetPayload
+        # The builder-spec v2 proposer route (submitBlindedBlockV2). REQUIRED for
+        # any CL that submits via v2 -- prysm does. Without it helix 404s
+        # /eth/v2/builder/blinded_blocks, CB (correctly) refuses to downgrade to v1
+        # (v2 semantics: the relay publishes the block, so a v1 payload would be
+        # silently dropped), returns 502, and EVERY builder block the proposer
+        # chose is lost. That read as "prysm can't do MEV" until the route list was
+        # checked -- see .agent/SWEEP-BACKLOG.md (Law 7 first dividend).
+        - route: GetPayloadV2
+        - route: HeaderStream
+        - route: RegisterValidators
+        - route: Status
+        - route: ProposerPayloadDelivered
+        - route: BuilderBidsReceived
+        - route: ValidatorRegistration
+      shutdown_delay_ms: 12000
+
+    timing_game_config:
+      max_header_delay_ms: 400
+      latest_header_delay_ms_in_slot: 1500
+      default_client_latency_ms: 50
+
+    target_get_payload_propagation_duration_ms: 500
+
+    is_submission_instance: true
+    is_registration_instance: true
+
+    admin_token: "test_admin_token"
+
+    logging:
+      type: Console
+
+    # CoresConfig (helix_common::config CoresConfig, 10 fields in current
+    # :main). The old block used `sub_workers: [0]` and omitted the per-tile
+    # core assignments; current :main removed sub_workers and added
+    # decoder/simulator/top_bid/data_gatherer/block_merging/housekeeper. The
+    # outer RelayConfigExt flattens RelayConfig, so a wrong/missing cores field
+    # surfaces as a top-level "missing field `decoder`" / "invalid type ...
+    # expected usize|sequence" serde error. Verified against the binary:
+    # `decoder` is Vec<usize> ([0]); the other five new tile fields are usize.
+    cores:
+      auctioneer: 0
+      tokio: [0]
+      reg_workers: [0]
+      tcp_bid_submissions_tile: 2
+      decoder: [0]
+      simulator: 0
+      top_bid: 0
+      data_gatherer: 0
+      block_merging: 0
+      housekeeper: 0
+
+    is_local_dev: false
+
+  commit_boost_config: |
+    chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }
+
+    [pbs]
+    host = "0.0.0.0"
+    port = {{ .Port }}
+    timeout_get_header_ms = 950
+    timeout_get_payload_ms = 4000
+    late_in_slot_time_ms = 2000
+
+
+    [metrics]
+    enabled = true
+    host = "0.0.0.0"
+    start_port = 9090
+
+    {{ range $index, $relay := .Relays }}
+    [[relays]]
+    id = "mev_relay_{{$index}}"
+    url = "{{ $relay }}"
+    {{- end }}
+
+    [logs.stdout]
+    level = "debug"
+
+    [logs.file]
+    enabled = false
+
+network_params:
+  network: kurtosis
+  network_id: "3151908"
+  deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
+  seconds_per_slot: 12
+  slot_duration_ms: 12000
+  num_validator_keys_per_node: 128
+  preregistered_validator_keys_mnemonic:
+    "giant issue aisle success illegal bike spike
+    question tent bar rely arctic volcano long crawl hungry vocal artwork sniff fantasy
+    very lucky have athlete"
+  prefunded_accounts: '{"0xb9e79d19f651a941757b35830232E7EFC77E1c79": {"balance": "100000ETH"}}'
+

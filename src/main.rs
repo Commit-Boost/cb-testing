@@ -3,23 +3,17 @@
 //! Discovers services in a running enclave, polls for readiness,
 //! runs verification checks, and produces a structured report.
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use eyre::Result;
 use tracing::{debug, error, info, warn};
 
-mod beacon;
-mod checks;
-mod discovery;
+// Shared modules now live in the library crate; health/live are private to this bin.
+use cb_testnet_verifier::{beacon, checks, discovery, metrics, relay, report};
+
 mod health;
 mod live;
-mod metrics;
-mod relay;
-mod report;
 
 use beacon::BeaconClient;
 use checks::{CheckResult, CheckStatus};
@@ -107,6 +101,18 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Fail the run when a tier-1 feature check armed a differential and then
+    /// observed nothing (Law 3).
+    ///
+    /// Off by default to preserve the documented exit contract (tier-1 WARN is
+    /// non-fatal). But that contract means a scenario can report "NOT asserting
+    /// the feature ran" and still exit 0, so a sweep counts a vacuous scenario as
+    /// a win. Turn this on in sweeps. It does NOT affect checks that are
+    /// structurally unable to confirm their feature, e.g. skip_sigverify on the
+    /// happy path.
+    #[arg(long)]
+    require_feature_proof: bool,
+
     /// Strict mode: promote soft warnings to FAIL. Affects:
     ///
     /// - get_header with zero 200s but some 204s (relay alive but no bids
@@ -174,9 +180,10 @@ async fn main() -> Result<()> {
 /// The enclave name is required. The config is optional and used for
 /// mux verification.
 fn resolve_enclave_and_config(cli: &Cli) -> Result<(String, Option<String>)> {
-    let enclave = cli.enclave.clone().ok_or_else(|| {
-        eyre::eyre!("Must provide --enclave to specify a running enclave")
-    })?;
+    let enclave = cli
+        .enclave
+        .clone()
+        .ok_or_else(|| eyre::eyre!("Must provide --enclave to specify a running enclave"))?;
     Ok((enclave, cli.config.clone()))
 }
 
@@ -233,7 +240,13 @@ async fn run_verification(cli: &Cli) -> i32 {
 
     // --show-logs mode: print raw CB PBS logs and exit
     if cli.show_logs {
-        return show_cb_logs(&enclave_name, &services.cb_service_names, &now, cli.json, &save_report);
+        return show_cb_logs(
+            &enclave_name,
+            &services.cb_service_names,
+            &now,
+            cli.json,
+            &save_report,
+        );
     }
 
     if relays.is_empty() {
@@ -261,7 +274,11 @@ async fn run_verification(cli: &Cli) -> i32 {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to get current slot: {e}");
-                let report = make_error_report(&enclave_name, &now, &format!("Failed to get current slot: {e}"));
+                let report = make_error_report(
+                    &enclave_name,
+                    &now,
+                    &format!("Failed to get current slot: {e}"),
+                );
                 report::print_report(&report, cli.json);
                 save_report(&report);
                 return 2;
@@ -315,9 +332,12 @@ async fn run_verification(cli: &Cli) -> i32 {
 
         let summary: Vec<String> = dead_at_preflight.iter().map(|(l, _)| l.clone()).collect();
 
-        // When ONLY relay targets are dead, try post-mortem: query the relay's
-        // Postgres directly. If the pipeline worked before the crash, Postgres
-        // still has the evidence. Salvage the verdict instead of hard-failing.
+        // When ONLY relay targets are dead, PROCEED to the observation window
+        // rather than bail: the relay checks handle dead relays and FAIL the
+        // tier-1 delivery check (all_relays_dead_results / C1), which is the
+        // correct verdict for a relay that died. (A flashbots-Postgres post-mortem
+        // salvage lived here; it hardcoded the mev-boost-relay's service/schema and
+        // was dead after the 2-helix migration — dropped, see M5.)
         let all_are_relays = dead_at_preflight
             .iter()
             .all(|(l, _)| l.starts_with("relay["));
@@ -326,46 +346,13 @@ async fn run_verification(cli: &Cli) -> i32 {
             .any(|(l, _)| l.starts_with("relay["));
 
         if all_are_relays && relay_died {
-            info!("Relay Data API unreachable — attempting post-mortem via Postgres...");
-            let postmortem = discovery::query_mev_relay_postgres(&enclave_name);
-            if !postmortem.is_empty() {
-                info!(
-                    "Post-mortem: found {} payload(s) in relay Postgres before crash:",
-                    postmortem.len()
-                );
-                for r in &postmortem {
-                    let hash_short = if r.block_hash.len() > 28 {
-                        &r.block_hash[..28]
-                    } else {
-                        &r.block_hash
-                    };
-                    info!("  slot={} hash={}... value={}", r.slot, hash_short, r.value);
-                }
-                info!(
-                    "Pipeline worked before relay crash. Proceeding with non-relay checks \
-                     (relay API checks will SKIP)."
-                );
-                // Fall through to Step 3 — wait for window. Relay checks
-                // will naturally SKIP because the relay URLs are unreachable.
-            } else {
-                error!("Post-mortem: no delivery records found in relay Postgres.");
-                let report = make_error_report(
-                    &enclave_name,
-                    &now,
-                    &format!(
-                        "Preflight failed ({} of {} services): {}. Relay API unreachable \
-                         and post-mortem Postgres query found no delivery records. \
-                         Try: kurtosis enclave inspect {} ; docker ps -a",
-                        dead_at_preflight.len(),
-                        targets.len(),
-                        summary.join(", "),
-                        &enclave_name
-                    ),
-                );
-                report::print_report(&report, cli.json);
-                save_report(&report);
-                return 2;
-            }
+            warn!(
+                "Relay(s) unreachable at preflight ({}). Non-relay services are up; proceeding to \
+                 the observation window — the relay checks report the failure \
+                 (relay.payloads_delivered_multi FAILs if they stay down).",
+                summary.join(", ")
+            );
+            // Fall through to Step 3.
         } else {
             error!(
                 "{} of {} service(s) unreachable: {:?}",
@@ -418,7 +405,10 @@ async fn run_verification(cli: &Cli) -> i32 {
         let report = make_error_report(
             &enclave_name,
             &now,
-            &format!("Chain did not reach slot {end_slot} within {}s", cli.timeout),
+            &format!(
+                "Chain did not reach slot {end_slot} within {}s",
+                cli.timeout
+            ),
         );
         report::print_report(&report, cli.json);
         save_report(&report);
@@ -487,6 +477,18 @@ async fn run_verification(cli: &Cli) -> i32 {
         .await,
     );
 
+    info!("Running best-bid (aggregated bidding) check...");
+    all_checks.push(
+        checks::best_bid::check_best_bid_selection(
+            &enclave_name,
+            &services.cb_service_names,
+            &relays,
+            window.start_slot,
+            window.end_slot,
+        )
+        .await,
+    );
+
     info!("Running CB metrics checks...");
     all_checks.extend(
         checks::cb_metrics::run_metrics_checks(
@@ -532,26 +534,99 @@ async fn run_verification(cli: &Cli) -> i32 {
         info!("No --cb-config provided — skipping MUX routing check");
     }
 
-    // Step 5: Report
-    let tier1_failed = all_checks
-        .iter()
-        .any(|c| c.tier == 1 && c.status == CheckStatus::Fail);
+    // Feature-fired assertions (Law 3): for each CB feature the config enables
+    // (skip_sigverify / extra_validation / timing_games), assert its codepath
+    // actually fired at runtime. Same config gate as mux.
+    if let Some(ref cb_path) = cb_config {
+        match checks::mux_routing::read_cb_config_template(cb_path) {
+            Ok(template) => {
+                all_checks.extend(
+                    checks::feature_fired::run_feature_checks(
+                        &enclave_name,
+                        &services.cb_service_names,
+                        &template,
+                    )
+                    .await,
+                );
+            }
+            Err(e) => {
+                warn!("Could not read CB config for feature-fired checks: {e}");
+            }
+        }
+    }
 
+    // Commit-Boost SIGNER module. Only runs when a cb-signer-* service was
+    // discovered, so every other scenario is unaffected.
+    //
+    // The assertion is deliberately the key COUNT over a JWT-authed
+    // get_pubkeys, not a /status probe: /status is an unconditional 200 with
+    // zero logic, so it stays green with no keys loaded - and zero-keys is this
+    // feature's most likely failure, since CB's keystore loaders skip
+    // unreadable entries with warn! rather than failing startup.
+    for signer_url in &services.signer_urls {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Must match the fork's signer_launcher defaults (CB_JWTS).
+        let module_id = "TEST_MODULE";
+        let module_jwt = "b3d1f5a4c8e2079b6d4f1a3c5e7b9d2f";
+        match checks::signer::fetch_pubkeys(&http_client, signer_url, module_id, module_jwt, now)
+            .await
+        {
+            Ok((200, Some(resp))) => {
+                all_checks.push(checks::signer::classify_signer_pubkeys(
+                    validator_pubkeys.len(),
+                    resp.keys.len(),
+                ));
+            }
+            Ok((status, _)) => {
+                all_checks.push(CheckResult::fail(
+                    "signer.pubkeys",
+                    1,
+                    format!(
+                        "signer at {signer_url} answered {status} to an authenticated                          get_pubkeys (expected 200)"
+                    ),
+                ));
+            }
+            Err(e) => {
+                all_checks.push(CheckResult::fail(
+                    "signer.pubkeys",
+                    1,
+                    format!("signer at {signer_url} unreachable: {e}"),
+                ));
+            }
+        }
+    }
+
+    // Best-effort provenance: WHAT was tested (config hash + resolved Docker
+    // image IDs). Never fails the run — docker unreachable or an unparseable
+    // config just yields None.
+    let provenance = report::gather_provenance(cb_config.as_deref());
+    if provenance.is_none() {
+        debug!(
+            "provenance unavailable (docker unreachable or config could not be parsed); \
+             continuing without it"
+        );
+    }
+
+    // Step 5: Report
     let report = VerificationReport {
         enclave: enclave_name.clone(),
         timestamp: now,
         observation_window: Some(window),
-        result: if tier1_failed {
+        result: if report::tier1_failed(&all_checks) {
             CheckStatus::Fail
         } else {
             CheckStatus::Pass
         },
         checks: all_checks,
+        provenance,
     };
 
     report::print_report(&report, cli.json);
     save_report(&report);
-    report::exit_code(&report)
+    report::exit_code_with_policy(&report, cli.require_feature_proof)
 }
 
 /// Poll the beacon node until the devnet is ready for verification.
@@ -577,7 +652,9 @@ async fn wait_for_slot(
     timeout: u64,
     live_opts: WaitLiveOpts<'_>,
 ) -> bool {
-    info!("Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)...");
+    info!(
+        "Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)..."
+    );
 
     let wait_start = Instant::now();
     let timeout_dur = Duration::from_secs(timeout);
@@ -638,7 +715,9 @@ async fn wait_for_slot(
                     }
                 },
                 None => {
-                    warn!("--live-metrics requested but metrics not HTTP-reachable; skipping live deltas");
+                    warn!(
+                        "--live-metrics requested but metrics not HTTP-reachable; skipping live deltas"
+                    );
                 }
             }
         }
@@ -662,9 +741,7 @@ async fn wait_for_slot(
             }
 
             // Live metrics: scrape, compute deltas vs previous, log.
-            if live_started
-                && let Some(url) = live_opts.metrics_url
-            {
+            if live_started && let Some(url) = live_opts.metrics_url {
                 match metrics::fetch_metrics(http, url).await {
                     Ok(curr) => {
                         let deltas =
@@ -700,7 +777,7 @@ fn show_cb_logs(
     json_mode: bool,
     save_report: &dyn Fn(&VerificationReport),
 ) -> i32 {
-    use crate::checks::mux_routing::{parse_cb_log_line, fetch_service_logs};
+    use crate::checks::mux_routing::{fetch_service_logs, parse_cb_log_line};
 
     println!("\n=== CB PBS Service Logs ===");
     println!("Enclave: {enclave_name}");
@@ -721,7 +798,14 @@ fn show_cb_logs(
                     total_events += 1;
                     if let Some(event) = parse_cb_log_line(line) {
                         parsed_events += 1;
-                        print!("  [{}] {}", event.message, event.slot.map(|s| format!("slot={}", s)).unwrap_or_default());
+                        print!(
+                            "  [{}] {}",
+                            event.message,
+                            event
+                                .slot
+                                .map(|s| format!("slot={}", s))
+                                .unwrap_or_default()
+                        );
                         if let Some(ref mux) = event.mux_id {
                             print!(" mux={}", mux);
                         }
@@ -746,7 +830,10 @@ fn show_cb_logs(
         }
     }
 
-    println!("\nTotal: {} log lines, {} parsed successfully", total_events, parsed_events);
+    println!(
+        "\nTotal: {} log lines, {} parsed successfully",
+        total_events, parsed_events
+    );
 
     let report = VerificationReport {
         enclave: enclave_name.to_string(),
@@ -756,8 +843,13 @@ fn show_cb_logs(
         checks: vec![CheckResult::pass(
             "logs",
             1,
-            format!("Fetched {} log lines from {} service(s)", total_events, cb_service_names.len()),
+            format!(
+                "Fetched {} log lines from {} service(s)",
+                total_events,
+                cb_service_names.len()
+            ),
         )],
+        provenance: None,
     };
     report::print_report(&report, json_mode);
     save_report(&report);
@@ -771,5 +863,6 @@ fn make_error_report(enclave: &str, timestamp: &str, detail: &str) -> Verificati
         observation_window: None,
         result: CheckStatus::Fail,
         checks: vec![CheckResult::fail("setup", 1, detail)],
+        provenance: None,
     }
 }

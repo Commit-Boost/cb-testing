@@ -1,0 +1,11 @@
+2026-07-30T10:05:00.001Z INFO helix_relay: starting up
+2026-07-30T10:05:00.400Z INFO helix_relay: connected to beacon node
+thread 'main' panicked at crates/common/src/chain_info.rs:63:26:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic
+   2: helix_common::chain_info::ChainInfo::current_slot
+   3: helix_housekeeper::HousekeeperTile::new
+   4: helix_relay::main

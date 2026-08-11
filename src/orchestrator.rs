@@ -16,7 +16,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use eyre::{bail, Context, Result};
+use eyre::{Context, Result, bail};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -87,29 +87,11 @@ struct Cli {
 // Types
 // ---------------------------------------------------------------------------
 
-/// The lifecycle state of a single enclave run.
-#[derive(Debug, Clone, PartialEq)]
-enum EnclaveState {
-    /// `kurtosis run` has been launched, waiting for containers to start.
-    Launching,
-    /// Containers are up, waiting for beacon to reach target_epoch.
-    WaitingForReadiness,
-    /// Beacon is ready, observing for min_epochs.
-    Observing,
-    /// Running cb-verify checks.
-    Checking,
-    /// All checks complete.
-    Done,
-    /// Failed at some point.
-    Failed(String),
-}
-
 /// Per-enclave status tracked by the orchestrator.
 #[derive(Debug, Clone)]
 struct EnclaveStatus {
     name: String,
     config: PathBuf,
-    state: EnclaveState,
     /// Set when the enclave process has been launched.
     launched_at: Option<Instant>,
     /// Set when the enclave becomes ready for observation.
@@ -190,7 +172,6 @@ async fn main() -> Result<()> {
             EnclaveStatus {
                 name,
                 config: config.clone(),
-                state: EnclaveState::Launching,
                 launched_at: None,
                 ready_at: None,
                 observed_at: None,
@@ -252,10 +233,7 @@ async fn main() -> Result<()> {
             Ok((idx, result)) => results.push((idx, result)),
             Err(e) => {
                 error!("Task panicked: {e}");
-                results.push((
-                    usize::MAX,
-                    Err(eyre::eyre!("Task panicked: {e}")),
-                ));
+                results.push((usize::MAX, Err(eyre::eyre!("Task panicked: {e}"))));
             }
         }
     }
@@ -345,6 +323,9 @@ async fn main() -> Result<()> {
 // Per-enclave pipeline
 // ---------------------------------------------------------------------------
 
+// Launcher fn: threading these as individual params reads clearer than a
+// bespoke options struct that exists only for this one call site.
+#[allow(clippy::too_many_arguments)]
 async fn run_enclave_pipeline(
     mut enc: EnclaveStatus,
     package: &str,
@@ -360,53 +341,61 @@ async fn run_enclave_pipeline(
     let start = Instant::now();
 
     // Phase 1: Launch
-    info!("[{}] Launching enclave with config {}...", enc.name, enc.config.display());
-    enc.state = EnclaveState::Launching;
+    info!(
+        "[{}] Launching enclave with config {}...",
+        enc.name,
+        enc.config.display()
+    );
     enc.launched_at = Some(Instant::now());
 
     if let Err(e) = launch_enclave(&enc.name, &enc.config, package).await {
         let msg = format!("Launch failed: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
         // Try to clean up
-        if !keep { let _ = teardown_enclave(&enc.name); }
+        if !keep {
+            let _ = teardown_enclave(&enc.name);
+        }
         bail!(msg);
     }
 
     // Phase 2: Wait for readiness
-    info!("[{}] Waiting for readiness (target epoch {target_epoch})...", enc.name);
-    enc.state = EnclaveState::WaitingForReadiness;
+    info!(
+        "[{}] Waiting for readiness (target epoch {target_epoch})...",
+        enc.name
+    );
 
     if let Err(e) = wait_for_enclave_readiness(&enc.name, target_epoch, timeout).await {
         let msg = format!("Readiness timeout: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
-        if !keep { let _ = teardown_enclave(&enc.name); }
+        if !keep {
+            let _ = teardown_enclave(&enc.name);
+        }
         bail!(msg);
     }
     enc.ready_at = Some(Instant::now());
     info!(
         "[{}] Enclave ready after {:?}",
         enc.name,
-        enc.ready_at.unwrap().duration_since(enc.launched_at.unwrap())
+        enc.ready_at
+            .unwrap()
+            .duration_since(enc.launched_at.unwrap())
     );
 
     // Phase 3: Observe
     info!("[{}] Observing for {min_epochs} epoch(s)...", enc.name);
-    enc.state = EnclaveState::Observing;
 
     if let Err(e) = observe_enclave(&enc.name, min_epochs, target_epoch).await {
         let msg = format!("Observation failed: {e}");
         error!("[{}] {}", enc.name, msg);
-        enc.state = EnclaveState::Failed(msg.clone());
-        if !keep { let _ = teardown_enclave(&enc.name); }
+        if !keep {
+            let _ = teardown_enclave(&enc.name);
+        }
         bail!(msg);
     }
     enc.observed_at = Some(Instant::now());
 
     // Phase 4: Run checks
     info!("[{}] Running checks...", enc.name);
-    enc.state = EnclaveState::Checking;
 
     let check_result = run_checks(
         &enc.name,
@@ -424,13 +413,16 @@ async fn run_enclave_pipeline(
         Ok(summary) => {
             let result_str = summary.result.clone();
             enc.check_result = Some(summary);
-            enc.state = EnclaveState::Done;
-            info!("[{}] Checks complete: {} (total {:?})", enc.name, result_str, enc.checked_at.unwrap().duration_since(start));
+            info!(
+                "[{}] Checks complete: {} (total {:?})",
+                enc.name,
+                result_str,
+                enc.checked_at.unwrap().duration_since(start)
+            );
         }
         Err(e) => {
             let msg = format!("Check execution failed: {e}");
             error!("[{}] {}", enc.name, msg);
-            enc.state = EnclaveState::Failed(msg);
         }
     }
 
@@ -502,24 +494,23 @@ async fn wait_for_enclave_readiness(
         let url = format!("{beacon_url}/eth/v1/beacon/headers/head");
         match client.get(&url).send().await {
             Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(slot) = json
+                if let Ok(json) = resp.json::<serde_json::Value>().await
+                    && let Some(slot) = json
                         .get("data")
                         .and_then(|d| d.get("header"))
                         .and_then(|h| h.get("message"))
                         .and_then(|m| m.get("slot"))
                         .and_then(|s| s.as_str())
                         .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        let epoch = slot / 32;
-                        if epoch >= target_epoch {
-                            return Ok(());
-                        }
-                        tracing::debug!(
-                            "[{}] Beacon at epoch {epoch}, waiting for {target_epoch}...",
-                            name
-                        );
+                {
+                    let epoch = slot / 32;
+                    if epoch >= target_epoch {
+                        return Ok(());
                     }
+                    tracing::debug!(
+                        "[{}] Beacon at epoch {epoch}, waiting for {target_epoch}...",
+                        name
+                    );
                 }
             }
             Err(e) => {
@@ -561,20 +552,21 @@ async fn observe_enclave(name: &str, min_epochs: u64, target_epoch: u64) -> Resu
         let url = format!("{beacon_url}/eth/v1/beacon/headers/head");
         match client.get(&url).send().await {
             Ok(resp) => {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    if let Some(slot) = json
+                if let Ok(json) = resp.json::<serde_json::Value>().await
+                    && let Some(slot) = json
                         .get("data")
                         .and_then(|d| d.get("header"))
                         .and_then(|h| h.get("message"))
                         .and_then(|m| m.get("slot"))
                         .and_then(|s| s.as_str())
                         .and_then(|s| s.parse::<u64>().ok())
-                    {
-                        if slot >= target_slot {
-                            info!("[{}] Observation complete: slot {start_slot} -> {slot}", name);
-                            return Ok(());
-                        }
-                    }
+                    && slot >= target_slot
+                {
+                    info!(
+                        "[{}] Observation complete: slot {start_slot} -> {slot}",
+                        name
+                    );
+                    return Ok(());
                 }
             }
             Err(e) => {
@@ -602,12 +594,15 @@ async fn run_checks(
     let binary_path = manifest_path.join("target/release/cb-verify");
 
     if !binary_path.exists() {
-        bail!("cb-verify binary not found at {}. Run 'cargo build --release' first.", binary_path.display());
+        bail!(
+            "cb-verify binary not found at {}. Run 'cargo build --release' first.",
+            binary_path.display()
+        );
     }
 
     let mut cmd = tokio::process::Command::new(&binary_path);
     cmd.arg("--enclave").arg(name);
-    cmd.arg("--cb-config").arg(config);
+    cmd.arg("--config").arg(config);
     cmd.arg("--json");
     cmd.arg("--timeout").arg("3600");
     cmd.arg("--min-epochs").arg("0"); // Already observed
@@ -626,10 +621,7 @@ async fn run_checks(
         cmd.arg("-v");
     }
 
-    let output = cmd
-        .output()
-        .await
-        .wrap_err("Failed to run cb-verify")?;
+    let output = cmd.output().await.wrap_err("Failed to run cb-verify")?;
 
     // Parse the JSON report from stdout
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -641,8 +633,8 @@ async fn run_checks(
         .unwrap_or(0);
     let json_str = &stdout[json_start..];
 
-    let report: serde_json::Value = serde_json::from_str(json_str)
-        .wrap_err("Failed to parse cb-verify JSON output")?;
+    let report: serde_json::Value =
+        serde_json::from_str(json_str).wrap_err("Failed to parse cb-verify JSON output")?;
 
     let result = report
         .get("result")
@@ -707,7 +699,13 @@ fn teardown_enclave(name: &str) -> Result<()> {
 /// Discover the beacon HTTP URL for an enclave by querying kurtosis port print.
 async fn discover_beacon_url(enclave: &str) -> Result<String> {
     // Try common beacon service names
-    let beacon_names = ["cl-1-lighthouse", "cl-1-prysm", "cl-1-teku", "cl-1-nimbus", "cl-1-lodestar"];
+    let beacon_names = [
+        "cl-1-lighthouse",
+        "cl-1-prysm",
+        "cl-1-teku",
+        "cl-1-nimbus",
+        "cl-1-lodestar",
+    ];
 
     for name_prefix in &beacon_names {
         // Try to find the full service name
@@ -748,8 +746,9 @@ async fn discover_beacon_url(enclave: &str) -> Result<String> {
                             .output()
                             .await;
                         if let Ok(port_out2) = port_output2 {
-                            let url2 =
-                                String::from_utf8_lossy(&port_out2.stdout).trim().to_string();
+                            let url2 = String::from_utf8_lossy(&port_out2.stdout)
+                                .trim()
+                                .to_string();
                             if !url2.is_empty() {
                                 return Ok(url2);
                             }
@@ -831,22 +830,10 @@ fn print_batch_summary(batch: &BatchReport) {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║                    Batch Verification Report                ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!(
-        "║  Time:     {:48} ║",
-        batch.timestamp
-    );
-    println!(
-        "║  Total:    {:48} ║",
-        batch.total
-    );
-    println!(
-        "║  Passed:   {:48} ║",
-        batch.passed.to_string().green()
-    );
-    println!(
-        "║  Failed:   {:48} ║",
-        batch.failed.to_string().red()
-    );
+    println!("║  Time:     {:48} ║", batch.timestamp);
+    println!("║  Total:    {:48} ║", batch.total);
+    println!("║  Passed:   {:48} ║", batch.passed.to_string().green());
+    println!("║  Failed:   {:48} ║", batch.failed.to_string().red());
     println!("╠══════════════════════════════════════════════════════════════╣");
 
     for result in &batch.results {
@@ -861,7 +848,13 @@ fn print_batch_summary(batch: &BatchReport) {
             .unwrap_or(&result.config);
         println!(
             "║  {} {:20}  {:6}  ({}p / {}f / {}w / {}s)  ║",
-            status_icon, name, result.result, result.passed, result.failed, result.warnings, result.skipped
+            status_icon,
+            name,
+            result.result,
+            result.passed,
+            result.failed,
+            result.warnings,
+            result.skipped
         );
     }
 

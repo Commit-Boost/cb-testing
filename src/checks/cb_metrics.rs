@@ -17,7 +17,14 @@
 //! |                        | 202           | v2 path: relay publishes unblinded block itself   |
 //! | `status`, `reload`     | 200           | Endpoint alive / reload succeeded                 |
 //!
-//! 4xx = client bug. 5xx = relay or CB internal failure.
+//! 4xx = client bug. 5xx = relay or CB internal failure. 555 = NOT an HTTP
+//! response at all: CB's synthetic client-side timeout marker (commit-boost
+//! `constants.rs` `TIMEOUT_ERROR_CODE`), incremented when CB cancels its own
+//! request at its deadline. It gets its own `timeout` bucket — counting it as
+//! relay 5xx made the timing-games scenario (which cancels late polls at the
+//! 400ms budget BY DESIGN) tier-1-fail a run whose relays served zero errors
+//! (live-confirmed 2026-08-03: raw counter 200x48/204x6/400x4/555x42, zero
+//! real 5xx in helix logs).
 //!
 //! # Output shape
 //!
@@ -32,6 +39,17 @@ use crate::checks::{CheckResult, CheckStatus};
 use crate::metrics;
 
 const METRICS_PORT: u16 = 9090;
+
+/// A relay/CB-to-relay 5xx FRACTION above this fails the matrix check; at or below
+/// it, a nonzero 5xx count is a transient WARN (warmup noise). See classify_endpoint
+/// (the H2 warmup-5xx false-red fix). `--strict` ignores this and fails on any 5xx.
+const MAX_5XX_RATE: f64 = 0.25;
+
+/// A CB client-side timeout (code 555) FRACTION above this WARNs — high timeout
+/// rates are either an aggressive timing config (timing-games cancels late polls
+/// at its budget by design) or a slow relay, both worth surfacing. Never FAIL:
+/// a 555 is CB's own deadline policy firing, not a relay-served error.
+const MAX_TIMEOUT_RATE: f64 = 0.25;
 
 /// Status-code counts for a single endpoint, split by observation side.
 ///
@@ -130,6 +148,16 @@ impl EndpointStats {
 fn bucket_code(code: &str) -> String {
     match code {
         "200" | "202" | "204" => code.to_string(),
+        // CB's synthetic client-side timeout marker (TIMEOUT_ERROR_CODE = 555).
+        // Not a relay-served status — MUST NOT land in the 5xx bucket, or a
+        // designed deadline-cancellation counts as a relay failure.
+        "555" => "timeout".to_string(),
+        // CB's synthetic transport-error marker (TRANSPORT_ERROR_CODE = 556,
+        // introduced with WS get_header streaming: connect refused / dns / tls
+        // / stream broke mid-window). Also client-observed, not relay-served —
+        // must not count toward the relay 5xx error rate. Relay reachability
+        // has its own tier-1 owner (the relay_pipeline death checks).
+        "556" => "transport".to_string(),
         c if c.starts_with('4') && c.len() == 3 => "4xx".to_string(),
         c if c.starts_with('5') && c.len() == 3 => "5xx".to_string(),
         _ => "other".to_string(),
@@ -220,27 +248,113 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     let r204 = stats.relay_get("204");
     let r4xx = stats.relay_get("4xx");
     let r5xx = stats.relay_get("5xx");
+    let rtimeout = stats.relay_get("timeout");
+    let rtransport = stats.relay_get("transport");
     let b5xx = stats.beacon_get("5xx");
 
-    // Relay 5xx always fails. No warnings here -- this is the relay or the
-    // network between CB and relay actually breaking.
+    // Relay 5xx handling (H2 fix). These are absolute CUMULATIVE counters that
+    // include the pre/early-window warmup phase, where a handful of 5xx are normal
+    // (relays/builders not yet ready). FAILing on any 5xx > 0 made a genuinely
+    // healthy run red. Classify on the 5xx RATE instead: a materially broken
+    // relay/CB-to-relay link produces a high fraction of 5xx (FAIL); a few 5xx
+    // against many good requests is transient warmup (WARN, surfaced but non-fatal).
+    // `--strict` still promotes the transient case to FAIL for zero-tolerance CI.
+    // submit_blinded_block is judged on the BEACON side, not the relay side.
+    // CB asks EVERY configured relay for the payload, but only the relay that
+    // won the auction has it - the others answer 4xx/5xx by construction, and
+    // that is not a pipeline failure. Measured on a healthy 2-relay run where
+    // one relay wins every auction by design (divergent subsidies):
+    //   mev_relay_0 (always loses): 202x1,   4xx x219, 5xx x185
+    //   mev_relay_1 (always wins):  202x219, 4xx x1,   5xx x1
+    //   beacon side:                202x220  <- CB served the CL every time
+    // The relay-side rate was 29.7% and FAILED a run that delivered 65/65
+    // payloads with 100% MEV rate and 0 missed slots. The beacon side is the
+    // signal that actually matters: did the proposer get its payload? It also
+    // still catches the real failure - on the nethermind+prysm run the beacon
+    // side was 26x 5xx (CB returning 502 to the CL), which must FAIL.
+    if endpoint == "submit_blinded_block" && stats.beacon_totals.values().sum::<f64>() > 0.0 {
+        return classify_submit_blinded_block_beacon_side(id, tier, stats, data);
+    }
+
     if r5xx > 0.0 {
-        return CheckResult::fail(
+        // Timeouts (555) are deliberately EXCLUDED from this denominator: the
+        // 5xx rate is "fraction of COMPLETED relay responses that were errors",
+        // so a real 5xx storm still FAILs even amid heavy timeout polling.
+        let total = r200 + r202 + r204 + r4xx + r5xx;
+        let rate = if total > 0.0 { r5xx / total } else { 1.0 };
+        let pct = rate * 100.0;
+        if rate > MAX_5XX_RATE || strict {
+            return CheckResult::fail(
+                id,
+                tier,
+                format!(
+                    "{endpoint}: {r5xx:.0}/{total:.0} 5xx ({pct:.1}%) from relay(s) -- relay or \
+                     CB-to-relay failure (>{:.0}% threshold{})",
+                    MAX_5XX_RATE * 100.0,
+                    if strict { ", --strict" } else { "" }
+                ),
+            )
+            .with_data(data);
+        }
+        return CheckResult::warn(
             id,
             tier,
-            format!("{endpoint}: {r5xx:.0} 5xx from relay(s) -- relay or CB-to-relay failure"),
+            format!(
+                "{endpoint}: {r5xx:.0}/{total:.0} transient 5xx ({pct:.1}%) -- likely warmup, below \
+                 the {:.0}% FAIL threshold",
+                MAX_5XX_RATE * 100.0
+            ),
         )
         .with_data(data);
+    }
+
+    // CB client-side synthetic codes: 555 (deadline timeout) and 556 (WS
+    // transport error). A high rate of either is surfaced as WARN — 555 means
+    // an aggressive timing config cancelling late polls by design
+    // (timing-games) or a slow relay; 556 means the stream relay is
+    // unreachable/breaking (relay reachability's FAIL owner is the tier-1
+    // relay_pipeline death check, not this matrix). Never FAIL here, and never
+    // under --strict either: neither is a relay-served pipeline error. Below
+    // the threshold, fall through to normal classification (the counts stay
+    // visible in `data`).
+    let rsynthetic = rtimeout + rtransport;
+    if rsynthetic > 0.0 {
+        let completed = r200 + r202 + r204 + r4xx + r5xx;
+        let rate = rsynthetic / (completed + rsynthetic);
+        if rate > MAX_TIMEOUT_RATE {
+            let pct = rate * 100.0;
+            return CheckResult::warn(
+                id,
+                tier,
+                format!(
+                    "{endpoint}: {rsynthetic:.0}/{:.0} CB client-side failures ({pct:.1}%: \
+                     {rtimeout:.0} deadline timeouts (555), {rtransport:.0} ws transport errors \
+                     (556)) -- not relay-served errors ({r200:.0} bids still delivered). 555 = \
+                     aggressive timing config or slow relay; 556 = stream relay \
+                     unreachable/breaking (relay death is the tier-1 relay checks' call)",
+                    completed + rsynthetic
+                ),
+            )
+            .with_data(data);
+        }
     }
 
     match endpoint {
         "get_header" => {
             if r200 > 0.0 {
+                let mut timeout_note = if rtimeout > 0.0 {
+                    format!(", {rtimeout:.0} CB-deadline timeout (555)")
+                } else {
+                    String::new()
+                };
+                if rtransport > 0.0 {
+                    timeout_note.push_str(&format!(", {rtransport:.0} ws transport error (556)"));
+                }
                 CheckResult::pass(
                     id,
                     tier,
                     format!(
-                        "get_header: {r200:.0} bids delivered, {r204:.0} no-bid (204), {r4xx:.0} 4xx"
+                        "get_header: {r200:.0} bids delivered, {r204:.0} no-bid (204), {r4xx:.0} 4xx{timeout_note}"
                     ),
                 )
                 .with_data(data)
@@ -329,8 +443,22 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
                     ),
                 )
                 .with_data(data)
+            } else if r4xx > 0.0 {
+                // The proposer DID choose builder blocks — the relay refused
+                // them. Diagnosing this as "proposer never chose" (which the
+                // old 200+202==0 branch did) sends an operator to the wrong
+                // component entirely. Found live on the nethermind+prysm pair
+                // (2026-08-04): 26 blinded blocks forwarded, 26 relay 4xx.
+                CheckResult::fail(
+                    id,
+                    tier,
+                    format!(
+                        "submit_blinded_block: the relay REJECTED all {r4xx:.0} blinded block(s)                          the proposer submitted (0 deliveries, {r4xx:.0} 4xx from relay) -- the                          proposer DID choose builder blocks; the break is relay-side (block                          invalid/late/unsigned as the relay sees it), not proposer-side"
+                    ),
+                )
+                .with_data(data)
             } else {
-                let msg = "submit_blinded_block: 0 deliveries (200+202=0); proposer never chose a builder block. Pass --strict to treat as failure".to_string();
+                let msg = "submit_blinded_block: 0 deliveries and 0 submissions -- the proposer never chose a builder block. Pass --strict to treat as failure".to_string();
                 if strict {
                     CheckResult::fail(id, tier, msg.replace("Pass --strict ", "(--strict) "))
                         .with_data(data)
@@ -351,23 +479,107 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     }
 }
 
-/// Check the v2 -> v1 fallback counter.
+/// Verdict for `submit_blinded_block` from the BEACON side: what CB returned to
+/// the consensus client. Delivered means the proposer got its payload.
 ///
-/// `cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id}` ticks when CB
-/// tried the v2 endpoint and got 404, falling back to v1. A non-zero value
-/// means the relay is behind on the builder-specs v2 upgrade.
+/// Relay-side codes are reported as diagnostic context but never gate the
+/// verdict - see the call site for why (losing relays error by construction).
+fn classify_submit_blinded_block_beacon_side(
+    id: String,
+    tier: u8,
+    stats: &EndpointStats,
+    data: serde_json::Value,
+) -> CheckResult {
+    let b200 = stats.beacon_get("200");
+    let b202 = stats.beacon_get("202");
+    let b4xx = stats.beacon_get("4xx");
+    let b5xx = stats.beacon_get("5xx");
+    let delivered = b200 + b202;
+    let relay_5xx = stats.relay_get("5xx");
+    let relay_4xx = stats.relay_get("4xx");
+    let ctx = format!(
+        "(relay-side {relay_4xx:.0} 4xx / {relay_5xx:.0} 5xx are the non-winning relays, expected)"
+    );
+
+    if b5xx > 0.0 {
+        return CheckResult::fail(
+            id,
+            tier,
+            format!(
+                "submit_blinded_block: CB returned {b5xx:.0} 5xx to the beacon node - the proposer \
+                 did NOT get its payload for those slots ({delivered:.0} delivered) {ctx}"
+            ),
+        )
+        .with_data(data);
+    }
+    if delivered > 0.0 {
+        return CheckResult::pass(
+            id,
+            tier,
+            format!(
+                "submit_blinded_block: {delivered:.0} payload(s) served to the beacon node \
+                 ({b200:.0} v1 200, {b202:.0} v2 202), 0 failures {ctx}"
+            ),
+        )
+        .with_data(data);
+    }
+    CheckResult::warn(
+        id,
+        tier,
+        format!(
+            "submit_blinded_block: 0 payloads served to the beacon node ({b4xx:.0} 4xx) - the \
+             proposer never chose a builder block {ctx}"
+        ),
+    )
+    .with_data(data)
+}
+
+/// The EXPOSED name of CB's v2-unsupported counter.
 ///
-/// Missing counter == zero fallbacks == PASS. (Prometheus doesn't emit
-/// counter families that never incremented, so absence is the success case.)
+/// Note the doubled `pbs_`: the PBS registry is `Registry::new_custom(Some(
+/// "cb_pbs"))`, which prefixes every metric, and this counter is *registered*
+/// as `pbs_submit_block_v2_unsupported_total` - unlike its siblings, which are
+/// registered bare (`relay_status_code_total` -> `cb_pbs_relay_status_code_total`).
+const V2_UNSUPPORTED_METRIC: &str = "cb_pbs_pbs_submit_block_v2_unsupported_total";
+
+/// Check the v2-unsupported counter: v2 submissions a relay could not serve.
 ///
-/// Always WARN (never FAIL): this is infrastructure drift, not a pipeline
-/// failure. Strict mode doesn't change it because the v1 fallback still works.
-pub fn check_v2_fallback(scrape: &Scrape) -> CheckResult {
-    let id = "cb_v2_fallback";
+/// `pbs_submit_block_v2_unsupported_total{relay_id}` ticks when a relay 404s
+/// the v2 `submit_block` route. CB deliberately does NOT downgrade to v1 there
+/// (in v2 the relay publishes the block after an empty 202, so a v1 payload
+/// would be silently dropped by the beacon node) — it fails the submission.
+///
+/// This is FATAL to the MEV pipeline for any CL that submits via v2: every
+/// builder block that proposer chooses is lost, and the slot is typically
+/// missed. Found live on nethermind+prysm (2026-08-04): prysm submits to
+/// `/eth/v2/builder/blinded_blocks` at ~256ms into the slot, helix 404s the v2
+/// route, CB returns 502, and 11 v2-unsupported events lined up with 11 missed
+/// slots. Lighthouse never triggers it because it submits via v1 — the exact
+/// class of client-pair-specific break Law 7 exists to surface.
+///
+/// ROOT CAUSE THAT TIME WAS OUR OWN CONFIG, not a helix limitation: helix has a
+/// `GetPayloadV2` route and our generated `router_config.enabled_routes` listed
+/// only `GetPayload`. Read a 404 on the v2 route as "v2 is DISABLED at the
+/// relay" first, and "the relay cannot do v2" only after the route list has
+/// actually been checked.
+///
+/// Missing counter == zero == PASS (Prometheus omits never-incremented
+/// families). Tier 2 -> escalated to tier 1 on FAIL by the caller, like the
+/// matrix checks: a relay that cannot serve the proposer's submissions is a
+/// real pipeline failure, not an annotation.
+///
+/// **The metric name has a doubled `pbs_`** (see [`V2_UNSUPPORTED_METRIC`]).
+/// Matching CB's *registered* name instead of its *exposed* name made this
+/// check structurally unable to fire: it reported PASS on a run where CB had
+/// logged 11 v2-unsupported events, and that false PASS was read as evidence
+/// that a relay-route fix had worked. Verify metric names against a real
+/// scrape, never against the registration constant in CB's source.
+pub fn check_v2_unsupported(scrape: &Scrape) -> CheckResult {
+    let id = "cb_relay_v2_unsupported";
 
     let mut by_relay: BTreeMap<String, f64> = BTreeMap::new();
     for s in &scrape.samples {
-        if s.metric != "cb_pbs_submit_block_v2_fallback_to_v1_total" {
+        if s.metric != V2_UNSUPPORTED_METRIC {
             continue;
         }
         let relay = s
@@ -388,20 +600,45 @@ pub fn check_v2_fallback(scrape: &Scrape) -> CheckResult {
     let data = serde_json::json!({ "by_relay": by_relay, "total": total as u64 });
 
     if total == 0.0 {
-        // Covers both "counter exists and equals 0" and "counter missing
-        // (never incremented)". Prometheus suppresses counter families with
-        // no observations, so missing == zero.
-        CheckResult::pass(id, 2, "No v2->v1 fallbacks (relays support v2)").with_data(data)
+        CheckResult::pass(id, 2, "No v2-unsupported submissions").with_data(data)
     } else {
-        CheckResult::warn(
+        let relays: Vec<&str> = by_relay.keys().map(|s| s.as_str()).collect();
+        CheckResult::fail(
             id,
             2,
             format!(
-                "{total:.0} v2 submits fell back to v1; at least one relay doesn't support submitBlindedBlockV2"
+                "{total:.0} v2 submit_block(s) LOST: relay(s) {} 404 the v2 route and CB will not                  downgrade to v1 (v2 = the relay publishes the block; a v1 payload would be                  silently dropped). Every builder block the proposer chose was lost -- expect                  missed slots. CHECK THE RELAY ROUTE CONFIG FIRST: helix has a GetPayloadV2                  route that must be listed in router_config.enabled_routes -- a 404 here                  usually means v2 is merely DISABLED, not unsupported",
+                relays.join(", ")
             ),
         )
         .with_data(data)
     }
+}
+
+/// Check the v2 -> v1 fallback counter.
+///
+/// **This check is INERT and reports SKIP.** It reads
+/// `cb_pbs_submit_block_v2_fallback_to_v1_total`, and no such counter exists in
+/// commit-boost: nothing named `*fallback*` is registered anywhere in
+/// `crates/pbs/src/metrics.rs`. Because the check treated "counter absent" as
+/// "zero fallbacks == PASS", it returned PASS on every run since it was written:
+/// a check that cannot fail, which is worse than no check, and which also
+/// claimed "relays support v2" on a run where the relay was 404ing v2.
+///
+/// It is kept (rather than deleted) as a SKIP so the id stays in the report and
+/// the reason travels with it. CB does NOT downgrade v2 -> v1 on a 404 by
+/// design (v2 semantics: the relay publishes the block, so a v1 payload would
+/// be silently dropped) - it fails loud and increments the v2-UNSUPPORTED
+/// counter instead, which is what [`check_v2_unsupported`] reads. If a real
+/// fallback counter ever lands, restore the logic and re-point the name.
+pub fn check_v2_fallback(scrape: &Scrape) -> CheckResult {
+    let _ = scrape;
+    CheckResult::skip(
+        "cb_v2_fallback",
+        2,
+        "inert: commit-boost registers no v2->v1 fallback counter, so this check could only ever \
+         PASS. Relay v2 support is owned by cb_relay_v2_unsupported",
+    )
 }
 
 /// Standard Prometheus-style histogram_quantile: find bucket where cumulative
@@ -629,13 +866,18 @@ fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
         .collect();
 
     out.push(check_v2_fallback(scrape));
+    out.push(check_v2_unsupported(scrape));
     out.push(check_relay_latency(scrape, 500.0));
 
     // Tier-1 escalation: any matrix FAIL (from 5xx) should fail the overall
     // run. The matrix checks are tier 2, but 5xx is a real pipeline failure
-    // -- escalate it to tier 1 so report::exit_code sees it.
+    // -- escalate it to tier 1 so report::exit_code sees it. The same applies
+    // to v2-unsupported: every builder block the proposer chose was LOST, which
+    // is at least as fatal as a 5xx.
     for c in out.iter_mut() {
-        if c.status == CheckStatus::Fail && c.id.ends_with("_matrix") {
+        if c.status == CheckStatus::Fail
+            && (c.id.ends_with("_matrix") || c.id == "cb_relay_v2_unsupported")
+        {
             c.tier = 1;
         }
     }
@@ -647,9 +889,51 @@ fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
 mod tests {
     use super::*;
 
+    /// Shorthand: the endpoint's own classifier via the public entry point.
+    fn classify_submit_blinded_block(s: &EndpointStats) -> CheckResult {
+        classify_endpoint("submit_blinded_block", s, false)
+    }
+
     fn parse(text: &str) -> Scrape {
         let lines = text.lines().map(|l| Ok(l.to_owned()));
         Scrape::parse(lines).expect("valid prometheus text")
+    }
+
+    /// Every commit-boost metric name these checks depend on, and how it is
+    /// derived. Audited end-to-end on 2026-08-04 after TWO checks were found
+    /// reading names that could never exist.
+    ///
+    /// The rule: CB builds its registries with `Registry::new_custom(Some(..))`,
+    /// which prefixes EVERY metric at gather time. Most PBS metrics are
+    /// registered bare (`relay_status_code_total` -> `cb_pbs_relay_status_code_total`),
+    /// but two carry their own prefix and therefore end up DOUBLED:
+    ///   `cb_pbs`    + `pbs_submit_block_v2_unsupported_total`
+    ///                 -> cb_pbs_pbs_submit_block_v2_unsupported_total
+    ///   `cb_signer` + `signer_status_code_total`
+    ///                 -> cb_signer_signer_status_code_total   (not read yet -
+    ///                    remember this if a signer metrics check is ever added)
+    ///
+    /// This test pins the names so an "obvious tidy-up" of the doubled prefix
+    /// breaks loudly instead of silently disabling a check. It cannot detect a
+    /// rename on CB's side - only a real scrape can, which is why the rule is:
+    /// verify metric names against a scrape, never against CB's source constant.
+    #[test]
+    fn metric_names_match_cb_exposed_names() {
+        assert_eq!(
+            V2_UNSUPPORTED_METRIC, "cb_pbs_pbs_submit_block_v2_unsupported_total",
+            "the doubled pbs_ is CORRECT: prefix cb_pbs + registered name pbs_submit_block_..."
+        );
+        // The three read by collect_endpoint_stats / check_relay_latency.
+        for name in [
+            "cb_pbs_relay_status_code_total",
+            "cb_pbs_beacon_node_status_code_total",
+            "cb_pbs_relay_latency",
+        ] {
+            assert!(
+                name.starts_with("cb_pbs_"),
+                "{name} must carry the registry prefix"
+            );
+        }
     }
 
     #[test]
@@ -663,6 +947,127 @@ mod tests {
         assert_eq!(bucket_code("502"), "5xx");
         assert_eq!(bucket_code("201"), "other");
         assert_eq!(bucket_code("garbage"), "other");
+        // CB's synthetic client-timeout marker MUST NOT bucket as relay 5xx —
+        // that misattribution tier-1-failed a run whose relays served 0 errors.
+        assert_eq!(bucket_code("555"), "timeout");
+        // CB's synthetic WS transport-error marker (PR-483 streaming): also
+        // client-observed, same misattribution class as 555.
+        assert_eq!(bucket_code("556"), "transport");
+        // A real (unusual) HTTP 5xx that is neither synthetic code stays 5xx.
+        assert_eq!(bucket_code("550"), "5xx");
+        assert_eq!(bucket_code("557"), "5xx");
+    }
+
+    // --- timeout (555) classification: the timing-games false-red fix --------
+
+    #[test]
+    fn classify_heavy_timeouts_warn_not_fail() {
+        // The live-captured timing-games shape (2026-08-03): healthy bids plus
+        // ~42% CB-deadline cancellations, ZERO relay-served 5xx. Old bucketing
+        // called this "47.5% relay 5xx" -> tier-1 FAIL. Must be WARN.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 27.0);
+        s.add_relay("r0", "204", 4.0);
+        s.add_relay("r0", "400", 2.0);
+        s.add_relay("r0", "555", 17.0);
+        s.add_relay("r1", "200", 21.0);
+        s.add_relay("r1", "204", 2.0);
+        s.add_relay("r1", "400", 2.0);
+        s.add_relay("r1", "555", 25.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn, "timeouts must not FAIL");
+        assert!(
+            r.detail.contains("555"),
+            "detail names the marker: {}",
+            r.detail
+        );
+        assert!(r.detail.contains("not relay-served"));
+    }
+
+    #[test]
+    fn classify_heavy_timeouts_warn_even_under_strict() {
+        // --strict is zero-tolerance for PIPELINE errors; a 555 is CB's own
+        // deadline policy, so strict must not promote it to FAIL.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "555", 30.0);
+        let r = classify_endpoint("get_header", &s, true);
+        assert_eq!(r.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn classify_few_timeouts_pass_with_note() {
+        // Below MAX_TIMEOUT_RATE: normal classification, timeout count noted.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 90.0);
+        s.add_relay("r0", "555", 5.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.contains("timeout"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn classify_heavy_transport_errors_warn_not_fail() {
+        // A stream relay refusing connections every slot: heavy 556, zero real
+        // 5xx. Must WARN (relay death is the tier-1 relay checks' call), never
+        // FAIL, not even under --strict.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "556", 30.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn, "556 must not FAIL");
+        assert!(r.detail.contains("556"), "detail names 556: {}", r.detail);
+        let strict = classify_endpoint("get_header", &s, true);
+        assert_eq!(strict.status, CheckStatus::Warn, "strict must not promote");
+    }
+
+    #[test]
+    fn mixed_555_and_556_aggregate_into_one_warn() {
+        // Timing-games over a flaky stream: both synthetic codes present. One
+        // WARN naming both counts, not two competing verdicts.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 10.0);
+        s.add_relay("r0", "555", 10.0);
+        s.add_relay("r0", "556", 10.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("555") && r.detail.contains("556"));
+    }
+
+    #[test]
+    fn few_transport_errors_pass_with_note() {
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 90.0);
+        s.add_relay("r0", "556", 5.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.contains("556"), "detail: {}", r.detail);
+    }
+
+    #[test]
+    fn real_5xx_still_fails_despite_heavy_transport_errors() {
+        // 556 excluded from the 5xx denominator, same as 555: a genuine relay
+        // error storm FAILs even amid heavy stream-transport failures.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 4.0);
+        s.add_relay("r0", "500", 10.0);
+        s.add_relay("r0", "556", 90.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Fail, "real 5xx must keep failing");
+    }
+
+    #[test]
+    fn real_5xx_still_fails_despite_heavy_timeouts() {
+        // Timeouts are excluded from the 5xx denominator, so a genuine relay
+        // error storm FAILs even when timeout polling dominates raw counts:
+        // 10 x 500 vs 14 completed responses = 71% > 25%, regardless of 90 x 555.
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "200", 4.0);
+        s.add_relay("r0", "500", 10.0);
+        s.add_relay("r0", "555", 90.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Fail, "real 5xx must keep failing");
+        assert!(r.detail.contains("5xx"));
     }
 
     #[test]
@@ -723,16 +1128,27 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn classify_get_header_5xx_always_fails() {
-        let mut s = EndpointStats::default();
-        s.add_relay("r0", "200", 10.0);
-        s.add_relay("r0", "500", 1.0);
+    fn classify_5xx_transient_warns_but_strict_and_high_rate_fail() {
+        // H2: a few 5xx against many good requests (1/11 = 9% < 25%) is warmup
+        // noise → WARN (not the old FAIL), but --strict still FAILs.
+        let mut low = EndpointStats::default();
+        low.add_relay("r0", "200", 10.0);
+        low.add_relay("r0", "500", 1.0);
         assert_eq!(
-            classify_endpoint("get_header", &s, false).status,
-            CheckStatus::Fail
+            classify_endpoint("get_header", &low, false).status,
+            CheckStatus::Warn
         );
         assert_eq!(
-            classify_endpoint("get_header", &s, true).status,
+            classify_endpoint("get_header", &low, true).status,
+            CheckStatus::Fail
+        );
+
+        // A materially broken relay (5/6 = 83% > 25%) FAILs even without --strict.
+        let mut high = EndpointStats::default();
+        high.add_relay("r0", "200", 1.0);
+        high.add_relay("r0", "500", 5.0);
+        assert_eq!(
+            classify_endpoint("get_header", &high, false).status,
             CheckStatus::Fail
         );
     }
@@ -766,20 +1182,112 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn classify_submit_blinded_block_zero_warn() {
+    fn classify_submit_blinded_block_no_submissions_warn() {
+        // Genuinely zero submissions: the proposer never chose a builder block.
+        // (204s are the "no bid" shape; no 4xx = nothing was ever submitted.)
         let mut s = EndpointStats::default();
-        s.add_relay("r0", "400", 1.0);
+        s.add_relay("r0", "204", 1.0);
         let r = classify_endpoint("submit_blinded_block", &s, false);
         assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("never chose"), "detail: {}", r.detail);
         assert!(r.detail.contains("--strict"));
     }
 
     #[test]
-    fn classify_submit_blinded_block_zero_strict_fails() {
+    fn classify_submit_blinded_block_no_submissions_strict_fails() {
         let mut s = EndpointStats::default();
-        s.add_relay("r0", "400", 1.0);
+        s.add_relay("r0", "204", 1.0);
         let r = classify_endpoint("submit_blinded_block", &s, true);
         assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    // --- submit_blinded_block is judged on the BEACON side ------------------
+    // Both fixtures below are REAL data from live runs with opposite outcomes,
+    // which is what makes this discriminator trustworthy rather than a guess.
+
+    #[test]
+    fn multi_relay_losing_relay_errors_do_not_fail_a_healthy_run() {
+        // Measured on a 2-relay run where relay_1 wins every auction by design
+        // (divergent subsidies), so relay_0 cannot serve any payload it never
+        // won. Relay-side rate was 29.7% and FAILED a run that delivered 65/65
+        // payloads, 100% MEV rate, 0 missed slots.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "202", 1.0);
+        s.add_relay("mev_relay_0", "400", 219.0);
+        s.add_relay("mev_relay_0", "500", 185.0);
+        s.add_relay("mev_relay_1", "202", 219.0);
+        s.add_relay("mev_relay_1", "400", 1.0);
+        s.add_relay("mev_relay_1", "500", 1.0);
+        s.add_beacon("202", 220.0);
+
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(
+            r.status,
+            CheckStatus::Pass,
+            "CB served the CL 220 times; losing-relay errors are expected: {}",
+            r.detail
+        );
+        assert!(r.detail.contains("220 payload(s) served"));
+        assert!(
+            r.detail.contains("expected"),
+            "explains the relay-side noise"
+        );
+    }
+
+    #[test]
+    fn beacon_side_5xx_still_fails() {
+        // The nethermind+prysm shape: CB returned 502 to the CL 26 times, i.e.
+        // the proposer genuinely did not get its payload. Must FAIL - this is
+        // what proves the exemption did not blind the check.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        s.add_beacon("502", 26.0);
+
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.detail.contains("did NOT get its payload"));
+    }
+
+    #[test]
+    fn beacon_side_no_deliveries_warns() {
+        let mut s = EndpointStats::default();
+        s.add_beacon("404", 5.0);
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.detail.contains("never chose"));
+    }
+
+    #[test]
+    fn without_beacon_samples_it_falls_back_to_the_relay_side() {
+        // Metrics can be partial; with no beacon-side data the old relay-side
+        // logic still applies rather than silently passing.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        let r = classify_submit_blinded_block(&s);
+        assert_eq!(r.status, CheckStatus::Fail, "relay rejected everything");
+        assert!(r.detail.contains("REJECTED"));
+    }
+
+    #[test]
+    fn classify_submit_blinded_block_relay_rejected_is_not_never_chose() {
+        // The live nethermind+prysm shape: 26 blinded blocks submitted, ALL
+        // rejected 4xx by the relay. The old code called this "proposer never
+        // chose a builder block" — a wrong diagnosis pointing at the wrong
+        // component. Must FAIL and name the relay as the rejecter.
+        let mut s = EndpointStats::default();
+        s.add_relay("mev_relay_0", "400", 26.0);
+        let r = classify_endpoint("submit_blinded_block", &s, false);
+        assert_eq!(
+            r.status,
+            CheckStatus::Fail,
+            "relay refusing every block is not a WARN"
+        );
+        assert!(r.detail.contains("REJECTED"), "detail: {}", r.detail);
+        assert!(
+            !r.detail.contains("never chose"),
+            "must NOT misdiagnose as proposer-side: {}",
+            r.detail
+        );
     }
 
     #[test]
@@ -835,30 +1343,66 @@ cb_pbs_beacon_node_status_code_total{http_status_code="204",endpoint="get_header
     }
 
     #[test]
-    fn v2_fallback_zero_passes() {
-        let text = r#"# HELP cb_pbs_submit_block_v2_fallback_to_v1_total x
-# TYPE cb_pbs_submit_block_v2_fallback_to_v1_total counter
-cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id="r0"} 0
-"#;
-        let scrape = parse(text);
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Pass);
+    fn v2_fallback_is_inert_and_says_so() {
+        // The metric it read does not exist in commit-boost, so the old logic
+        // could only ever return PASS. An always-green check is worse than no
+        // check: it also asserted "relays support v2" on a run where the relay
+        // was 404ing every v2 submission.
+        let r = check_v2_fallback(&parse(""));
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(r.detail.contains("inert"), "detail: {}", r.detail);
+        assert!(
+            r.detail.contains("cb_relay_v2_unsupported"),
+            "must point at the check that actually owns v2 support"
+        );
     }
 
     #[test]
-    fn v2_fallback_nonzero_warns() {
-        let text = r#"# HELP cb_pbs_submit_block_v2_fallback_to_v1_total x
-# TYPE cb_pbs_submit_block_v2_fallback_to_v1_total counter
-cb_pbs_submit_block_v2_fallback_to_v1_total{relay_id="r0"} 5
+    fn v2_unsupported_nonzero_fails_and_names_the_relay() {
+        // The live nethermind+prysm shape: prysm submits via v2, helix 404s the
+        // v2 route, CB refuses to downgrade -> every builder block is lost.
+        let text = r#"# HELP cb_pbs_pbs_submit_block_v2_unsupported_total x
+# TYPE cb_pbs_pbs_submit_block_v2_unsupported_total counter
+cb_pbs_pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
 "#;
         let scrape = parse(text);
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Warn);
+        let r = check_v2_unsupported(&scrape);
+        assert_eq!(
+            r.status,
+            CheckStatus::Fail,
+            "lost submissions are not a WARN"
+        );
+        assert!(
+            r.detail.contains("mev_relay_0"),
+            "names the relay: {}",
+            r.detail
+        );
+        assert_eq!(r.data["total"], 11);
     }
 
     #[test]
-    fn v2_fallback_missing_counter_passes() {
-        // Missing counter == never incremented == zero fallbacks == PASS.
-        let scrape = parse("");
-        assert_eq!(check_v2_fallback(&scrape).status, CheckStatus::Pass);
+    fn v2_unsupported_missing_counter_passes() {
+        // Prometheus omits never-incremented families; absence == zero == fine.
+        assert_eq!(check_v2_unsupported(&parse("")).status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn v2_unsupported_escalates_to_tier1_on_fail() {
+        // A relay that cannot serve the proposer's submissions must gate the
+        // exit code, like a matrix 5xx.
+        let text = r#"# HELP cb_pbs_pbs_submit_block_v2_unsupported_total x
+# TYPE cb_pbs_pbs_submit_block_v2_unsupported_total counter
+cb_pbs_pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 3
+"#;
+        let mut c = check_v2_unsupported(&parse(text));
+        assert_eq!(c.tier, 2, "authored at tier 2");
+        // Mirror run_metrics_checks' escalation rule.
+        if c.status == CheckStatus::Fail
+            && (c.id.ends_with("_matrix") || c.id == "cb_relay_v2_unsupported")
+        {
+            c.tier = 1;
+        }
+        assert_eq!(c.tier, 1, "must escalate so the run fails");
     }
 
     #[test]

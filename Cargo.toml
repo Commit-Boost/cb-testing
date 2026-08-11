@@ -7,6 +7,10 @@ rust-version = "1.91"
 description = "Automated verification for Commit-Boost Kurtosis testnets"
 license = "MIT"
 
+[lib]
+name = "cb_testnet_verifier"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cb-verify"
 path = "src/main.rs"
@@ -16,12 +20,8 @@ name = "cb-orchestrator"
 path = "src/orchestrator.rs"
 
 [[bin]]
-name = "test-mux"
-path = "src/bin/test_mux.rs"
-
-[[bin]]
-name = "test-relay"
-path = "src/bin/test_relay.rs"
+name = "sim"
+path = "src/bin/sim/main.rs"
 
 
 [dependencies]
@@ -36,11 +36,20 @@ prometheus-parse = "0.2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+# HS256 JWT minting for the Commit-Boost signer module API. Hand-rolled rather
+# than pulling `jsonwebtoken`: CB binds the JWT to the exact request ROUTE and to
+# a keccak256 payload hash that must be NULL when there is no body, and getting
+# those claims exactly right matters more than the ~20 lines saved.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "net", "signal", "sync"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde_yaml = "0.9.34"
+toml = "0.8"
 
 [profile.release]
 strip = true
-lto = true
+lto = "thin"

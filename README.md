@@ -4,12 +4,18 @@ Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit
 
 ## Prerequisites
 
-- [Kurtosis CLI](https://docs.kurtosis.com/install) (>= 0.90)
-- [Rust toolchain](https://rustup.rs/) (1.91+)
+- [Kurtosis CLI](https://docs.kurtosis.com/install) — **pin 1.18.1** (the proven-good version; the parsers
+  rely on its text-table output, and a newer CLI, e.g. 1.20.0, writes an incompatible
+  `~/.config/kurtosis/kurtosis-config.yml` — see `docs/local-kurtosis-e2e.md`)
+- [Rust toolchain](https://rustup.rs/) (1.91+, edition 2024)
 - Docker (for Kurtosis)
+- The forked `ethereum-package` submodule: `git submodule update --init`
 
-If you're testing a local CB build, you also need:
-- The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned
+If you're testing a local CB build (the default — the CB sidecar image is built, not pulled), you also need:
+- The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned as a sibling
+  (`../commit-boost-client`, overridable — see `just build-cb-image`)
+
+> Contributing? See **[`docs/DEVELOPING.md`](docs/DEVELOPING.md)** for the dev loop and how to add checks + scenarios.
 
 ## Docker image configuration
 
@@ -24,14 +30,14 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HELIX_RELAY_IMAGE` | `helix-relay:kurtosis` | Custom Helix relay image |
-| `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | mev-boost relay (multi-relay scenarios) |
-| `MEV_BOOST_IMAGE` | `commit-boost/pbs:kurtosis` | Commit-Boost PBS image |
+| `HELIX_RELAY_IMAGE` | `ghcr.io/gattaca-com/helix-relay:main` | Helix relay image |
+| `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | flashbots mev-boost-relay — **no longer used** (multi-relay now runs two helix instances); still emitted into configs but inert |
+| `MEV_BOOST_IMAGE` | `commit-boost/commit-boost:kurtosis` | Commit-Boost sidecar image |
 | `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
 | `BUILDER_EL_IMAGE` | `ethpandaops/reth-rbuilder:develop` | Builder execution client |
 
-The `.env` file is read automatically by `generate_kurtosis_configs.py`.
-It is gitignored — do not commit it. Use `.env.example` as the reference.
+The `.env` file is read automatically by `just generate-configs` (the `sim generate`
+command). It is gitignored — do not commit it. Use `.env.example` as the reference.
 
 ## Kurtosis setup / gotchas
 
@@ -45,9 +51,9 @@ The fork generalizes hardcoded patterns from upstream, enabling configs like com
 
 ### Kurtosis configs
 
-Kurtosis uses a default Commit-Boost config that can be overridden by inlining it into the kurtosis config — see `configs/example-kurtosis-config.yml`. Every generated test config uses this pattern.
+Kurtosis uses a default Commit-Boost config that can be overridden by inlining it into the kurtosis config. Every generated test config uses this pattern: the helix and commit-boost configs are embedded as the two `|` block scalars under `mev_params`.
 
-`generate_kurtosis_configs.py` generates test scenarios from `.env`:
+`sim generate` (via `just generate-configs`) builds the test scenarios, applying any `.env` image overrides:
 
 ```bash
 just generate-configs
@@ -58,8 +64,8 @@ Six scenarios are generated:
 | Config | What it tests |
 |---|---|
 | `cb-basic.yml` | Single relay (helix), default CB config |
-| `cb-multiple-relays.yml` | Two relays (helix + flashbots), aggregated bidding |
-| `cb-mux.yml` | Mux routing — 128 validators to helix, 128 to flashbots |
+| `cb-multiple-relays.yml` | Two helix relay instances, aggregated bidding |
+| `cb-mux.yml` | Mux routing — 128 validators to helix-1, 128 to helix-2 |
 | `cb-skip-sigverify.yml` | Fast path with BLS signature verification disabled |
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
@@ -67,6 +73,19 @@ Six scenarios are generated:
 ## Quick start
 
 ```bash
+# ONE-TIME (from scratch): init the forked ethereum-package, then build the
+# Commit-Boost image the devnet runs (from the sibling commit-boost-client repo)
+git submodule update --init
+just build-cb-image                 # -> commit-boost/commit-boost:kurtosis
+
+# Generate configs, pull public images, launch + verify. Prints the tiered
+# report and exits 0 (pass) / 1 (tier-1 FAIL) / 2 (setup failure). Add --json
+# to the verifier for the machine-readable verdict (see docs/CHECKS.md).
+just e2e                            # cb-basic
+just e2e configs/generated/cb-mux.yml
+
+# --- or the individual steps ---
+
 # Generate configs from .env
 just generate-configs
 
@@ -84,12 +103,14 @@ just show-logs CB-Testnet
 
 # Quick mux routing diagnostic
 just test-mux CB-Testnet configs/generated/cb-mux.yml
-
-# Test relay API endpoints
-cargo run --release --bin test-relay -- http://127.0.0.1:PORT 128 160
 ```
 
 ## What it checks
+
+> The tables below are a quick reference. **[`docs/CHECKS.md`](docs/CHECKS.md) is the authoritative
+> catalog** — per-check pass/warn/fail contract, data source, and the load-bearing verdict rule: the
+> process exit code keys **only on a tier-1 FAIL**; WARN and SKIP are non-fatal, so a consumer gating on
+> a trust-critical anomaly must read the JSON `result:"WARN"`, not just the exit code.
 
 ### Tier 1: Pipeline health (must pass)
 
@@ -110,6 +131,7 @@ cargo run --release --bin test-relay -- http://127.0.0.1:PORT 128 160
 | `relay.builder_blocks_received` | Builder submitted blocks to relay | > 0 |
 | `relay.mev_delivery_rate` | Slots using relay-built blocks vs local | >= 30% |
 | `relay.validator_registrations` | All validators registered on relay | 100% |
+| `relay.best_bid` | CB delivered >= the best bid it was offered across relays | competition + delivered |
 
 ### Tier 3: CB metrics 
 
@@ -142,24 +164,26 @@ Options:
       --live-metrics          Poll :9090/metrics during observation
       --show-logs             Print raw CB PBS logs, no checks
       --output-dir <DIR>      Save JSON reports (requires --json)
+      --skip-finalization-check  Skip the finality check (for early/short windows)
+```
+
+### sim (generate | preflight | triage)
+
+```
+sim generate [SCENARIO] [--out-dir DIR] [--check]   # typed Rust config generator
+                                                    #   --check: verify on-disk configs match (CI drift gate)
+sim preflight <ARGS_FILE>                           # validate the config against the real helix image (~1s)
+                                                    #   exit 1 only on a genuine config-drift Fail
+sim triage <ENCLAVE>                                # extract each dead service's root panic (JSON)
 ```
 
 ### test-mux
 
 ```
-test-mux <enclave> <config>
+just test-mux <enclave> <config>
 
-Fetches CB PBS logs, parses mux events, verifies routing against config.
-No observation window. Completes in seconds.
-```
-
-### test-relay
-
-```
-test-relay <relay_url> <start_slot> <end_slot> [pubkey]
-
-Tests relay data API endpoints with slot filtering.
-Verifies delivered payloads, builder blocks, validator registration.
+Runs cb-verify with --config against a running enclave: fetches CB PBS logs,
+parses mux events, verifies routing against config. No observation window.
 ```
 
 ## How it works
@@ -192,26 +216,22 @@ Verifies delivered payloads, builder blocks, validator registration.
 
 ```
 cb-testing/
-  Cargo.toml              # Workspace: cb-verify, test-mux, test-relay
+  Cargo.toml              # Workspace: cb-verify, cb-orchestrator, sim
   justfile                # Build/test/launch commands
   README.md
   .env.example            # Docker image overrides
   scripts/
-    run-and-verify.sh     # Attached mode launcher
-    generate_kurtosis_configs.py  # Config generator
+    run-and-verify.sh     # Attached mode launcher (preflight-gated)
   configs/
-    generated/            # Pre-generated test scenarios
-    example-kurtosis-config.yml
+    generated/            # Test scenarios, emitted by `sim generate`
   src/
     main.rs               # cb-verify binary
+    bin/sim/              # sim: generate | preflight | triage
     checks/
       chain_health.rs     # Finality, sync, missed slots
       relay_pipeline.rs   # Delivery, registration, MEV rate
       payload_matching.rs # Hash matching
       mux_routing.rs      # Mux config parsing, log analysis
       cb_metrics.rs       # Prometheus metrics checks
-    bin/
-      test_mux.rs         # Mux diagnostic binary
-      test_relay.rs       # Relay API diagnostic binary
   ethereum-package/       # Forked Kurtosis package (submodule)
 ```

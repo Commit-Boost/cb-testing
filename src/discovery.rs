@@ -12,14 +12,6 @@ use std::process::Command;
 use eyre::{Result, WrapErr, bail};
 use tracing::{debug, info, warn};
 
-/// A single payload-delivered record from post-mortem Postgres query.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PostMortemRecord {
-    pub slot: u64,
-    pub block_hash: String,
-    pub value: String,
-}
-
 /// Derive a relay identity from the Kurtosis service name.
 ///
 /// Returns a short string like "helix", "flashbots", or "mev-rs"
@@ -43,13 +35,14 @@ pub fn relay_identity(service_name: &str) -> Option<String> {
 pub struct EnclaveServices {
     pub beacon_urls: Vec<String>,
     pub relay_urls: Vec<String>,
-    /// Parallel to relay_urls: identity string per relay
-    /// ("helix", "flashbots", "mev-rs", etc.)
-    pub relay_identities: Vec<String>,
     pub cb_pbs_urls: Vec<String>,
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
     pub prometheus_url: Option<String>,
+    /// Commit-Boost SIGNER module endpoints (`cb-signer-*`). Deliberately a
+    /// SEPARATE pattern from `commit-boost-*`: that glob feeds cb_service_names,
+    /// which three checks iterate while shelling out a 200k-line log fetch each.
+    pub signer_urls: Vec<String>,
 }
 
 /// Run a kurtosis CLI command and return stdout.
@@ -96,7 +89,7 @@ fn port_print(enclave: &str, service: &str, port_name: &str) -> Option<String> {
 }
 
 /// A parsed service from kurtosis inspect output.
-struct ParsedService {
+pub struct ParsedService {
     name: String,
     ports: Vec<(String, String)>, // (port_name, url)
 }
@@ -157,7 +150,10 @@ fn parse_services(inspect_output: &str) -> Vec<ParsedService> {
 }
 
 /// Split a string on runs of 2+ whitespace characters.
-fn split_on_multi_space(s: &str) -> Vec<&str> {
+///
+/// Public so other bins (e.g. `sim triage`) can reuse the exact column split
+/// used to read the kurtosis `User Services` table, rather than re-deriving it.
+pub fn split_on_multi_space(s: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut start = None;
     let mut space_count = 0;
@@ -287,102 +283,121 @@ fn matches_pattern(name: &str, pattern: &str) -> bool {
 
 /// Discover all relevant services in a Kurtosis enclave.
 pub fn discover(enclave: &str) -> Result<EnclaveServices> {
-    let mut result = EnclaveServices::default();
-
     let inspect_output = run_kurtosis(&["enclave", "inspect", "--full-uuids", enclave])
         .wrap_err_with(|| format!("Could not inspect enclave '{enclave}'"))?;
 
     let services = parse_services(&inspect_output);
     if services.is_empty() {
         warn!("No services found in enclave '{enclave}'");
-        return Ok(result);
+        return Ok(EnclaveServices::default());
     }
-
     info!("Found {} services in enclave '{enclave}'", services.len());
 
-    for svc in &services {
+    // The only IO in the selection below: a `kurtosis port print` fallback for
+    // ports the inspect-table parse missed.
+    Ok(classify_services(&services, |svc, port| {
+        port_print(enclave, svc, port)
+    }))
+}
+
+/// Decide which discovered services are the beacon nodes, relay APIs, CB
+/// sidecars and prometheus, and pick a URL for each (pure, Law 4 seam).
+///
+/// `port_fallback(service, port_name)` is consulted ONLY when the port was not
+/// already parsed out of the `enclave inspect` table; tests pass a stub, the
+/// real caller passes `kurtosis port print`. Splitting it this way makes the
+/// classification - which decides WHAT gets checked, and therefore silently
+/// invalidates every downstream check when it is wrong - testable without a
+/// live enclave. It matters more since Law 7: service names carry the client
+/// pair (`cl-1-prysm-nethermind` vs `cl-1-lighthouse-geth`), so the patterns
+/// must not accidentally encode one pair.
+pub fn classify_services(
+    services: &[ParsedService],
+    port_fallback: impl Fn(&str, &str) -> Option<String>,
+) -> EnclaveServices {
+    let mut result = EnclaveServices::default();
+
+    for svc in services {
         let find_port = |name: &str| -> Option<String> {
             svc.ports
                 .iter()
                 .find(|(pn, _)| pn == name)
                 .map(|(_, url)| url.clone())
         };
+        // Try EVERY already-parsed port name first, and only then fall back to
+        // the injected lookup. Interleaving them per-name would shell out to
+        // `kurtosis port print` for an early name before trying a later name
+        // that the inspect table already carried - a subprocess per relay per
+        // run, which is the precedence bug an earlier perf pass removed.
+        let pick = |names: &[&str]| -> Option<String> {
+            names
+                .iter()
+                .find_map(|n| find_port(n))
+                .or_else(|| names.iter().find_map(|n| port_fallback(&svc.name, n)))
+        };
 
-        // Beacon API: cl-* services, port 'http'
         if matches_pattern(&svc.name, "cl-*") {
-            let url = port_print(enclave, &svc.name, "http").or_else(|| find_port("http"));
-            if let Some(url) = url {
-                info!("Beacon API: {} -> {url}", svc.name);
-                result.beacon_urls.push(url);
-            } else {
-                warn!("Beacon '{}': no http port", svc.name);
+            match pick(&["http"]) {
+                Some(url) => {
+                    info!("Beacon API: {} -> {url}", svc.name);
+                    result.beacon_urls.push(url);
+                }
+                None => warn!("Beacon '{}': no http port", svc.name),
             }
         }
 
-        // Relay Data API: match any relay service by name heuristics.
-        //
-        // Different relay implementations use different service names and port IDs:
-        //   flashbots: "mev-relay-api"  — port "http" (9067)
-        //   helix:     "helix-relay"     — port "endpoint" (4040)
-        //   mev-rs:    "mev-rs-relay"    — port "http" (28545)
-        // Exclude supporting services (postgres, redis, website, housekeeper).
+        // Relay implementations differ in service name AND port id:
+        //   flashbots "mev-relay-api" http/9067, helix "helix-relay"
+        //   endpoint/4040, mev-rs "mev-rs-relay" http/28545. Supporting
+        //   services (postgres/redis/website/housekeeper) are excluded.
         if is_relay_api_service(&svc.name) {
-            let url = port_print(enclave, &svc.name, "http")
-                .or_else(|| port_print(enclave, &svc.name, "endpoint"))
-                .or_else(|| find_port("http"))
-                .or_else(|| find_port("endpoint"));
-            if let Some(url) = url {
-                let identity = relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
-                info!("Relay API: {} -> {url} (identity={identity})", svc.name);
-                result.relay_urls.push(url);
-                result.relay_identities.push(identity);
-            } else {
-                warn!("Relay '{}': no http/endpoint port", svc.name);
+            match pick(&["http", "endpoint"]) {
+                Some(url) => {
+                    let identity =
+                        relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
+                    info!("Relay API: {} -> {url} (identity={identity})", svc.name);
+                    result.relay_urls.push(url);
+                }
+                None => warn!("Relay '{}': no http/endpoint port", svc.name),
             }
         }
 
-        // Commit-Boost: commit-boost-* services
-        //
-        // The kurtosis ethereum-package publishes CB's PBS port under the
-        // name "http" (port 18550), not "pbs". Metrics are only exposed
-        // when commit_boost_config enables [metrics] AND the yaml publishes
-        // the port -- see configs/pbs-metrics.yml. Absent that, matrix
-        // checks will SKIP gracefully.
         if matches_pattern(&svc.name, "commit-boost-*") {
             result.cb_service_names.push(svc.name.clone());
-
-            // Try "pbs" first (older configs / custom setups), fall back to
-            // "http" (ethereum-package default).
-            let pbs_url = port_print(enclave, &svc.name, "pbs")
-                .or_else(|| find_port("pbs"))
-                .or_else(|| port_print(enclave, &svc.name, "http"))
-                .or_else(|| find_port("http"));
-            if let Some(url) = pbs_url {
-                info!("CB PBS: {} -> {url}", svc.name);
-                result.cb_pbs_urls.push(url);
-            } else {
-                warn!("CB '{}': no pbs/http port exposed", svc.name);
+            // "pbs" first (older/custom configs), then "http" (the
+            // ethereum-package default, 18550).
+            match pick(&["pbs", "http"]) {
+                Some(url) => {
+                    info!("CB PBS: {} -> {url}", svc.name);
+                    result.cb_pbs_urls.push(url);
+                }
+                None => warn!("CB '{}': no pbs/http port exposed", svc.name),
             }
-
-            // Metrics port may be named "metrics" or "http-metrics".
-            let metrics_url = port_print(enclave, &svc.name, "metrics")
-                .or_else(|| find_port("metrics"))
-                .or_else(|| port_print(enclave, &svc.name, "http-metrics"))
-                .or_else(|| find_port("http-metrics"));
-            if let Some(url) = metrics_url {
+            // Metrics only exist when commit_boost_config enables [metrics] AND
+            // the yaml publishes the port; absent that the matrix checks SKIP.
+            if let Some(url) = pick(&["metrics", "http-metrics"]) {
                 info!("CB metrics: {} -> {url}", svc.name);
                 result.cb_metrics_urls.push(url);
             }
         }
 
-        // Prometheus
+        if matches_pattern(&svc.name, "cb-signer-*") {
+            match pick(&["signer", "http"]) {
+                Some(url) => {
+                    info!("CB signer: {} -> {url}", svc.name);
+                    result.signer_urls.push(url);
+                }
+                None => warn!("CB signer '{}': no signer/http port", svc.name),
+            }
+        }
+
         if svc.name == "prometheus" {
-            if let Some(url) = port_print(enclave, &svc.name, "http").or_else(|| find_port("http"))
-            {
-                info!("Prometheus: {} -> {url}", svc.name);
-                result.prometheus_url = Some(url);
-            } else {
-                warn!("Prometheus service found but no http port available.");
+            match pick(&["http"]) {
+                Some(url) => {
+                    info!("Prometheus: {} -> {url}", svc.name);
+                    result.prometheus_url = Some(url);
+                }
+                None => warn!("Prometheus service found but no http port available."),
             }
         }
     }
@@ -400,7 +415,6 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
             "no"
         },
     );
-
     if result.beacon_urls.is_empty() {
         warn!("No beacon API services (cl-*) found");
     }
@@ -411,122 +425,7 @@ pub fn discover(enclave: &str) -> Result<EnclaveServices> {
         warn!("No Commit-Boost services found");
     }
 
-    Ok(result)
-}
-
-/// Post-mortem: query `mev-relay-postgres` directly when the relay API is dead.
-///
-/// Shells out to `kurtosis service exec` to run a psql query inside the relay's
-/// Postgres container. Returns payload-delivered records found. If the Postgres
-/// container doesn't exist or the query fails, returns an empty Vec.
-///
-/// This salvages a verdict when the relay crashed mid-run: if the pipeline
-/// worked before the crash, Postgres still has the evidence.
-pub fn query_mev_relay_postgres(enclave: &str) -> Vec<PostMortemRecord> {
-    debug!("Running post-mortem Postgres query in enclave '{enclave}'");
-
-    let query = "SELECT slot, block_hash, value FROM mainnet_payload_delivered ORDER BY slot DESC LIMIT 20;";
-
-    // `kurtosis service exec` returns output on stdout. The psql output
-    // includes a header row and separator line before data rows.
-    match Command::new("kurtosis")
-        .args([
-            "service",
-            "exec",
-            enclave,
-            "mev-relay-postgres",
-            "--",
-            "psql",
-            "-U",
-            "postgres",
-            "-d",
-            "mev_boost_relay",
-            "-c",
-            query,
-        ])
-        .output()
-    {
-        Ok(output) => {
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                debug!(
-                    "Post-mortem query failed (exit {}): {}",
-                    output.status,
-                    stderr.trim()
-                );
-                return Vec::new();
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_postmortem_output(&stdout)
-        }
-        Err(e) => {
-            debug!("Post-mortem: kurtosis CLI not available: {e}");
-            Vec::new()
-        }
-    }
-}
-
-/// Parse psql tabular output into PostMortemRecords.
-///
-/// Expected format:
-/// ```text
-///  slot | block_hash | value
-/// ------+------------+-------
-///   224 | 0xabc...   | 12345
-///   223 | 0xdef...   | 67890
-/// (2 rows)
-/// ```
-///
-/// Skips header rows (first 2 lines: column names + separator) and the
-/// trailing "(N rows)" line.
-fn parse_postmortem_output(output: &str) -> Vec<PostMortemRecord> {
-    let mut records = Vec::new();
-    let mut seen_header = false;
-    let mut seen_sep = false;
-
-    for line in output.lines() {
-        let stripped = line.trim();
-
-        if stripped.is_empty() {
-            continue;
-        }
-
-        // Skip the column-name header and separator line.
-        if !seen_header {
-            seen_header = true;
-            continue;
-        }
-        if !seen_sep {
-            seen_sep = true;
-            continue;
-        }
-
-        // Skip trailing "(N rows)" line.
-        if stripped.starts_with('(') && stripped.ends_with(')') {
-            continue;
-        }
-
-        // Data rows: " 224 | 0xabc...   | 12345"
-        let parts: Vec<&str> = stripped.split('|').map(|s| s.trim()).collect();
-        if parts.len() < 3 {
-            continue;
-        }
-
-        let slot: u64 = match parts[0].parse() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let block_hash = parts[1].to_string();
-        let value = parts[2].to_string();
-
-        records.push(PostMortemRecord {
-            slot,
-            block_hash,
-            value,
-        });
-    }
-
-    records
+    result
 }
 
 /// Heuristic check: is this service name a relay API endpoint?
@@ -539,7 +438,12 @@ fn is_relay_api_service(name: &str) -> bool {
     let lower = name.to_lowercase();
     let known_non_api = ["-postgres", "-redis", "-website", "-housekeeper"];
     let is_relay = lower.contains("relay");
-    let is_non_api = known_non_api.iter().any(|suffix| lower.ends_with(suffix));
+    // CONTAINS, not ends_with: the N-relay-instance topology suffixes every
+    // service with its index, so the support services are named
+    // `helix-relay-postgres-2`, which does not END with "-postgres". With
+    // ends_with, a relay's POSTGRES container was classified as a relay data
+    // API (found by test, 2026-08-04).
+    let is_non_api = known_non_api.iter().any(|marker| lower.contains(marker));
     is_relay && !is_non_api
 }
 
@@ -547,11 +451,237 @@ fn is_relay_api_service(name: &str) -> bool {
 mod tests {
     use super::relay_identity;
 
+    fn svc(name: &str, ports: &[(&str, &str)]) -> ParsedService {
+        ParsedService {
+            name: name.to_string(),
+            ports: ports
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect(),
+        }
+    }
+
+    /// A fallback that never resolves anything. NOT a panic-stub: the fallback
+    /// is legitimately consulted for OPTIONAL lookups (CB metrics are absent in
+    /// the default devnet shape). Precedence is asserted separately, by
+    /// counting calls, in `parsed_ports_win_over_the_fallback`.
+    fn no_fallback(_svc: &str, _port: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn parsed_ports_win_over_the_fallback() {
+        // The perf contract: a port already in the inspect table must never
+        // cost a `kurtosis port print` subprocess. Counted, not asserted by
+        // panic, so optional lookups (metrics) do not confuse the signal.
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out = classify_services(
+            &[svc("cl-1-lighthouse-geth", &[("http", "http://parsed:1")])],
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Some("http://shelled-out:1".to_string())
+            },
+        );
+        assert_eq!(out.beacon_urls, vec!["http://parsed:1"]);
+        assert_eq!(calls.get(), 0, "parsed port must not shell out");
+    }
+
+    #[test]
+    fn relay_endpoint_port_costs_no_subprocess() {
+        // Helix exposes only "endpoint". Trying "http" first must NOT shell out
+        // before "endpoint" is tried against the parsed table - that was a real
+        // regression (one subprocess per relay per run).
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out = classify_services(
+            &[svc("helix-relay-2", &[("endpoint", "http://h:1")])],
+            |_, _| {
+                calls.set(calls.get() + 1);
+                None
+            },
+        );
+        assert_eq!(out.relay_urls, vec!["http://h:1"]);
+        assert_eq!(
+            calls.get(),
+            0,
+            "parsed 'endpoint' must not cost a port print"
+        );
+    }
+
+    #[test]
+    fn classify_picks_beacon_relay_cb_and_prometheus() {
+        let services = vec![
+            svc("cl-1-lighthouse-geth", &[("http", "http://127.0.0.1:1111")]),
+            svc("el-1-geth-lighthouse", &[("rpc", "http://127.0.0.1:2222")]),
+            svc("helix-relay-2", &[("endpoint", "http://127.0.0.1:3333")]),
+            svc(
+                "commit-boost-1-lighthouse-geth",
+                &[("http", "http://127.0.0.1:4444")],
+            ),
+            svc("prometheus", &[("http", "http://127.0.0.1:5555")]),
+        ];
+        let out = classify_services(&services, no_fallback);
+        assert_eq!(out.beacon_urls, vec!["http://127.0.0.1:1111"]);
+        assert_eq!(
+            out.relay_urls,
+            vec!["http://127.0.0.1:3333"],
+            "helix uses 'endpoint'"
+        );
+        assert_eq!(out.cb_pbs_urls, vec!["http://127.0.0.1:4444"]);
+        assert_eq!(out.cb_service_names, vec!["commit-boost-1-lighthouse-geth"]);
+        assert_eq!(out.prometheus_url.as_deref(), Some("http://127.0.0.1:5555"));
+        // The EL is not a beacon, a relay, or a CB service.
+        assert_eq!(out.beacon_urls.len(), 1);
+    }
+
+    #[test]
+    fn classify_finds_the_signer_outside_the_commit_boost_glob() {
+        // The signer MUST NOT land in cb_service_names: three checks iterate
+        // that list shelling out `kurtosis service logs -n 200000` per name.
+        let out = classify_services(
+            &[
+                svc(
+                    "commit-boost-1-lighthouse-geth",
+                    &[("http", "http://cb:18550")],
+                ),
+                svc(
+                    "cb-signer-1-lighthouse-geth",
+                    &[("signer", "http://sg:20000")],
+                ),
+            ],
+            no_fallback,
+        );
+        assert_eq!(out.signer_urls, vec!["http://sg:20000"]);
+        assert_eq!(
+            out.cb_service_names,
+            vec!["commit-boost-1-lighthouse-geth"],
+            "the signer must NOT be swept into cb_service_names"
+        );
+        assert_eq!(out.cb_pbs_urls.len(), 1, "and must not be treated as a PBS");
+    }
+
+    #[test]
+    fn no_signer_service_is_not_an_error() {
+        // Every scenario except cb-signer runs without one.
+        let out = classify_services(
+            &[svc(
+                "commit-boost-1-lighthouse-geth",
+                &[("http", "http://cb:1")],
+            )],
+            no_fallback,
+        );
+        assert!(out.signer_urls.is_empty());
+    }
+
+    #[test]
+    fn classify_is_client_pair_agnostic() {
+        // Law 7: service names carry the pair. Patterns must not encode one.
+        let lh = classify_services(
+            &[svc("cl-1-lighthouse-geth", &[("http", "http://a:1")])],
+            no_fallback,
+        );
+        let prysm = classify_services(
+            &[svc("cl-1-prysm-nethermind", &[("http", "http://b:1")])],
+            no_fallback,
+        );
+        assert_eq!(lh.beacon_urls.len(), 1);
+        assert_eq!(
+            prysm.beacon_urls.len(),
+            1,
+            "prysm+nethermind must classify too"
+        );
+    }
+
+    #[test]
+    fn classify_finds_every_relay_flavour_and_excludes_support_services() {
+        let services = vec![
+            svc("mev-relay-api", &[("http", "http://f:1")]),
+            svc("helix-relay-2", &[("endpoint", "http://h:1")]),
+            svc("mev-rs-relay", &[("http", "http://m:1")]),
+            // Supporting services that must NOT be treated as relay APIs:
+            svc("helix-relay-postgres-2", &[("http", "http://p:1")]),
+            svc("mev-relay-website", &[("http", "http://w:1")]),
+            svc("mev-relay-housekeeper", &[("http", "http://k:1")]),
+        ];
+        let out = classify_services(&services, no_fallback);
+        assert_eq!(
+            out.relay_urls.len(),
+            3,
+            "3 relay APIs, 3 support services excluded"
+        );
+        assert!(out.relay_urls.contains(&"http://h:1".to_string()));
+        assert!(!out.relay_urls.contains(&"http://p:1".to_string()));
+    }
+
+    #[test]
+    fn classify_prefers_pbs_over_http_for_cb() {
+        let out = classify_services(
+            &[svc(
+                "commit-boost-1-lighthouse-geth",
+                &[("http", "http://x:18550"), ("pbs", "http://x:9999")],
+            )],
+            no_fallback,
+        );
+        assert_eq!(out.cb_pbs_urls, vec!["http://x:9999"], "pbs wins over http");
+    }
+
+    #[test]
+    fn classify_uses_the_fallback_only_when_the_port_was_not_parsed() {
+        // A service whose ports the inspect table did not carry: the injected
+        // lookup supplies it. This is the ONLY place IO happens in discovery.
+        let out = classify_services(&[svc("cl-1-lighthouse-geth", &[])], |svc, port| {
+            assert_eq!((svc, port), ("cl-1-lighthouse-geth", "http"));
+            Some("http://fallback:1".to_string())
+        });
+        assert_eq!(out.beacon_urls, vec!["http://fallback:1"]);
+    }
+
+    #[test]
+    fn classify_skips_a_service_with_no_usable_port() {
+        // Must warn and continue, never panic or emit a bogus URL.
+        let out = classify_services(&[svc("cl-1-lighthouse-geth", &[])], |_, _| None);
+        assert!(out.beacon_urls.is_empty());
+    }
+
+    #[test]
+    fn classify_cb_metrics_are_optional() {
+        // Metrics absent is the DEFAULT devnet shape (matrix checks then SKIP);
+        // it must not stop the PBS url from being discovered.
+        let out = classify_services(
+            &[svc(
+                "commit-boost-1-lighthouse-geth",
+                &[("http", "http://x:1")],
+            )],
+            |_, _| None,
+        );
+        assert_eq!(out.cb_pbs_urls.len(), 1);
+        assert!(out.cb_metrics_urls.is_empty());
+    }
+
+    #[test]
+    fn classify_handles_multi_relay_and_multi_cb() {
+        let out = classify_services(
+            &[
+                svc("helix-relay-2", &[("endpoint", "http://h2:1")]),
+                svc("helix-relay-3", &[("endpoint", "http://h3:1")]),
+                svc("commit-boost-1-lighthouse-geth", &[("http", "http://c1:1")]),
+                svc("commit-boost-2-lighthouse-geth", &[("http", "http://c2:1")]),
+            ],
+            no_fallback,
+        );
+        assert_eq!(out.relay_urls.len(), 2, "2-helix topology");
+        assert_eq!(out.cb_service_names.len(), 2);
+    }
+
     #[test]
     fn test_relay_identity() {
         assert_eq!(relay_identity("helix-relay").as_deref(), Some("helix"));
         assert_eq!(relay_identity("Helix-Relay").as_deref(), Some("helix"));
-        assert_eq!(relay_identity("mev-relay-api").as_deref(), Some("flashbots"));
+        assert_eq!(
+            relay_identity("mev-relay-api").as_deref(),
+            Some("flashbots")
+        );
         assert_eq!(relay_identity("mev-rs-relay").as_deref(), Some("mev-rs"));
         // Non-relay services: function should not be called for these
         // in practice (is_relay_api_service filters them), but they
@@ -613,33 +743,54 @@ mod tests {
         assert_eq!(parts[1], "cl-1-lighthouse");
     }
 
+    // Parse the real `kurtosis enclave inspect` fixture (a prime format-drift
+    // trap). Asserts the User Services table is read into service names + ports,
+    // that the header/separator/Files-Artifacts noise is skipped, and that a
+    // `<none>` ports column yields no parsed ports.
+    //
+    // Note: the shared fixture (also consumed by `sim triage`) contains only a
+    // beacon (cl-*) and a relay (mev-relay-*) service; it has no commit-boost
+    // service, so cb-name/port extraction isn't exercised here (extending the
+    // fixture would break the triage test's `len == 2` assertion).
     #[test]
-    fn test_parse_postmortem_output() {
-        let output = concat!(
-            " slot | block_hash | value\n",
-            "------+------------+-------\n",
-            "  224 | 0xabc123  | 12345\n",
-            "  223 | 0xdef456  | 67890\n",
-            "(2 rows)\n",
-        );
-        let records = parse_postmortem_output(output);
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].slot, 224);
-        assert_eq!(records[0].block_hash, "0xabc123");
-        assert_eq!(records[0].value, "12345");
-        assert_eq!(records[1].slot, 223);
-        assert_eq!(records[1].block_hash, "0xdef456");
-        assert_eq!(records[1].value, "67890");
-    }
+    fn test_parse_services_from_fixture() {
+        const INSPECT: &str = include_str!("../tests/fixtures/enclave_inspect.txt");
+        let services = parse_services(INSPECT);
 
-    #[test]
-    fn test_parse_postmortem_output_empty() {
-        let output = concat!(
-            " slot | block_hash | value\n",
-            "------+------------+-------\n",
-            "(0 rows)\n",
+        // Exactly the two User Services rows (the Files Artifacts table and all
+        // header/separator lines are skipped).
+        assert_eq!(
+            services.len(),
+            2,
+            "expected 2 user services, got {:?}",
+            services.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
-        let records = parse_postmortem_output(output);
-        assert!(records.is_empty());
+
+        // Beacon service: name + a parsed `http` port URL.
+        let beacon = services
+            .iter()
+            .find(|s| s.name == "cl-1-lighthouse-geth")
+            .expect("beacon service parsed");
+        let (_, http_url) = beacon
+            .ports
+            .iter()
+            .find(|(name, _)| name == "http")
+            .expect("beacon http port parsed");
+        assert!(
+            http_url.contains("127.0.0.1:32811"),
+            "unexpected http url: {http_url}"
+        );
+
+        // Relay service: name is extracted even though its ports column is
+        // `<none>` (a stopped service), which parses to zero ports.
+        let relay = services
+            .iter()
+            .find(|s| s.name == "mev-relay-helix")
+            .expect("relay service parsed");
+        assert!(
+            relay.ports.is_empty(),
+            "a `<none>` ports column must parse to no ports, got {:?}",
+            relay.ports
+        );
     }
 }

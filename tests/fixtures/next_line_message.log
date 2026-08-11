@@ -1,0 +1,5 @@
+2026-07-30T14:00:00.000Z INFO worker: start
+2026-07-30T14:00:00.900Z INFO worker: entering main loop
+thread 'main' panicked at src/worker.rs:88:12:
+something went terribly wrong in the worker loop
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,4 @@
+2026-07-30T15:00:00.000Z INFO indexer: allocating large in-memory buffer
+2026-07-30T15:00:00.500Z INFO indexer: still allocating (2 GiB)
+2026-07-30T15:00:01.000Z INFO indexer: still allocating (6 GiB)
+Killed

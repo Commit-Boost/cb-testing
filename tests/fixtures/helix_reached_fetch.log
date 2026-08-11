@@ -1,0 +1,7 @@
+2026-07-30T10:10:00.001Z INFO helix_relay: starting up
+2026-07-30T10:10:00.020Z INFO helix_relay: reading config from /cfg/config.yaml
+2026-07-30T10:10:00.050Z INFO helix_relay: config parsed, initialising relay
+2026-07-30T10:10:00.080Z INFO helix_relay: starting metrics server on 0.0.0.0:9000
+2026-07-30T10:10:00.100Z INFO helix_housekeeper: calling get_chain_info against beacon node http://127.0.0.1:5052
+2026-07-30T10:10:05.400Z WARN helix_housekeeper: failed fetching chain info: error sending request for url (http://127.0.0.1:5052/eth/v1/beacon/genesis): connection refused
+2026-07-30T10:10:10.400Z WARN helix_housekeeper: failed fetching chain info: connection refused, retrying

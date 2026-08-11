@@ -6,8 +6,7 @@
 use std::process::Command;
 
 use eyre::{Result, WrapErr, bail};
-use prometheus_parse::{Scrape, Value};
-use tracing::{debug, warn};
+use prometheus_parse::Scrape;
 
 /// Fetch and parse Prometheus metrics from an HTTP endpoint.
 pub async fn fetch_metrics(client: &reqwest::Client, url: &str) -> Result<Scrape> {
@@ -52,47 +51,66 @@ fn parse_metrics(text: &str) -> Result<Scrape> {
     Scrape::parse(lines).wrap_err("failed to parse Prometheus metrics")
 }
 
-/// Helper: sum all samples matching a metric name and optional label filter.
-pub fn sum_metric(scrape: &Scrape, name: &str, label_filter: Option<(&str, &str)>) -> f64 {
-    scrape
-        .samples
-        .iter()
-        .filter(|s| s.metric == name)
-        .filter(|s| {
-            if let Some((key, val)) = label_filter {
-                s.labels.get(key) == Some(val)
-            } else {
-                true
-            }
-        })
-        .map(|s| match &s.value {
-            Value::Counter(v) | Value::Gauge(v) | Value::Untyped(v) => *v,
-            _ => 0.0,
-        })
-        .sum()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Helper: check if any samples exist for a metric.
-pub fn has_metric(scrape: &Scrape, name: &str) -> bool {
-    scrape.samples.iter().any(|s| s.metric == name)
-}
+    /// The exact shape CB exposes, captured from a live devnet scrape. Every
+    /// matrix check reads these three families, so a parse regression here
+    /// makes them all SKIP - silently, since "metrics absent" is the normal
+    /// devnet state and SKIP is non-fatal.
+    const CB_SCRAPE: &str = r#"# HELP cb_pbs_relay_status_code_total relay status codes
+# TYPE cb_pbs_relay_status_code_total counter
+cb_pbs_relay_status_code_total{endpoint="get_header",http_status_code="200",relay_id="mev_relay_0"} 27
+cb_pbs_relay_status_code_total{endpoint="get_header",http_status_code="555",relay_id="mev_relay_0"} 17
+# HELP pbs_submit_block_v2_unsupported_total v2 unsupported
+# TYPE pbs_submit_block_v2_unsupported_total counter
+pbs_submit_block_v2_unsupported_total{relay_id="mev_relay_0"} 11
+# HELP cb_pbs_relay_latency HTTP latency by relay
+# TYPE cb_pbs_relay_latency histogram
+cb_pbs_relay_latency_bucket{endpoint="get_header",relay_id="mev_relay_0",le="0.05"} 12
+cb_pbs_relay_latency_bucket{endpoint="get_header",relay_id="mev_relay_0",le="+Inf"} 27
+cb_pbs_relay_latency_sum{endpoint="get_header",relay_id="mev_relay_0"} 1.5
+cb_pbs_relay_latency_count{endpoint="get_header",relay_id="mev_relay_0"} 27
+"#;
 
-/// Helper: get all sample values for a metric, optionally filtered by label.
-pub fn metric_values(scrape: &Scrape, name: &str, label_filter: Option<(&str, &str)>) -> Vec<f64> {
-    scrape
-        .samples
-        .iter()
-        .filter(|s| s.metric == name)
-        .filter(|s| {
-            if let Some((key, val)) = label_filter {
-                s.labels.get(key) == Some(val)
-            } else {
-                true
-            }
-        })
-        .filter_map(|s| match &s.value {
-            Value::Counter(v) | Value::Gauge(v) | Value::Untyped(v) => Some(*v),
-            _ => None,
-        })
-        .collect()
+    #[test]
+    fn parses_a_real_cb_scrape_with_labels_and_histograms() {
+        let scrape = parse_metrics(CB_SCRAPE).expect("real CB scrape must parse");
+        let names: Vec<&str> = scrape.samples.iter().map(|s| s.metric.as_str()).collect();
+        assert!(names.contains(&"cb_pbs_relay_status_code_total"));
+        assert!(names.contains(&"pbs_submit_block_v2_unsupported_total"));
+        // Labels must survive: every check keys on endpoint/http_status_code/relay_id.
+        let s = scrape
+            .samples
+            .iter()
+            .find(|s| {
+                s.metric == "cb_pbs_relay_status_code_total"
+                    && s.labels.get("http_status_code") == Some("555")
+            })
+            .expect("the synthetic 555 sample must be addressable by label");
+        assert_eq!(s.labels.get("relay_id"), Some("mev_relay_0"));
+    }
+
+    #[test]
+    fn empty_scrape_parses_to_no_samples_rather_than_erroring() {
+        // The default devnet exposes no metrics; that must be an empty scrape
+        // (checks then SKIP), never a hard error that fails the run.
+        let scrape = parse_metrics("").expect("empty body must parse");
+        assert!(scrape.samples.is_empty());
+    }
+
+    #[test]
+    fn comments_only_scrape_is_empty() {
+        let scrape = parse_metrics("# HELP x nothing\n# TYPE x counter\n").unwrap();
+        assert!(scrape.samples.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_from_a_dead_endpoint_errors_instead_of_hanging() {
+        // Port 1 refuses instantly. The caller turns this into a SKIP; it must
+        // never panic or block the run.
+        let client = reqwest::Client::new();
+        assert!(fetch_metrics(&client, "http://127.0.0.1:1").await.is_err());
+    }
 }

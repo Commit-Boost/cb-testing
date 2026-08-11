@@ -1,0 +1,11 @@
+time="2026-07-30T12:00:00Z" level=error msg="error while marshaling response: proto: string field contains invalid UTF-8"
+time="2026-07-30T12:00:00Z" level=warn msg="Client might have cancelled the stream, closing"
+rpc error: code = Internal desc = grpc: error while marshaling: invalid UTF-8
+2026-07-30T12:00:01.000Z INFO helix_relay: starting up
+2026-07-30T12:00:01.010Z INFO helix_relay: reading config from /cfg/config.yaml
+thread 'main' panicked at /app/crates/common/src/config.rs:203:51:
+failed to parse config file: Error("missing field `network_config`", line: 1, column: 1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+stack backtrace:
+   0: rust_begin_unwind
+   1: core::panicking::panic_fmt
