@@ -1,7 +1,7 @@
 # ethereum-package fork delta
 
 The vendored submodule at `ethereum-package/` is a fork of `ethpandaops/ethereum-package`
-(fork origin: `github.com/Commit-Boost/ethereum-package` (transferred from JasonVranek 2026-08-11), currently detached at `fbe3141`).
+(fork origin: `github.com/Commit-Boost/ethereum-package`, currently detached at `fbe3141`).
 The fork's own README / CHANGELOG / architecture read as stock upstream, so the divergence is
 recoverable only from `git log`. This file makes that delta legible for a future rebase or
 upstream PR. Cited against real commits and files; nothing here is committed by the doc itself.
@@ -12,9 +12,9 @@ Mainline `ethpandaops/ethereum-package` treats out-of-protocol block building as
 hard-coded convenience. It has no incentive to keep commit-boost first-class, and **ePBS will
 churn exactly this surface** (relay / builder / sidecar wiring). cb-testing owns the opinionated
 block-building simulation substrate for commit-boost, so it maintains this fork opinionated about
-commit-boost rather than waiting on upstream. See `docs/NORTH-STAR.md` §"The mission" and Law 6.
-The bet is explicitly "own it" (NORTH-STAR "Scars & open decisions" leaves "is the fork
-investment worth it vs waiting on ethpandaops#1384" open — revisit if #1384 lands).
+commit-boost rather than waiting on upstream. See `docs/DESIGN.md` ("What cb-testing is") and Law 6.
+The bet is explicitly "own it"; whether the fork investment is worth it long-term vs waiting on
+ethpandaops#1384 is an open question — revisit if #1384 lands.
 
 ## 2. The delta, file by file
 
@@ -68,19 +68,19 @@ Validated (`fbe3141` msg): the `cb-multiple-relays` devnet brings up `helix-rela
   `git remote add upstream https://github.com/ethpandaops/ethereum-package`.
 - **The fork is not tag-pinned.** The submodule is a bare detached HEAD at `fbe3141`; the many
   `git tag` entries are inherited upstream release tags, not a fork pin.
-- **NORTH-STAR P4** ("fork diet + treadmill") wants an `upstream` remote + a tagged pin, and wants
+- **The planned fork diet + treadmill** wants an `upstream` remote + a tagged pin, and wants
   that pin moved **in lockstep with `HELIX_RELAY_IMAGE`** (`DEFAULT_HELIX_RELAY_IMAGE =
   ...helix-relay:main` in `constants.star`).
 - **Schema source-of-truth for helix is the `:main` binary's serde metadata, not the fork
   checkout.** Helix types are not reusably importable (divergent branch / different org), and the
   helix config drifts against whatever `:main` currently deserializes — the wait-for-genesis and
   config-template fixes exist precisely because a checked-in mirror lags the deployed binary
-  (NORTH-STAR Law 1 caveat + "Scars"). Reconcile config changes by parsing against the actual
+  (DESIGN Law 1 caveat). Reconcile config changes by parsing against the actual
   image (the Preflight law), not by editing to match a stale local checkout.
 
 ## 5. What's already upstream-PR-shaped
 
-NORTH-STAR **Law 6** describes a **medium PR**: the `mev_resolver.star` component module + the
+**DESIGN Law 6** describes a **medium PR**: the `mev_resolver.star` component module + the
 `main.star` mev-dispatch refactor + the `input_parser.star` per-client builder-flag matrix.
 That code already exists here (`7efe6fe`) and cb-testing already consumes it, so upstreaming is
 maturing-what-exists, not a new build — and there is no rush (Law 6, RATIFIED).

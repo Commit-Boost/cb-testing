@@ -3,7 +3,7 @@
 > Living doc. Captures the *actual* working steps to build a local commit-boost image,
 > deploy a Kurtosis devnet, run a PBS simulation, and verify it end-to-end on this box.
 > Written as we prove each step, so it reflects reality, not theory.
-> Box: Linux, Docker 29.6, 32 cores / 60 GB. Status: **WORKING — cb-basic PASSES** (2026-07-30).
+> Reference box: Linux, Docker 29.6, 32 cores / 60 GB. Status: **WORKING — cb-basic PASSES**.
 >
 > First green e2e run: v0.11.0 SSZ commit-boost image (`commit-boost/commit-boost:kurtosis` from `main`),
 > kurtosis 1.18.1, cb-basic. cb-verify overall = PASS (13 PASS / 1 SKIP finality / 1 WARN relay-latency

@@ -1,9 +1,9 @@
 # cb-testing — ARCHITECTURE
 
-How the pieces fit together. `docs/NORTH-STAR.md` says WHY this repo exists and where it's going;
+How the pieces fit together. `docs/DESIGN.md` says WHY this repo exists and where it's going;
 this doc is the HOW — the map a newcomer needs so they don't have to reverse-engineer ~10k lines of
 Rust. Keep it small and load-bearing: WHAT each thing does lives in the code + tests; WHY a given
-design was chosen lives here and in NORTH-STAR.
+design was chosen lives here and in `docs/DESIGN.md`.
 
 Scope note: the target is a single library-first Rust app (`sim generate | preflight | run | verify |
 triage`). Today it is **most** of the way there — the verifier, config generation, preflight, and
@@ -52,7 +52,7 @@ functions.
 
 On any service crash mid-run, or a launch failure, `sim triage` (`triage.rs` → `diagnose.rs`)
 attaches each dead service's root panic to the output — observability as a property of the run, not a
-separate tool (NORTH-STAR Law 5).
+separate tool (DESIGN Law 5).
 
 `just` verbs are thin wrappers: `generate-configs` → `sim generate`; `e2e`/`testnet` →
 `run-and-verify.sh`; `verify*` → `cb-verify` directly; `test-all` → `cb-orchestrator`.
@@ -61,7 +61,7 @@ separate tool (NORTH-STAR Law 5).
 
 ## 2. Two binaries + a shared library (+ `sim`)
 
-The crate is **library-first** (NORTH-STAR "architecture target"): the mature verifier modules live in
+The crate is **library-first** (the target architecture; see `docs/DESIGN.md`): the mature verifier modules live in
 `src/lib.rs` (`cb_testnet_verifier`) so every binary imports them instead of re-declaring or
 re-implementing. `Cargo.toml` declares one lib and five bins.
 
@@ -96,7 +96,7 @@ different report types because `sim` runs before/around a devnet, not against a 
 | `checks/chain_health.rs` | Tier-1/2 chain checks: finality, sync status, missed-slot rate. |
 | `checks/relay_pipeline.rs` | Relay-side checks: payloads delivered, builder blocks received, MEV delivery rate, validator registrations. |
 | `checks/payload_matching.rs` | Tier-1: delivered payload `block_hash` matches the on-chain block. |
-| `checks/best_bid.rs` | Aggregated-bidding check: compares bid values across relays (not union-by-slot — NORTH-STAR Law 3). |
+| `checks/best_bid.rs` | Aggregated-bidding check: compares bid values across relays (not union-by-slot — DESIGN Law 3). |
 | `checks/mux_routing.rs` | Parse `[[mux]]` sections from the CB config, fetch + parse CB PBS logs (ANSI-aware), verify each proposer pubkey routed to its assigned relay. Also `fetch_service_logs` / `parse_cb_log_line`. |
 | `checks/cb_metrics.rs` | CB Prometheus status-code matrices (get_header / register_validator / submit_blinded_block / status), v1→v2 fallback, get_header latency p95. Emitted at tier 2, but a `*_matrix` FAIL (a 5xx = real pipeline failure) is **escalated to tier 1** so it gates the exit code. |
 
@@ -153,7 +153,7 @@ if the fork adds a template var, this map is where the contract breaks, and the 
 bodies are ported **verbatim** from the retired Python `generate_kurtosis_configs.py` into `const`
 strings / string builders — the P2 grill killed the "build from `cb_common` structs / typed helix
 mirror" plan (helix types aren't importable; the serde-sentinel mechanism was fragile; the templates
-weren't actually duplicated). See `docs/plans/P2-consolidate-config-gen.md`.
+weren't actually duplicated). See `.agent/plans/P2-consolidate-config-gen.md`.
 
 **The golden-fixture byte-identity guard is the oracle.** `tests/fixtures/golden-configs/<scenario>.yml`
 snapshots the proven-good output; `every_scenario_matches_its_golden` asserts `sim generate` reproduces
@@ -206,7 +206,7 @@ The per-check catalog (names, tiers, thresholds, what each asserts) lives in **`
   config API — which is exactly what lets a config say "helix relay + commit-boost sidecar +
   reth-rbuilder builder" and, later, swap in an ePBS builder. A pure shim over today's upstream would
   have to reimplement a brittle 7-client flag matrix — worse than the fork. cb-testing is the fork's
-  consumer/dogfood (NORTH-STAR Law 6). ONE fork; do not maintain two.
+  consumer/dogfood (DESIGN Law 6). ONE fork; do not maintain two.
 
 - **The pure `classify_*` / pure-core seam.** Every verb that makes a judgement splits into a **pure
   classifier** (data in, verdict out — unit-testable against fixture logs, no devnet, no docker) and a
@@ -218,23 +218,23 @@ The per-check catalog (names, tiers, thresholds, what each asserts) lives in **`
   classify_endpoint, check_v2_fallback, check_relay_latency, histogram_quantile}`, and
   `live::compute_deltas`. These pure cores (generic over the hash/value type, taking pre-fetched
   `BTreeMap`s) are the unit-tested surface; the fixtures under `tests/fixtures/` are the real test
-  inputs. This is NORTH-STAR Law 4 ("verdict logic is TDD-able without a devnet"). The two exceptions:
+  inputs. This is DESIGN Law 4 ("verdict logic is TDD-able without a devnet"). The two exceptions:
   `chain_health` and `relay_pipeline` inline their verdicts in the async check fns and have **no**
-  factored-out pure classifier — the standing gap that P3 (`docs/plans/P3-check-trustworthiness.md`)
+  factored-out pure classifier — the standing gap that P3 (`.agent/plans/P3-check-trustworthiness.md`)
   closes.
 
 - **Preflight-first, observability-as-a-property.** Validating a rendered config against the real image
   in ~1s (before a ~10-min devnet spend) is the single biggest agent-friendliness win; auto-triage on
   any failure means a run emits its own root cause. Both are normal outputs of a normal run, one source
   of truth (`--log-format json` for agents, pretty for humans) — never a separate agent-only tool
-  surface. See NORTH-STAR "the thesis" + Laws 1 and 5.
+  surface. See DESIGN's thesis + Laws 1 and 5.
 
 ---
 
 ## See also
 
-- `docs/NORTH-STAR.md` — the mission, the design laws, the staged plan (P0–P5 + ePBS).
+- `docs/DESIGN.md` — the mission and the design laws.
 - `docs/CHECKS.md` — the per-check catalog (tiers, thresholds, feature-assertion status).
 - `docs/local-kurtosis-e2e.md` — the runbook + the paid-for incident behind half the design.
-- `docs/plans/{P1-sim-preflight-triage,P2-consolidate-config-gen,P3-check-trustworthiness}.md` — the
-  grilled rationale for each slice.
+- `.agent/plans/{P1-sim-preflight-triage,P2-consolidate-config-gen,P3-check-trustworthiness}.md` — the
+  grilled rationale for each slice (internal).

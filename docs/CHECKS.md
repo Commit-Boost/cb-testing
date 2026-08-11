@@ -399,7 +399,7 @@ hardcoded to 500 ms.
 
 ## The P3 trust-fix notes (the load-bearing WHY behind three WARN gates)
 
-Three checks were rewritten (plan: `docs/plans/P3-check-trustworthiness.md`, North-Star Law 3 "a
+Three checks were rewritten (plan: `.agent/plans/P3-check-trustworthiness.md`, DESIGN Law 3 "a
 harness that lies green is worse than an ugly one") to kill a **false green** — a PASS reported while
 the check had verified nothing. Each now WARNs instead of passing-on-nothing:
 
@@ -426,7 +426,7 @@ the intro.
 
 ## Known gaps and caveats (factual, from the code)
 
-- **Feature-fired assertions (Law 3) — mostly closed.** North-Star Law 3 wants every scenario to
+- **Feature-fired assertions (Law 3) — mostly closed.** DESIGN Law 3 wants every scenario to
   positively assert its feature's codepath fired. Now five checks do: `mux.routing`, `relay.best_bid`,
   and the config-gated `feature.timing_games` (≥1 `TG:` debug line), `feature.extra_validation` (≥1
   parent-block fetch log). The residual gap is **`skip_sigverify`**: it is a *negative* codepath

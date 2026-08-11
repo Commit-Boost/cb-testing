@@ -6,7 +6,7 @@ does not re-explain the architecture or the check catalog:
 
 - **[`docs/ARCH.md`](ARCH.md)** — how the pieces fit (module map, the config↔fork seam, the verdict model).
 - **[`docs/CHECKS.md`](CHECKS.md)** — the authoritative per-check catalog + the verdict contract for consumers.
-- **[`docs/NORTH-STAR.md`](NORTH-STAR.md)** — why the repo exists + the design laws referenced below (Law 1
+- **[`docs/DESIGN.md`](DESIGN.md)** — why the repo exists + the design laws referenced below (Law 1
   real-schema configs, Law 3 feature-asserting scenarios, Law 4 TDD-able verdicts, Law 5 observability).
 - **[`docs/local-kurtosis-e2e.md`](local-kurtosis-e2e.md)** — the operational runbook + kurtosis pin.
 
@@ -60,8 +60,8 @@ probe) run against a live enclave without a full observation window — useful f
 
 ## 2. How to add a CHECK
 
-A check is a pure verdict over already-fetched pipeline data. The pattern (North-Star **Law 4** — "verdict
-logic is TDD-able without a devnet"; the P3 plan calls it the `classify_*` seam):
+A check is a pure verdict over already-fetched pipeline data. The pattern (**DESIGN Law 4** — "verdict
+logic is TDD-able without a devnet"; the check-trustworthiness plan calls it the `classify_*` seam):
 
 ### The two-part shape
 
@@ -128,8 +128,8 @@ consumer gate on the JSON `result` (§4).
 ### The anti-pattern (why the seam is non-negotiable)
 
 **Do not weld the verdict into the async fetch fn.** `chain_health` and `relay_pipeline` inline their verdicts
-in the async check fns and have *no* factored-out classifier — which is exactly the standing gap the P3 plan
-([`docs/plans/P3-check-trustworthiness.md`](plans/P3-check-trustworthiness.md)) exists to close. A verdict
+in the async check fns and have *no* factored-out classifier — which is exactly the standing gap the
+check-trustworthiness plan ([`.agent/plans/P3-check-trustworthiness.md`](../.agent/plans/P3-check-trustworthiness.md)) exists to close. A verdict
 tangled with `await` calls cannot be unit-tested without a devnet, so its pass/fail boundaries go unproven —
 which is how false-greens ship. Pure classifier first, thin I/O shell second, always.
 
@@ -203,5 +203,5 @@ escalation: [`docs/CHECKS.md`](CHECKS.md).
 Do not reverse-engineer the tree; the module-by-module map is **[`docs/ARCH.md`](ARCH.md) §2–3** (shared lib
 `src/lib.rs`, the `cb-verify` binary `src/main.rs`, the `sim` submodules under `src/bin/sim/`, and the
 config↔fork seam). The check catalog is [`docs/CHECKS.md`](CHECKS.md); the fork divergence is
-[`docs/fork-delta.md`](fork-delta.md); the current backlog of what to build next is
-[`docs/SWEEP-BACKLOG.md`](SWEEP-BACKLOG.md) and [`docs/plans/INDEX.md`](plans/INDEX.md).
+[`docs/fork-delta.md`](fork-delta.md); the current backlog of what to build next is the internal
+[`.agent/SWEEP-BACKLOG.md`](../.agent/SWEEP-BACKLOG.md) and [`.agent/plans/INDEX.md`](../.agent/plans/INDEX.md).
