@@ -193,7 +193,7 @@ This is the same defect class the harness keeps finding in itself: a check that 
 - **Pass `kurtosis run` an ABSOLUTE package path from a script.** `run-and-verify.sh` resolves
   `$REPO_DIR/ethereum-package`; a relative `./ethereum-package` resolves against the caller's cwd and fails
   with a confusing "no kurtosis.yml" error.
-- **`ethereum-package/` is a FORK** (`JasonVranek/ethereum-package`, branch `cb-testing`), pinned as a
+- **`ethereum-package/` is a FORK** (`Commit-Boost/ethereum-package` - org-transferred from JasonVranek 2026-08-11 - branch `cb-testing`), pinned as a
   detached-HEAD submodule and load-bearing (empty without `--init`). Changes there must be **pushed** or
   every other clone breaks. There is no `upstream` remote configured. See docs/fork-delta.md.
 - **`configs/generated/` is gitignored, but `src/bin/sim/render.rs` and `genmodel/scenario.rs`

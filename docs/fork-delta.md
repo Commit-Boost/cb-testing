@@ -1,7 +1,7 @@
 # ethereum-package fork delta
 
 The vendored submodule at `ethereum-package/` is a fork of `ethpandaops/ethereum-package`
-(fork origin: `github.com/JasonVranek/ethereum-package`, currently detached at `fbe3141`).
+(fork origin: `github.com/Commit-Boost/ethereum-package` (transferred from JasonVranek 2026-08-11), currently detached at `fbe3141`).
 The fork's own README / CHANGELOG / architecture read as stock upstream, so the divergence is
 recoverable only from `git log`. This file makes that delta legible for a future rebase or
 upstream PR. Cited against real commits and files; nothing here is committed by the doc itself.
@@ -64,7 +64,7 @@ Validated (`fbe3141` msg): the `cb-multiple-relays` devnet brings up `helix-rela
 ## 4. Rebase / maintenance notes
 
 - **No `upstream` remote is configured.** `git remote -v` shows only `origin =
-  JasonVranek/ethereum-package`. A rebase today has nothing to rebase against without first
+  Commit-Boost/ethereum-package`. A rebase today has nothing to rebase against without first
   `git remote add upstream https://github.com/ethpandaops/ethereum-package`.
 - **The fork is not tag-pinned.** The submodule is a bare detached HEAD at `fbe3141`; the many
   `git tag` entries are inherited upstream release tags, not a fork pin.

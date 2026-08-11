@@ -156,7 +156,7 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
   `[1, 2]`; `relay.best_bid` gained `divergent_slots` + a discrimination-vs-degenerate-tie detail.
   Live run: overall PASS, **65/65 competitive slots divergent, 0 suboptimal** — CB delivered the
   higher (+1 ETH) bid on every slot (e.g. slot 5: relay_0 1.0439 vs relay_1 2.0439 ETH). NOTE:
-  submodule fc5e6a2 is local-only (with 43fe436+fbe3141) — J must push to JasonVranek/ethereum-package.
+  submodule fc5e6a2 is local-only (with 43fe436+fbe3141) — J must push to Commit-Boost/ethereum-package (org-transferred 2026-08-11).
 - NEXT: #7 Law 7 EL/CL matrix.
 - **NEW (surfaced by Law-3):** bad-signature-injecting helix mock relay — the only way to turn
   `feature.skip_sigverify` from an honest WARN into a real ON/OFF differential test (ON delivers the
