@@ -20,7 +20,7 @@ at three already-fixed bugs before anyone checked the code.
 3. **CLOSED** — README + `.env.example` now mark the flashbots relay image "no longer used".
 4. **CLOSED** — the dead-flashbots-Postgres salvage query is gone from `discovery.rs`; `relay.rs`
    pagination is order-agnostic and defensive against a relay that ignores the cursor.
-5. **CLOSED** — `docs/CHECKS.md`, `docs/ARCH.md`, `docs/fork-delta.md`, `docs/plans/INDEX.md` exist.
+5. **CLOSED** — `docs/CHECKS.md`, `docs/ARCH.md`, `docs/fork-delta.md`, `.agent/plans/INDEX.md` exist.
 
 **Rule this bought:** a do-first entry must carry the evidence that would falsify it (a commit, a
 test name, a grep). Verify against the code before working anything off this list.
@@ -49,7 +49,7 @@ test name, a grep). Verify against the code before working anything off this lis
    Effort M.
 5. **[DOCS] New cross-cutting docs** (in flight): `docs/CHECKS.md` (check catalog + the WARN-non-fatal exit
    contract), `docs/ARCH.md` (how it all fits), `docs/fork-delta.md` (the ethereum-package divergence);
-   re-stamp P1/P2/P3 plan statuses (all shipped but read "uncommitted/backed-out") + add `docs/plans/INDEX.md`.
+   re-stamp P1/P2/P3 plan statuses (all shipped but read "uncommitted/backed-out") + add `.agent/plans/INDEX.md`.
 
 ## Bugs / correctness (from the correctness + feature sweeps)
 - **C1 (Critical)** relay-death false-green — see Do-first #1.
@@ -72,7 +72,7 @@ test name, a grep). Verify against the code before working anything off this lis
   distinct keys); mux check verifies pubkey→mux, not mux→relay-URL.
 
 ## Documentation (from the docs sweep — top-10 plan)
-1. Fix flashbots staleness (Do-first #3). 2. Re-stamp plans + `docs/plans/INDEX.md`. 3. `docs/CHECKS.md`
+1. Fix flashbots staleness (Do-first #3). 2. Re-stamp plans + `.agent/plans/INDEX.md`. 3. `docs/CHECKS.md`
 (catalog + exit contract). 4. `docs/fork-delta.md` + configure an `upstream` remote. 5. `docs/ARCH.md`.
 6. Refresh README module map + `sim` verb contract (generate/preflight/triage + `--check`). 7. "How to add a
 check / a scenario" contributor guide (lift P3's classify-seam recipe + the Scenario/Images/golden pattern).
