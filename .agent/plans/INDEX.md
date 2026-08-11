@@ -1,6 +1,6 @@
 # Plans index
 
-Status classification of every `docs/plans/*` doc. A plan is a PROPOSAL that must EXPIRE: on ship it becomes
+Status classification of every `.agent/plans/*` doc. A plan is a PROPOSAL that must EXPIRE: on ship it becomes
 `landed` (history — extract durable WHY into site-comments, point at the implementing files). Ground steering
 on `live` plans; treat `landed` ones as history.
 
@@ -11,13 +11,15 @@ on `live` plans; treat `landed` ones as history.
 | [P3-check-trustworthiness](P3-check-trustworthiness.md) | **landed** (`2868e8e`, `cad323a`, `145d7e1`) | The three false-green fixes (mux.routing WARN-gate, payload per-(relay,slot) conflict detection, best_bid v2 sourced from CB getHeader logs) — all live-devnet-validated | `src/checks/{mux_routing,payload_matching,best_bid}.rs` |
 
 ## Other steering docs (not plans)
-- [SWEEP-BACKLOG.md](../SWEEP-BACKLOG.md) — **live** — the prioritized backlog from the 2026-08-01 six-lens
+- [SWEEP-BACKLOG.md](../SWEEP-BACKLOG.md) — **live** — the prioritized backlog from the six-lens
   sweep (bugs, docs, tests, perf, refactoring, features). The current source of "what's next."
-- [NORTH-STAR.md](../NORTH-STAR.md) — durable WHY + design laws + the staged plan P0-P5. (The P0-P5 status
-  ledger inside it lags reality; this INDEX + SWEEP-BACKLOG are the current status of record.)
-- [ARCH.md](../ARCH.md) / [CHECKS.md](../CHECKS.md) / [fork-delta.md](../fork-delta.md) — reference (HOW it
+- [NORTH-STAR.md](../NORTH-STAR.md) — the internal staged plan P0-P5, ratified directions, and open scars.
+  (The public durable WHY + the 7 design laws live in `../../docs/DESIGN.md`; the P0-P5 ledger lags
+  reality — this INDEX + SWEEP-BACKLOG are the current status of record.)
+- [DESIGN.md](../../docs/DESIGN.md) — the public mission + the 7 design laws (cited elsewhere as "Law N").
+- [ARCH.md](../../docs/ARCH.md) / [CHECKS.md](../../docs/CHECKS.md) / [fork-delta.md](../../docs/fork-delta.md) — reference (HOW it
   fits, the check catalog + verdict contract, the ethereum-package divergence).
-- [local-kurtosis-e2e.md](../local-kurtosis-e2e.md) — the operational runbook (gotchas, kurtosis pin).
+- [local-kurtosis-e2e.md](../../docs/local-kurtosis-e2e.md) — the operational runbook (gotchas, kurtosis pin).
 
 ## Not-yet-written (candidates from the sweep)
 - P4 (fork diet: upstream remote + tag pin + `bump` workflow), P5 (`sim run` — fold the shell launcher +

@@ -7,7 +7,7 @@
 > pain), `sim` becomes a bin sharing an extracted lib (not a duplicating crate), preflight gets a
 > 3-valued verdict, and the honesty claims are corrected.
 
-## Framing: observability by default, NOT agent-only tooling (J 2026-07-30)
+## Framing: observability by default, NOT agent-only tooling
 P1's deliverable is not "CLI verbs for agents." It is that the harness is **observable by default**:
 structured `tracing` events + a durable JSON verdict report, and — the key part — **root-cause capture is
 a PROPERTY OF THE RUN**: when a service dies, the harness automatically attaches that container's root
@@ -145,9 +145,9 @@ Per the coverage grill: a manual verb diagnoses faster but doesn't prevent the s
   WHY-comment at the site + a residual-class row below; the fix belongs to `sim run` (P2) that owns the pull.
 - [x] **Step 2:** on any launch failure, auto-invoke `sim triage <enclave>` and surface its JSON. DONE —
   `kurtosis run` wrapped in `if !`; on failure fires `sim triage "$ENCLAVE"` then exits 1. **NOT committed**
-  (awaiting J review of the full P1 diff).
+  (awaiting maintainer review of the full P1 diff).
 
-## Status: LANDED (committed `a0c8be4`+; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{preflight,triage,diagnose,render}.rs`, `scripts/run-and-verify.sh`. See `docs/plans/INDEX.md`.
+## Status: LANDED (committed `a0c8be4`+; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{preflight,triage,diagnose,render}.rs`, `scripts/run-and-verify.sh`. See `INDEX.md`.
 (historical detail below — Tasks 0-4 all committed 2026-07-30)
 77 tests green (lib+bin, 0 fail/0 warn). Proven end-to-end against the real `:main` image: valid cb-basic.yml
 -> `helix: pass`, exit 0, ~8.5s; a config with `hostname` renamed -> `Fail{field:"hostname"}`, exit 1, ~0.3s.

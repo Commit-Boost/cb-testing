@@ -1,4 +1,4 @@
-# Sweep backlog — 2026-08-01
+# Sweep backlog
 
 Synthesis of a six-lens exhaustive sweep (docs, refactoring, performance, test-coverage, feature-roadmap,
 correctness) of the cb-testing harness after the P1/P2/P3 + 2-helix work landed. Items are grouped by kind;
@@ -42,7 +42,6 @@ test name, a grep). Verify against the code before working anything off this lis
 3. **[DOCS] Fix the flashbots→2-helix staleness cluster.** README:28/61/62 + `.env.example:13-15` still say
    multi-relay = "helix + flashbots"; it's now two helix instances (flashbots = builder only). Also add
    `relay.best_bid` to the README check list and `--skip-finalization-check` to the CLI docs. Effort S.
-   (Being done this session.)
 4. **[MIGRATION DEBT] Finish the 2-helix migration honestly** — the flashbots-era assumptions the migration
    left stale: `discovery.rs:428-470` post-mortem salvage queries the dead flashbots Postgres
    (`mev-relay-postgres`/`mev_boost_relay`) → C1's safety net is inoperative + misattributes the error;
@@ -156,15 +155,15 @@ snapshot relay-data-API during the window (relay-dies-before-checks class). 18. 
   `[1, 2]`; `relay.best_bid` gained `divergent_slots` + a discrimination-vs-degenerate-tie detail.
   Live run: overall PASS, **65/65 competitive slots divergent, 0 suboptimal** — CB delivered the
   higher (+1 ETH) bid on every slot (e.g. slot 5: relay_0 1.0439 vs relay_1 2.0439 ETH). NOTE:
-  submodule fc5e6a2 is local-only (with 43fe436+fbe3141) — J must push to Commit-Boost/ethereum-package (org-transferred 2026-08-11).
+  submodule fc5e6a2 is local-only (with 43fe436+fbe3141) — the maintainer must push to Commit-Boost/ethereum-package (org-transferred 2026-08-11).
 - NEXT: #7 Law 7 EL/CL matrix.
 - **NEW (surfaced by Law-3):** bad-signature-injecting helix mock relay — the only way to turn
   `feature.skip_sigverify` from an honest WARN into a real ON/OFF differential test (ON delivers the
   bad-sig bid, OFF rejects with `ValidationError::Sigverify`). Needs a fault mode in
   `src/bin/sim/genmodel/helix.rs` + the relay mock. M/L. Same capability would sharpen any negative-path
   feature test. Filed as a follow-up, not built.
-- **DEFERRED — do NOT autonomously build:** #5 ePBS first slice belongs to the `/epbs` arc, where J
-  gates every design decision and nothing commits without his review. Surface it to J; don't self-drive it.
+- **DEFERRED — do NOT autonomously build:** #5 ePBS first slice belongs to the `/epbs` arc, where the maintainer
+  gates every design decision and nothing commits without review. Surface it to the maintainer; don't self-drive it.
 
 ### skip_sigverify differential — CLOSED 2026-08-04 (live, both arms)
 The bad-signature follow-up filed below is DONE, and it needed no relay/mock change: CB validates
@@ -381,7 +380,7 @@ All 8 pre-existing goldens byte-identical. **Still owed: a live devnet run on th
   25%, so the fix is working); it is the aggressive timing-games config (target_first_request_ms=100,
   timeout_get_header_ms=400, frequency=200) polling helix before it has a bid, and helix answering 5xx.
   The DELIVERY pipeline was fully green (best_bid / payloads_delivered / payload_hash / mev_delivery all
-  PASS), so MEV worked — the 5xx are the expected consequence of the feature under test. **Question for J:**
+  PASS), so MEV worked — the 5xx are the expected consequence of the feature under test. **Question for the maintainer:**
   should timing-games exempt / down-tier the get_header matrix (it fails on its own aggressive-polling
   behavior), or is a high early-poll 5xx rate a real signal worth failing on? Could not root-cause the
   exact 5xx source (enclave torn down); confirm with `--keep` + relay logs next run. NOT patched.
@@ -399,3 +398,10 @@ All 8 pre-existing goldens byte-identical. **Still owed: a live devnet run on th
   (`145d7e1`). Law 6b (external-builder hook) is already satisfied in the fork.
 - The two defects that mis-verdict a NORMAL run today are C1 (false green on relay death) and H2 (false red
   on warmup 5xx). Everything else is hardening, ergonomics, or reach.
+
+## Upstream side-findings parked (note, no issues)
+- **v0.10.0 binaries self-report `0.10.0-rc4`** — Cargo.toml at the tag was never bumped past rc4.
+- **Doubled-prefix metric** `cb_pbs_pbs_submit_block_v2_unsupported_total` (real naming bug; the harness
+  PINS the doubled name in cb_metrics, so a rename is a coordinated CB+harness change, not a silent fix).
+- **k8s Helm chart** default `image.tag: v0.4.0` predates the unified CLI it invokes — unmodified
+  `helm install` cannot work; chart bug, docs left factually correct with a pin-the-tag warning.

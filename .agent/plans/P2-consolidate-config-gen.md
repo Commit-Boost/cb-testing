@@ -7,7 +7,7 @@
 Rust binary (the ratified full-Rust consolidation), and collapse the image-name drift — WITHOUT typed
 serde mirrors of the config bodies.
 
-## Status: LANDED (committed `097a0b7`→`05a450f`; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{generate,genmodel/*}.rs`; Python generator + stale example deleted. See `docs/plans/INDEX.md`.
+## Status: LANDED (committed `097a0b7`→`05a450f`; pushed on `feat/sim-harness`). Implementing files: `src/bin/sim/{generate,genmodel/*}.rs`; Python generator + stale example deleted. See `INDEX.md`.
 (historical detail below — 2026-07-30)
 `feat/sim-harness`: `097a0b7` (Task 0, golden harness) → `70e4081` (Task 1, `sim generate` + review fixes)
 → `05a450f` (Task 2, retire Python + repoint docs). All 6 scenarios reproduce their golden byte-for-byte
@@ -146,7 +146,7 @@ Note: the helix block is byte-identical in every scenario (do not add per-scenar
 - **Typed serde config mirrors** — refuted above (no duplication to kill, no guard gained, fragile). If CB
   config ever actually drifts (it hasn't; helix is the drifter), revisit — but only behind a real CB-image
   preflight, not golden-equivalence.
-- **CB-image preflight** (fill P1's `Inconclusive` stub) — **PROBED 2026-07-30; deferred to J as a
+- **CB-image preflight** (fill P1's `Inconclusive` stub) — **PROBED 2026-07-30; deferred to the maintainer as a
   trust-model call, NOT built.** Empirical findings from `commit-boost/commit-boost:kurtosis` (entrypoint
   `commit-boost pbs`, reads `CB_CONFIG`):
   - CB parses the TOML EAGERLY and errors fast + structured (like helix). A config with a valid dummy relay
@@ -161,20 +161,20 @@ Note: the helix block is byte-identical in every scenario (do not add per-scenar
     PASS marker** — verified. A CB preflight would thus report `commit_boost: pass` for a drifted-pbs config
     and an exit-0 gate would let it through. That is an instrument that lies for the pbs-field drift class
     ([[pilot-breaks-the-instrument]]). So this is NOT a clean autonomous build.
-  - **Decision for J:** (a) keep the honest `Inconclusive` stub (validates nothing but claims nothing), or
+  - **Decision for the maintainer:** (a) keep the honest `Inconclusive` stub (validates nothing but claims nothing), or
     (b) ship a PARTIAL CB preflight that catches relay/mux/required-field drift but false-passes pbs-field
     drift — only acceptable if the Pass is scoped honestly AND we accept the exit-0 gate can pass pbs drift.
     Given CB is our own byte-verified-generated config (our port can't drift silently — the golden test
     guards it), the marginal value of (b) is low and the false-pass risk is real; recommendation leans (a)
-    until CB config is actually authored by hand somewhere. Fixtures for (b) are captured if J wants it.
+    until CB config is actually authored by hand somewhere. Fixtures for (b) are captured if wanted.
   - Also: mux's `{{ index .Relays N }}` has no dummy in `render.rs`, so the mux CB block needs its own
     dummy-relay substitution (not the strip-the-loop path) before it could be preflighted.
 
-## Flagged for J (higher-value-than-typing, per the scope grill — do NOT start without a nod)
+## Flagged for the maintainer (higher-value-than-typing, per the scope grill — do NOT start without a nod)
 The scope grill argued P3's false greens outrank config-gen ergonomics: the mux pass-gate keys on
 `total_events` not `pubkeys_verified` (reports "all routing verified" having verified zero decisions when CB
 debug logging is off), and the best-bid check unions-by-slot instead of comparing bid VALUES across relays
 (one delivering relay passes identically to genuine two-relay aggregation). A harness that lies green is
-worse than an ugly generator. These are Law 3 defects (`src/checks/`). Recommend J weigh pulling them ahead
+worse than an ugly generator. These are Law 3 defects (`src/checks/`). Recommend weighing pulling them ahead
 of any further config work. Left as a flag because they change VERIFICATION verdicts — a judgment call worth
-J's eyes, not an autonomous bake-in.
+maintainer review, not an autonomous bake-in.

@@ -1,8 +1,8 @@
 # P3 — check trustworthiness: kill the false-greens, make verdict math testable
 
-> **PROPOSAL — awaiting J's go.** Everything here CHANGES VERDICT LOGIC (what the harness reports as
-> pass/fail), so it is deliberately NOT started autonomously. It is written so J can approve a direction
-> in one line. Evidence is code-confirmed (file:line below).
+> **PROPOSAL — awaiting ratification.** Everything here CHANGES VERDICT LOGIC (what the harness reports
+> as pass/fail), so it is deliberately NOT started autonomously. It is written so a maintainer can approve
+> a direction in one line. Evidence is code-confirmed (file:line below).
 
 **Goal:** A harness that lies green is worse than an ugly one (North Star Law 3). Three checks currently
 report PASS while having verified nothing — fix them, and remove the structural reason they hid.
@@ -34,7 +34,7 @@ classifier, then test + correct it.**
    the adversarial multi-relay case. (Also noted while here: `missed` — relay delivered a slot with no
    on-chain block — is counted but never downgrades the verdict; and a mismatch is WARN, not FAIL.)
 
-## Status: LANDED — all 3 fixed + twice-reviewed + live-devnet-validated. best_bid v2 RE-LANDED via the CB-log source (`145d7e1`), NOT backed out (the note below predates the re-land). Files: `src/checks/{mux_routing,payload_matching,best_bid}.rs`. See `docs/plans/INDEX.md`.
+## Status: LANDED — all 3 fixed + twice-reviewed + live-devnet-validated. best_bid v2 RE-LANDED via the CB-log source (`145d7e1`), NOT backed out (the note below predates the re-land). Files: `src/checks/{mux_routing,payload_matching,best_bid}.rs`. See `INDEX.md`.
 (historical detail below; best-bid section reads "backed out" but v2 shipped — see the commit trail)
 
 ### Superseded status (2026-07-31, kept for history): 2 of 3 landed, best-bid backed out pending correct source
@@ -50,7 +50,7 @@ classifier, then test + correct it.**
   OFFERED bid. Needs CB-log context (enclave + cb_service_names) plumbed into the check — its own reviewed
   slice. `check_payloads_delivered_multi` stays as the coverage check meanwhile.
 
-**Review confirmations / notes for J:**
+**Review confirmations / notes for the maintainer:**
 - **WARN is non-fatal** (`report.rs:136`, `main.rs:547`): exit code / overall result key ONLY on a tier-1
   FAIL. So these PASS→WARN changes do NOT break CI/the nightly. BUT that means a real anomaly these
   trust-core checks detect (relay equivocation; unverifiable routing) yields a GREEN exit — a CI consumer
@@ -60,7 +60,7 @@ classifier, then test + correct it.**
   indistinguishable from a transient beacon error; a mux "using mux config" event for a pubkey our TOML
   parser missed folds into the generic WARN rather than its own parse-gap signal.
 
-## J's decisions (2026-07-31) — RATIFIED
+## Ratified decisions
 - **mux.routing:** unverifiable (`pubkeys_verified==0`) → **WARN** (not PASS), and CB debug logging is **required**
   for mux scenarios. Finding: the generated cb-mux config ALREADY sets `[logs.stdout] level="debug"`, so the
   requirement is mostly satisfied by generation; fix = the WARN gate + a guard/assert that debug stays on.
@@ -72,7 +72,7 @@ classifier, then test + correct it.**
   the max-value bid across relays; KEEP the existing delivered-count as a coverage check.
 - **CB-preflight:** keep the honest `Inconclusive` stub — NOT shipping the partial preflight.
 
-## Judgment calls for J (each changes what real runs report) — ANSWERED ABOVE
+## Judgment calls for the maintainer (each changes what real runs report) — ANSWERED ABOVE
 - **mux.routing (Tier-1):** when routing is unverifiable (CB debug logging off → `pubkeys_verified==0`),
   should it WARN or FAIL? WARN is honest ("couldn't verify") but if mux.routing stays Tier-1-must-pass, a
   WARN could fail runs that pass today. Options: (a) require CB debug logging on for mux scenarios (make it a
@@ -102,4 +102,4 @@ mechanical and reviewable; steps 2-4 are where your judgment-call answers above 
 - Confirmed + documented (this doc). Guard-branch Law 4 tests for chain_health + payload_matching already
   landed (`b0947b4`) — they cover the pre-fetch skip branches; the classifier extraction above is what makes
   the REAL boundaries testable.
-- NOT started (verdict-changing). Supersedes the P2 plan's "Flagged for J" section.
+- NOT started (verdict-changing). Supersedes the P2 plan's "Flagged for the maintainer" section.

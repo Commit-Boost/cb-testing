@@ -27,7 +27,7 @@ status: live
 ethereum-package lacked the config support. We control the fork, so it is buildable. This doc is the
 researched runtime contract; build against it, do not re-derive it.
 
-**Priority:** dessert. The MEV scenario matrix (docs/SWEEP-BACKLOG.md) comes first - a signer test
+**Priority:** dessert. The MEV scenario matrix (../SWEEP-BACKLOG.md) comes first - a signer test
 riding on an unreliable MEV harness proves nothing.
 
 ## The runtime contract (researched from commit-boost-client source, 2026-08-04)
