@@ -7,7 +7,7 @@
 //! parameterized template), and the `{{ }}` runtime holes are filled by the
 //! ethereum-package at launch, so they stay as literal text. Typing lives only
 //! at the assembly layer (`Scenario` + `Images`) where it actually pays. See
-//! `.agent/plans/P2-consolidate-config-gen.md` for the grilled rationale.
+//! the P2 config-gen consolidation rationale.
 //!
 //! Task 0 lands only the golden-fixture regression harness; the generator bodies
 //! (`helix`, `cb`, `scenario` submodules) land in Task 1.

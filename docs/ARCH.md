@@ -153,7 +153,7 @@ if the fork adds a template var, this map is where the contract breaks, and the 
 bodies are ported **verbatim** from the retired Python `generate_kurtosis_configs.py` into `const`
 strings / string builders — the P2 grill killed the "build from `cb_common` structs / typed helix
 mirror" plan (helix types aren't importable; the serde-sentinel mechanism was fragile; the templates
-weren't actually duplicated). See `.agent/plans/P2-consolidate-config-gen.md`.
+weren't actually duplicated)..
 
 **The golden-fixture byte-identity guard is the oracle.** `tests/fixtures/golden-configs/<scenario>.yml`
 snapshots the proven-good output; `every_scenario_matches_its_golden` asserts `sim generate` reproduces
@@ -220,7 +220,7 @@ The per-check catalog (names, tiers, thresholds, what each asserts) lives in **`
   `BTreeMap`s) are the unit-tested surface; the fixtures under `tests/fixtures/` are the real test
   inputs. This is DESIGN Law 4 ("verdict logic is TDD-able without a devnet"). The two exceptions:
   `chain_health` and `relay_pipeline` inline their verdicts in the async check fns and have **no**
-  factored-out pure classifier — the standing gap that P3 (`.agent/plans/P3-check-trustworthiness.md`)
+  factored-out pure classifier — the standing gap that P3
   closes.
 
 - **Preflight-first, observability-as-a-property.** Validating a rendered config against the real image
@@ -236,5 +236,5 @@ The per-check catalog (names, tiers, thresholds, what each asserts) lives in **`
 - `docs/DESIGN.md` — the mission and the design laws.
 - `docs/CHECKS.md` — the per-check catalog (tiers, thresholds, feature-assertion status).
 - `docs/local-kurtosis-e2e.md` — the runbook + the paid-for incident behind half the design.
-- `.agent/plans/{P1-sim-preflight-triage,P2-consolidate-config-gen,P3-check-trustworthiness}.md` — the
+- the design-rationale plans (kept in the local `.agent/` working area) — the
   grilled rationale for each slice (internal).

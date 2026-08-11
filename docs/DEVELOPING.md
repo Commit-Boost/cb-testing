@@ -129,7 +129,7 @@ consumer gate on the JSON `result` (§4).
 
 **Do not weld the verdict into the async fetch fn.** `chain_health` and `relay_pipeline` inline their verdicts
 in the async check fns and have *no* factored-out classifier — which is exactly the standing gap the
-check-trustworthiness plan ([`.agent/plans/P3-check-trustworthiness.md`](../.agent/plans/P3-check-trustworthiness.md)) exists to close. A verdict
+check-trustworthiness plan exists to close. A verdict
 tangled with `await` calls cannot be unit-tested without a devnet, so its pass/fail boundaries go unproven —
 which is how false-greens ship. Pure classifier first, thin I/O shell second, always.
 
@@ -204,4 +204,4 @@ Do not reverse-engineer the tree; the module-by-module map is **[`docs/ARCH.md`]
 `src/lib.rs`, the `cb-verify` binary `src/main.rs`, the `sim` submodules under `src/bin/sim/`, and the
 config↔fork seam). The check catalog is [`docs/CHECKS.md`](CHECKS.md); the fork divergence is
 [`docs/fork-delta.md`](fork-delta.md); the current backlog of what to build next is the internal
-[`.agent/SWEEP-BACKLOG.md`](../.agent/SWEEP-BACKLOG.md) and [`.agent/plans/INDEX.md`](../.agent/plans/INDEX.md).
+the local `.agent/` working area (backlog + plans index).

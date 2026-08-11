@@ -9,3 +9,4 @@ scripts/kurtosis-configs/
 */__pycache__
 
 CB-Testnet.json
+.agent/

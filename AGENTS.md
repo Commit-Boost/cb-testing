@@ -27,6 +27,8 @@ Rust workspace (one lib, three bins):
 - **README.md** - user-facing quick start (user-facing quick start).
 
 Internal back-room (agent working material, not part of the public docs surface):
+> `.agent/` is a **local, gitignored working area** — present when you develop against this repo, NOT in a fresh public clone. Agents write working notes here; nothing in it ships.
+
 - **.agent/SWEEP-BACKLOG.md** - the **live** queue AND the findings log (every live-devnet result gets recorded
   there). Highest-density source of hard-won facts; read the tail before starting anything.
 - **.agent/plans/INDEX.md** - status of every plan (`live` steers, `landed` is history).
