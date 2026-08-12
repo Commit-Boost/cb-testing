@@ -64,16 +64,22 @@ Kurtosis uses a default Commit-Boost config that can be overridden by inlining i
 just generate-configs
 ```
 
-Six scenarios are generated:
+`sim generate` emits the named scenarios (the frozen, byte-goldened regression set — the full list is
+`Scenario::ALL` in `src/bin/sim/genmodel/scenario.rs`). The headline ones:
 
 | Config | What it tests |
 |---|---|
 | `cb-basic.yml` | Single relay (helix), default CB config |
+| `cb-basic-nethermind-prysm.yml` | cb-basic on an alternate EL/CL pair (Law 7) |
 | `cb-multiple-relays.yml` | Two helix relay instances, aggregated bidding |
 | `cb-mux.yml` | Mux routing — 128 validators to helix-1, 128 to helix-2 |
 | `cb-skip-sigverify.yml` | Fast path with BLS signature verification disabled |
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
+| `cb-ws-stream.yml` | getHeader over the websocket bid stream |
+
+For any combination outside the frozen named set (a feature on a specific client, another CL, ...), compose
+one with `sim scenario` — see [Composable scenarios](#composable-scenarios-sim-scenario) below.
 
 ### Composable scenarios (`sim scenario`)
 

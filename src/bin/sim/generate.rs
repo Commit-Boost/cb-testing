@@ -13,9 +13,10 @@ use eyre::{Result, WrapErr, eyre};
 
 use crate::genmodel::scenario::{Images, Scenario};
 
-/// Generate one scenario (by name) or all six (`None`) into `out_dir`. Reads
-/// `keys/` and `.env` relative to the CWD (the repo root — how `just
-/// generate-configs` and the Python generator both run).
+/// Generate one scenario (by name) or all named scenarios (`None`) into
+/// `out_dir`, plus the curated composable configs when `curated`. Reads `keys/`
+/// and `.env` relative to the CWD (the repo root — how `just generate-configs`
+/// and the Python generator both run).
 pub fn run(scenario: Option<&str>, out_dir: &Path, curated: bool) -> Result<()> {
     run_in(
         scenario,

@@ -14,7 +14,8 @@
 
 ## The two flows (pick one)
 - **cb-testing (this repo) — the verification harness.** `cb-verify` Rust binary with tiered
-  pass/fail checks, 6 scenarios, forked `Commit-Boost/ethereum-package` submodule, helix relay.
+  pass/fail checks, the named scenarios (`Scenario::ALL`) + composable `sim scenario`, forked
+  `Commit-Boost/ethereum-package` submodule, helix relay.
   This is the authoritative flow (success criteria baked in). **We use this.**
 - **commit-boost-client `just kurtosis-*`** — lighter alt: upstream `ethereum-package`,
   `mev_type: commit-boost`, mev-boost-relay, no pass/fail harness. Good for a quick smoke.
