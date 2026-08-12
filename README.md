@@ -75,6 +75,29 @@ Six scenarios are generated:
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
 
+### Composable scenarios (`sim scenario`)
+
+The named scenarios above are frozen points. To compose features freely — e.g. the
+websocket stream on the prysm client pair with timing games, a combination no named
+scenario covers — use `sim scenario`, which renders a `ScenarioSpec` through the same
+assembly seams the goldens pin (so a rendered config is valid by construction):
+
+```bash
+# Start from a named base and apply typed field overrides:
+cargo run --bin sim -- scenario \
+  --base cb-basic --set get_header=stream,clients=nethermind-prysm,timing_games=true \
+  --show-spec --out configs/generated/cb-ws-prysm-tg.yml
+
+# Or supply a full ScenarioSpec as JSON (the AI-drivable surface; unknown keys rejected):
+echo '{"topology":"mux"}' | cargo run --bin sim -- scenario --spec /dev/stdin
+```
+
+Overridable knobs: `clients` (geth-lighthouse | nethermind-prysm), `topology`
+(single | two-relays | divergent-relays | mux), `get_header` (http | stream | stream-nokey),
+`sigverify` (on | skip | skip-poisoned | poisoned-control), `min_bid` (none | `<eth>`), and the
+booleans `timing_games` / `extra_validation` / `signer`. `--show-spec` previews the resolved spec
+and the features it arms. Design + rationale: [`docs/composable-scenarios.md`](docs/composable-scenarios.md).
+
 ## Quick start
 
 ```bash

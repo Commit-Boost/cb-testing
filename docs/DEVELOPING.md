@@ -143,6 +143,13 @@ A scenario is a typed devnet configuration that assembles into a Kurtosis args-f
 fixtures. The config↔fork coupling (the two `|` block scalars, the runtime template holes) is explained in
 [`docs/ARCH.md`](ARCH.md) §4 — read it before touching the block bodies.
 
+> **Composing instead of authoring.** For a one-off combination of *existing* features (e.g. the ws stream on
+> the prysm pair with timing games), you do not need a new named scenario — use `sim scenario --base/--set` or
+> `--spec <json>` (`genmodel/spec.rs`, [`docs/composable-scenarios.md`](composable-scenarios.md)). Add a NEW
+> named scenario + golden below only when a combination is worth freezing as a regression anchor, or when a
+> feature needs a config knob no `ScenarioSpec` field exposes yet (add the field, keeping
+> `lower_reproduces_every_scenario` green).
+
 ### Steps
 
 1. **Add the variant** to the `Scenario` enum in
