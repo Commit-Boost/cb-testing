@@ -29,13 +29,19 @@ use cb_testnet_verifier::checks::feature_fired::Feature;
 /// validator registration so helix TOFU-binds it (see the `cb-ws-stream` comment).
 const WS_API_KEY: &str = "9d5c2f4e-1b7a-4c3d-8e6f-0a1b2c3d4e5f";
 
-/// The EL/CL client pair (Law 7: coverage is a matrix, not a point).
+/// The EL/CL client pair (Law 7: coverage is a matrix, not a point). The CL is
+/// the axis that matters for CB behavior (the blinded-block / get_header flow),
+/// so the additional pairs vary the CL against geth; `nethermind-prysm` keeps
+/// its historical EL pairing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClientPair {
     #[default]
     GethLighthouse,
     NethermindPrysm,
+    GethTeku,
+    GethNimbus,
+    GethLodestar,
 }
 
 /// Relay topology. Encodes relay count AND the subsidy intent in one knob:
@@ -218,6 +224,18 @@ impl ScenarioSpec {
         match self.clients {
             ClientPair::GethLighthouse => ElCl::DEFAULT,
             ClientPair::NethermindPrysm => ElCl::ALT,
+            ClientPair::GethTeku => ElCl {
+                el: "geth",
+                cl: "teku",
+            },
+            ClientPair::GethNimbus => ElCl {
+                el: "geth",
+                cl: "nimbus",
+            },
+            ClientPair::GethLodestar => ElCl {
+                el: "geth",
+                cl: "lodestar",
+            },
         }
     }
 
@@ -444,6 +462,47 @@ impl ScenarioSpec {
     }
 }
 
+/// Curated coverage points worth freezing as regression anchors: high-value
+/// composed scenarios and the additional CL clients. Each is a `ScenarioSpec`
+/// (composed, not a `Scenario` enum variant) with a byte-golden under
+/// `tests/fixtures/curated-configs/`, and each has been confirmed to stand up a
+/// live devnet (Law 7 / the bench discipline: a golden of a config that has
+/// never run is worthless). New entries land WITH a live confirmation.
+pub fn curated() -> Vec<(&'static str, ScenarioSpec)> {
+    let basic_on = |clients: ClientPair| ScenarioSpec {
+        clients,
+        ..ScenarioSpec::default()
+    };
+    vec![
+        // The additional CL clients (basic MEV pipeline on each — Law 7).
+        ("cb-basic-teku", basic_on(ClientPair::GethTeku)),
+        ("cb-basic-nimbus", basic_on(ClientPair::GethNimbus)),
+        ("cb-basic-lodestar", basic_on(ClientPair::GethLodestar)),
+        // ws stream on the prysm pair — the exact Law-7 route-coupling concern
+        // (a prysm-specific ws regression is invisible under geth+lighthouse).
+        (
+            "cb-ws-prysm",
+            ScenarioSpec {
+                clients: ClientPair::NethermindPrysm,
+                get_header: HeaderTransport::Stream {
+                    api_key: KeyPresence::Present,
+                },
+                ..ScenarioSpec::default()
+            },
+        ),
+        // The composition anchor: two markers must both fire on one run.
+        (
+            "cb-timing-extra-validation",
+            ScenarioSpec {
+                topology: Topology::TwoRelays,
+                timing_games: true,
+                extra_validation: true,
+                ..ScenarioSpec::default()
+            },
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -459,6 +518,41 @@ mod tests {
     /// tests use). Non-mux specs ignore it.
     fn keys() -> &'static Path {
         Path::new("keys")
+    }
+
+    /// Every `ClientPair` variant, for exhaustive coverage in the offline tests.
+    const ALL_CLIENT_PAIRS: [ClientPair; 5] = [
+        ClientPair::GethLighthouse,
+        ClientPair::NethermindPrysm,
+        ClientPair::GethTeku,
+        ClientPair::GethNimbus,
+        ClientPair::GethLodestar,
+    ];
+
+    /// Each client pair renders its own `el_type`/`cl_type` into the participants
+    /// block (the parametric axis is real end to end — Law 7). Offline shape check;
+    /// standing the client up on a devnet is a separate live confirmation.
+    #[test]
+    fn every_client_pair_renders_its_el_cl() {
+        let images = Images::default();
+        for c in ALL_CLIENT_PAIRS {
+            let spec = ScenarioSpec {
+                clients: c,
+                ..ScenarioSpec::default()
+            };
+            let el = spec.el_cl();
+            let out = spec.render("# x", &images, keys()).unwrap();
+            assert!(
+                out.contains(&format!("el_type: {}", el.el)),
+                "missing el_type {} for {c:?}",
+                el.el
+            );
+            assert!(
+                out.contains(&format!("cl_type: {}", el.cl)),
+                "missing cl_type {} for {c:?}",
+                el.cl
+            );
+        }
     }
 
     fn sorted_ids(mut fs: Vec<Feature>) -> Vec<&'static str> {
@@ -551,7 +645,7 @@ mod tests {
     /// enumerated alone; every other axis combines with the non-mux base.
     fn enumerate() -> Vec<ScenarioSpec> {
         let mut out = Vec::new();
-        let clients = [ClientPair::GethLighthouse, ClientPair::NethermindPrysm];
+        let clients = ALL_CLIENT_PAIRS;
         let transports = [
             HeaderTransport::Http,
             HeaderTransport::Stream {
@@ -673,6 +767,32 @@ mod tests {
         assert!(s.apply_override("timing_games", "yes").is_err()); // bad bool
         assert!(s.apply_override("min_bid", "abc").is_err()); // bad float
         assert!(ScenarioSpec::from_base_and_overrides(Some("no-such-base"), None).is_err());
+    }
+
+    /// The curated coverage points render stably against their committed golden.
+    /// Regenerate the goldens with `BLESS_CURATED=1 cargo test --bin sim
+    /// every_curated_spec_matches_its_golden` (only after a live devnet run
+    /// confirms each config actually works).
+    #[test]
+    fn every_curated_spec_matches_its_golden() {
+        let images = Images::default();
+        let dir = "tests/fixtures/curated-configs";
+        for (name, spec) in curated() {
+            let rendered = spec.render(&spec.auto_comment(), &images, keys()).unwrap();
+            let path = format!("{dir}/{name}.yml");
+            if std::env::var("BLESS_CURATED").is_ok() {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(&path, &rendered).unwrap();
+            } else {
+                let golden = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                    panic!("missing curated golden {path}; run BLESS_CURATED=1 to create it")
+                });
+                assert_eq!(
+                    rendered, golden,
+                    "curated config {name} drifted from its golden"
+                );
+            }
+        }
     }
 
     /// Mux composed with any injection feature is rejected loudly (not a silent

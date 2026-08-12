@@ -92,7 +92,8 @@ cargo run --bin sim -- scenario \
 echo '{"topology":"mux"}' | cargo run --bin sim -- scenario --spec /dev/stdin
 ```
 
-Overridable knobs: `clients` (geth-lighthouse | nethermind-prysm), `topology`
+Overridable knobs: `clients` (geth-lighthouse | nethermind-prysm | geth-teku | geth-nimbus | geth-lodestar —
+all 5 mainstream CLs), `topology`
 (single | two-relays | divergent-relays | mux), `get_header` (http | stream | stream-nokey),
 `sigverify` (on | skip | skip-poisoned | poisoned-control), `min_bid` (none | `<eth>`), and the
 booleans `timing_games` / `extra_validation` / `signer`. `--show-spec` previews the resolved spec

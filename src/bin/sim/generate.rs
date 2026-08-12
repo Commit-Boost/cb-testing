@@ -16,17 +16,29 @@ use crate::genmodel::scenario::{Images, Scenario};
 /// Generate one scenario (by name) or all six (`None`) into `out_dir`. Reads
 /// `keys/` and `.env` relative to the CWD (the repo root — how `just
 /// generate-configs` and the Python generator both run).
-pub fn run(scenario: Option<&str>, out_dir: &Path) -> Result<()> {
-    run_in(scenario, out_dir, Path::new("keys"), Path::new(".env"))
+pub fn run(scenario: Option<&str>, out_dir: &Path, curated: bool) -> Result<()> {
+    run_in(
+        scenario,
+        out_dir,
+        Path::new("keys"),
+        Path::new(".env"),
+        curated,
+    )
 }
 
 /// Testable core with the two IO roots injected. Assembles ALL bodies (reading +
 /// validating the mux key files) BEFORE writing anything, so a missing/malformed
 /// keys file fails cleanly with nothing written — no partial output. This mirrors
 /// the Python's pre-write `load_pubkeys` + `sys.exit(1)` all-or-nothing contract.
-fn run_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Path) -> Result<()> {
+fn run_in(
+    scenario: Option<&str>,
+    out_dir: &Path,
+    keys_dir: &Path,
+    env_path: &Path,
+    curated: bool,
+) -> Result<()> {
     let images = images_from_env(env_path);
-    let outputs = assemble(scenario, &images, keys_dir)?;
+    let outputs = assemble(scenario, &images, keys_dir, curated)?;
 
     fs::create_dir_all(out_dir)
         .wrap_err_with(|| format!("creating output dir {}", out_dir.display()))?;
@@ -43,8 +55,14 @@ fn run_in(scenario: Option<&str>, out_dir: &Path, keys_dir: &Path, env_path: &Pa
 
 /// Verify the on-disk configs already match what the generator would produce,
 /// WITHOUT writing (CI / agent drift gate). Errors (nonzero exit) on any drift.
-pub fn check(scenario: Option<&str>, out_dir: &Path) -> Result<()> {
-    check_in(scenario, out_dir, Path::new("keys"), Path::new(".env"))
+pub fn check(scenario: Option<&str>, out_dir: &Path, curated: bool) -> Result<()> {
+    check_in(
+        scenario,
+        out_dir,
+        Path::new("keys"),
+        Path::new(".env"),
+        curated,
+    )
 }
 
 fn check_in(
@@ -52,9 +70,10 @@ fn check_in(
     out_dir: &Path,
     keys_dir: &Path,
     env_path: &Path,
+    curated: bool,
 ) -> Result<()> {
     let images = images_from_env(env_path);
-    let outputs = assemble(scenario, &images, keys_dir)?;
+    let outputs = assemble(scenario, &images, keys_dir, curated)?;
 
     let mut drift: Vec<String> = Vec::new();
     for (name, body) in &outputs {
@@ -84,6 +103,7 @@ fn assemble(
     scenario: Option<&str>,
     images: &Images,
     keys_dir: &Path,
+    curated: bool,
 ) -> Result<Vec<(String, String)>> {
     let scenarios: Vec<Scenario> = match scenario {
         Some(name) => vec![
@@ -92,10 +112,21 @@ fn assemble(
         ],
         None => Scenario::ALL.to_vec(),
     };
-    scenarios
+    let mut out: Vec<(String, String)> = scenarios
         .iter()
         .map(|s| Ok((s.name().to_string(), s.args_file_in(images, keys_dir)?)))
-        .collect()
+        .collect::<Result<_>>()?;
+    // The curated composable coverage points (rendered from ScenarioSpec, not
+    // the Scenario enum). `--curated` emits them alongside the named scenarios.
+    if curated {
+        for (name, spec) in crate::genmodel::spec::curated() {
+            out.push((
+                name.to_string(),
+                spec.render(&spec.auto_comment(), images, keys_dir)?,
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn names() -> Vec<&'static str> {
@@ -173,7 +204,7 @@ mod tests {
     fn run_writes_all_six_matching_assembly() {
         let dir = std::env::temp_dir().join(format!("sim-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir).expect("generate all");
+        run(None, &dir, false).expect("generate all");
         let images = images_from_env(Path::new(".env"));
         for s in Scenario::ALL {
             let produced = fs::read_to_string(dir.join(format!("{}.yml", s.name()))).unwrap();
@@ -189,15 +220,15 @@ mod tests {
     fn check_passes_when_current_and_fails_on_drift() {
         let dir = std::env::temp_dir().join(format!("sim-check-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir).expect("seed");
+        run(None, &dir, false).expect("seed");
         // Fresh output → check is clean.
-        check(None, &dir).expect("check should pass on freshly-generated configs");
+        check(None, &dir, false).expect("check should pass on freshly-generated configs");
         // Mutate one file → check must fail.
         let f = dir.join("cb-basic.yml");
         let mut body = fs::read_to_string(&f).unwrap();
         body.push_str("\n# hand-edit\n");
         fs::write(&f, body).unwrap();
-        let err = check(None, &dir).unwrap_err();
+        let err = check(None, &dir, false).unwrap_err();
         assert!(err.to_string().contains("out of date"), "got: {err}");
         assert!(
             err.to_string().contains("cb-basic.yml"),
@@ -217,6 +248,7 @@ mod tests {
             &dir,
             Path::new("/no/such/keys"),
             Path::new("/no/such/.env"),
+            false,
         )
         .unwrap_err();
         assert!(err.to_string().contains("pubkey file"), "got: {err}");

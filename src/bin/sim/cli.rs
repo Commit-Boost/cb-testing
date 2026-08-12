@@ -77,6 +77,10 @@ pub enum Command {
         /// generator would produce, and exit nonzero on any drift (CI / agent gate).
         #[arg(long)]
         check: bool,
+        /// Also emit the curated composable coverage configs (the additional CL
+        /// clients + high-value feature combos; rendered from `ScenarioSpec`).
+        #[arg(long)]
+        curated: bool,
     },
     /// Render a COMPOSABLE scenario config from a structured `ScenarioSpec` — a
     /// full JSON spec, or a named base with typed field overrides. Unlike

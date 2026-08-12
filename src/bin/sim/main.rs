@@ -41,7 +41,8 @@ fn main() {
             scenario,
             out_dir,
             check,
-        } => generate(scenario.as_deref(), &out_dir, check),
+            curated,
+        } => generate(scenario.as_deref(), &out_dir, check, curated),
         Command::Scenario {
             spec,
             base,
@@ -77,8 +78,11 @@ fn scenario_cmd(
         };
         if show_spec {
             eprintln!("{}", serde_json::to_string_pretty(&spec)?);
-            let mut arms: Vec<String> =
-                spec.armed_features().iter().map(|f| f.id().to_string()).collect();
+            let mut arms: Vec<String> = spec
+                .armed_features()
+                .iter()
+                .map(|f| f.id().to_string())
+                .collect();
             if spec.arms_min_bid() {
                 arms.push("feature.min_bid".to_string());
             }
@@ -108,11 +112,11 @@ fn scenario_cmd(
 
 /// Generate Kurtosis args-files (Task 1), or `--check` them (P2 drift gate).
 /// Implemented in `generate::run` / `generate::check`.
-fn generate(scenario: Option<&str>, out_dir: &Path, check: bool) {
+fn generate(scenario: Option<&str>, out_dir: &Path, check: bool, curated: bool) {
     let result = if check {
-        generate::check(scenario, out_dir)
+        generate::check(scenario, out_dir, curated)
     } else {
-        generate::run(scenario, out_dir)
+        generate::run(scenario, out_dir, curated)
     };
     if let Err(e) = result {
         tracing::error!(error = %e, "sim generate failed");

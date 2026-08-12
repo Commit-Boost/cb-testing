@@ -87,17 +87,31 @@ add on top of this surface; it is deliberately deferred (see Cut list) until the
   is a derivation, not a reportable clamp.
 - **No in-binary NL/AI layer, no schemars overlay type** yet. Deferred behind the deterministic surface.
 
-## High-value un-named combos (the right "enumerate situations")
+## Client coverage (the `clients` axis)
 
-Rather than a Cartesian sweep, promote a curated handful of genuinely-interesting combos to NAMED scenarios,
-each a real falsifiable question worth a devnet spend (authored with a golden once run):
-- **ws × nethermind-prysm** — Law 7's exact concern (a prysm-specific regression is invisible under hardcoded
-  geth+lighthouse); the highest-suspicion route coupling.
-- **timing_games × extra_validation** — the one genuine composition claim (both markers must fire; the seam
-  lines must compose in canonical order without clobbering).
-- **poison × nethermind-prysm** — the skip_sigverify differential on the ALT client pair.
-- **min_bid (Floor) × nethermind-prysm** — the silent-ignore canary (`[pbs]` no `deny_unknown_fields`) against
-  a real CB parse.
+The `clients` axis is the Law-7 matrix. CLs are the axis that matters for CB behavior (the blinded-block /
+get_header flow), so the additional pairs vary the CL against geth; `nethermind-prysm` keeps its historical EL.
+`ClientPair` variants: `geth-lighthouse` (default), `nethermind-prysm`, `geth-teku`, `geth-nimbus`,
+`geth-lodestar` — i.e. **all 5 mainstream CLs** (lighthouse, prysm, teku, nimbus, lodestar). Adding a client is
+an `ElCl` + `ClientPair` variant + serde name; the rpc_url naming (`el-1-{el}-{cl}`) is already parametric.
+
+## Curated coverage points (the right "enumerate situations")
+
+Rather than a Cartesian sweep, `spec::curated()` freezes a handful of genuinely-interesting composed specs as
+named+goldened regression anchors (`tests/fixtures/curated-configs/`), each **live-validated on a devnet**
+before its golden is trusted (a golden of a config that has never run is worthless). Emit them with
+`sim generate --curated`.
+
+| Curated point | Why | Live result |
+|---|---|---|
+| `cb-basic-teku` | teku CL (Law 7) | 14 PASS / 0 WARN / 0 FAIL; 33 payloads, 100% MEV |
+| `cb-basic-nimbus` | nimbus CL (Law 7) | 14 / 0 / 0; 31 payloads, 93.9% MEV |
+| `cb-basic-lodestar` | lodestar CL (Law 7) | 14 / 0 / 0; 31 payloads, 93.9% MEV |
+| `cb-ws-prysm` | ws stream on prysm — the highest-suspicion route coupling | 15 / 1 / 0; **ws stream FIRED** (30 headers, 1 startup-race fallback) — the coupling concern is refuted by measurement |
+| `cb-timing-extra-validation` | the composition claim (both markers must fire) | both `feature.timing_games` + `feature.extra_validation` proven from CB logs |
+
+Deferred (add later, each with a live run): `poison × prysm` (skip_sigverify differential on the ALT pair),
+`min_bid (Floor) × prysm` (the `[pbs]` silent-ignore canary against a real CB parse).
 
 ## Honesty note (orthogonality is partly fiction)
 
