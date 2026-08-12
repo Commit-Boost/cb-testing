@@ -64,16 +64,46 @@ Kurtosis uses a default Commit-Boost config that can be overridden by inlining i
 just generate-configs
 ```
 
-Six scenarios are generated:
+`sim generate` emits the named scenarios (the frozen, byte-goldened regression set — the full list is
+`Scenario::ALL` in `src/bin/sim/genmodel/scenario.rs`). The headline ones:
 
 | Config | What it tests |
 |---|---|
 | `cb-basic.yml` | Single relay (helix), default CB config |
+| `cb-basic-nethermind-prysm.yml` | cb-basic on an alternate EL/CL pair (Law 7) |
 | `cb-multiple-relays.yml` | Two helix relay instances, aggregated bidding |
 | `cb-mux.yml` | Mux routing — 128 validators to helix-1, 128 to helix-2 |
 | `cb-skip-sigverify.yml` | Fast path with BLS signature verification disabled |
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
+| `cb-ws-stream.yml` | getHeader over the websocket bid stream |
+
+For any combination outside the frozen named set (a feature on a specific client, another CL, ...), compose
+one with `sim scenario` — see [Composable scenarios](#composable-scenarios-sim-scenario) below.
+
+### Composable scenarios (`sim scenario`)
+
+The named scenarios above are frozen points. To compose features freely — e.g. the
+websocket stream on the prysm client pair with timing games, a combination no named
+scenario covers — use `sim scenario`, which renders a `ScenarioSpec` through the same
+assembly seams the goldens pin (so a rendered config is valid by construction):
+
+```bash
+# Start from a named base and apply typed field overrides:
+cargo run --bin sim -- scenario \
+  --base cb-basic --set get_header=stream,clients=nethermind-prysm,timing_games=true \
+  --show-spec --out configs/generated/cb-ws-prysm-tg.yml
+
+# Or supply a full ScenarioSpec as JSON (the AI-drivable surface; unknown keys rejected):
+echo '{"topology":"mux"}' | cargo run --bin sim -- scenario --spec /dev/stdin
+```
+
+Overridable knobs: `clients` (geth-lighthouse | nethermind-prysm | geth-teku | geth-nimbus | geth-lodestar —
+all 5 mainstream CLs), `topology`
+(single | two-relays | divergent-relays | mux), `get_header` (http | stream | stream-nokey),
+`sigverify` (on | skip | skip-poisoned | poisoned-control), `min_bid` (none | `<eth>`), and the
+booleans `timing_games` / `extra_validation` / `signer`. `--show-spec` previews the resolved spec
+and the features it arms. Design + rationale: [`docs/composable-scenarios.md`](docs/composable-scenarios.md).
 
 ## Quick start
 

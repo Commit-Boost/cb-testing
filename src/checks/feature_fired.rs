@@ -711,7 +711,10 @@ mod tests {
         // check owns the inconclusive flag, this must not double-flag
         let r = classify_ws_fallback(0, 64);
         assert_eq!(r.status, CheckStatus::Warn);
-        assert!(!r.inconclusive, "double-flagging would make one failure two");
+        assert!(
+            !r.inconclusive,
+            "double-flagging would make one failure two"
+        );
     }
 
     // Contract: the marker strings match CB main's actual log lines (pinned

@@ -81,15 +81,27 @@ Against an already-running enclave (no observation window): `just verify-now <en
 
 ### Scenarios and config generation
 `configs/generated/*.yml` are **gitignored build products** of the typed generator; the tracked truth is
-`tests/fixtures/golden-configs/`. Nine scenarios (`Scenario::ALL`, `src/bin/sim/genmodel/scenario.rs`):
-`cb-basic`, `cb-basic-nethermind-prysm` (Law 7 alt EL/CL pair), `cb-multiple-relays` (two helix instances,
-divergent per-relay subsidies), `cb-skip-sigverify`, `cb-sigverify-diff` + `cb-sigverify-diff-control`
-(a real ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-mux` (256 validators split
-across two relays).
+`tests/fixtures/golden-configs/`. The named scenarios are `Scenario::ALL`
+(`src/bin/sim/genmodel/scenario.rs`) — the frozen, byte-goldened regression set: `cb-basic`,
+`cb-basic-nethermind-prysm` (Law 7 alt EL/CL pair), `cb-multiple-relays` (divergent per-relay subsidies),
+`cb-min-bid`, `cb-signer`, `cb-skip-sigverify`, `cb-sigverify-diff` + `cb-sigverify-diff-control` (a real
+ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-ws-stream` + `cb-ws-stream-nokey`
+(the ws stream + its negative control), `cb-mux` (256 validators split across two relays).
+
+**Composable scenarios** (`src/bin/sim/genmodel/spec.rs`, [`docs/composable-scenarios.md`](docs/composable-scenarios.md)):
+`ScenarioSpec` is a flat closed-enum surface that composes features freely and renders through the SAME seams
+as the named scenarios (proven byte-identical for every named one via `Scenario::to_spec()` +
+`lower_reproduces_every_scenario`). Use it for any combination that is not a frozen named scenario — e.g. the
+ws stream on a specific client, or a client the named set does not cover. The `clients` axis covers all 5
+mainstream CLs (`geth-lighthouse`, `nethermind-prysm`, `geth-teku`, `geth-nimbus`, `geth-lodestar`).
+`spec::curated()` freezes a few high-value composed specs as goldens (`tests/fixtures/curated-configs/`).
 
 ```bash
-sim generate                      # all nine -> configs/generated/   (= just generate-configs)
+sim generate                      # the named scenarios -> configs/generated/  (= just generate-configs)
+sim generate --curated            # + the curated composable coverage configs
 sim generate cb-mux --out-dir /tmp/x
+sim scenario --base cb-basic --set clients=geth-teku,get_header=stream   # compose (stdout)
+sim scenario --spec spec.json     # full ScenarioSpec as JSON (the AI-drivable surface)
 sim generate --check              # drift gate: nonzero if on-disk configs != what the generator emits
 sim preflight configs/generated/cb-mux.yml   # ~1s: parse the rendered config with the REAL helix image
 sim checks --list [--json]        # the check contract, machine-readable
@@ -257,7 +269,8 @@ you MUST update this file AND its companion doc IN THE SAME COMMIT:**
 |---|---|
 | a check's id, tier, verdict conditions, or data source | `docs/CHECKS.md` **and** `src/bin/sim/checks_catalog.rs` |
 | a CLI flag, a `just` target, the launcher | this file + `README.md` |
-| a scenario, the generator, the helix/CB blocks | `tests/fixtures/golden-configs/` (regenerate) + this file's scenario list |
+| a scenario, the generator, the helix/CB blocks | `tests/fixtures/golden-configs/` (regenerate) + this file's scenario list + `README.md` + the `genmodel` rows in `docs/ARCH.md` |
+| the `ScenarioSpec` surface, its knobs/clients, or `curated()` | `docs/composable-scenarios.md` + this file's "Composable scenarios" + `README.md` + `tests/fixtures/curated-configs/` (`BLESS_CURATED=1`, only after a live run) |
 | a design law | `docs/DESIGN.md` |
 | a ratified direction, a staged-plan status | `.agent/NORTH-STAR.md` |
 | a live-devnet result or a new defect | `.agent/SWEEP-BACKLOG.md` (findings log) |
@@ -269,6 +282,11 @@ reflect on, so drift is caught only by review. This is not hypothetical - `cb_re
 in `src/checks/cb_metrics.rs` while missing from BOTH `checks_catalog.rs` and `docs/CHECKS.md`, in the very
 commit that added it (caught on the next read, now synced). Adding a check is a THREE-file
 change. If a real registry ever lands in `src/checks`, derive the catalog from it and delete this note.
+
+**Never hard-code a COUNT in prose** ("six scenarios", "all nine", "the two client pairs"). Counts drift the
+moment a scenario or client is added and go silently wrong across every doc that repeated them (this happened:
+"six"/"nine"/"6 scenarios" were stale in README, ARCH.md, and the runbook simultaneously). Reference the
+source of truth instead — `Scenario::ALL`, the `ClientPair` variants, `curated()` — and describe, don't tally.
 
 **New hard-won gotchas belong in the "Known traps" section above**, with the evidence that bought them.
 A trap that lives only in a commit message will be paid for twice.

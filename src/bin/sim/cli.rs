@@ -77,5 +77,33 @@ pub enum Command {
         /// generator would produce, and exit nonzero on any drift (CI / agent gate).
         #[arg(long)]
         check: bool,
+        /// Also emit the curated composable coverage configs (the additional CL
+        /// clients + high-value feature combos; rendered from `ScenarioSpec`).
+        #[arg(long)]
+        curated: bool,
+    },
+    /// Render a COMPOSABLE scenario config from a structured `ScenarioSpec` — a
+    /// full JSON spec, or a named base with typed field overrides. Unlike
+    /// `generate` (the 13 frozen named scenarios), this composes features freely
+    /// (e.g. ws + prysm + timing-games). Output is a Kurtosis args-file, valid by
+    /// construction (it renders through the same seams the goldens pin).
+    Scenario {
+        /// Path to a `ScenarioSpec` JSON file (the full structured surface).
+        /// Mutually exclusive with `--base`/`--set`.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+        /// A named scenario to start from (e.g. `cb-mux`); default `cb-basic`.
+        #[arg(long)]
+        base: Option<String>,
+        /// Comma-separated `key=value` field overrides applied onto the base,
+        /// e.g. `--set get_header=stream,clients=nethermind-prysm,timing_games=true`.
+        #[arg(long)]
+        set: Option<String>,
+        /// Write the rendered args-file here (default: stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Print the resolved spec as JSON to stderr before rendering (preview).
+        #[arg(long)]
+        show_spec: bool,
     },
 }

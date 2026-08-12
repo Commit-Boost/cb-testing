@@ -1,8 +1,4 @@
-# cb-timing-games: Aggressive timing game configuration.
-#
-# Tests CB's ability to orchestrate repeated get_header polls with
-# short timeouts in order to arrive at the best bid as late as possible
-# in the slot. Per-relay timing overrides are enabled for all relays.
+# composed scenario: two-relays, timing-games, extra-validation
 
 participants:
   - el_type: geth
@@ -130,6 +126,8 @@ mev_params:
     [pbs]
     host = "0.0.0.0"
     port = {{ .Port }}
+    extra_validation_enabled = true
+    rpc_url = "http://el-1-geth-lighthouse:8545"
     timeout_get_header_ms = 400
     timeout_get_payload_ms = 2000
     late_in_slot_time_ms = 2000

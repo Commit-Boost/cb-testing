@@ -15,6 +15,7 @@
 pub mod cb;
 pub mod helix;
 pub mod scenario;
+pub mod spec;
 
 /// Extract a YAML `|` block scalar (named `key`, at 2-space indent) from `yaml`,
 /// de-indented 4 spaces, with trailing blank lines removed. Test-only oracle

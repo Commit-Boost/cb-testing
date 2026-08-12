@@ -115,8 +115,9 @@ different report types because `sim` runs before/around a devnet, not against a 
 | `main.rs` | Dispatch to the three verbs; `tracing` init; nonzero exits on error. |
 | `generate.rs` | IO boundary for `sim generate`: `.env` image overrides, atomic assemble-then-write, and `--check` drift gate (`generate::check`). Pure assembly lives in `genmodel`. |
 | `genmodel/mod.rs` | Golden-fixture harness (`golden`, `assert_matches_golden`, `extract_block_scalar`) — the byte-identity oracle for the verbatim config port. |
-| `genmodel/scenario.rs` | `Scenario` enum (six scenarios) + `Images` map; `args_file_in()` joins the static fragments + helix const + CB block into a full args-file; `build_mev_params`. |
-| `genmodel/helix.rs` | `HELIX_RELAY_CONFIG` — the helix YAML block, byte-identical across all six scenarios (const). |
+| `genmodel/scenario.rs` | `Scenario` enum (the named scenarios, `Scenario::ALL`) + `Images` map; `args_file_in()` joins the static fragments + helix const + CB block into a full args-file; `build_mev_params`. `to_spec()` maps each named scenario to a `ScenarioSpec`. |
+| `genmodel/spec.rs` | `ScenarioSpec` — the flat, composable, structured (AI-targetable) scenario surface (closed-enum knobs: clients / topology / get_header / sigverify / min_bid / timing_games / extra_validation / signer). `render()` reuses the same assembly seams as `args_file_in` (proven byte-identical for every named scenario), so any composition renders a valid config. `curated()` = high-value composed specs frozen as goldens. Drives `sim scenario` + `sim generate --curated`. See [`composable-scenarios.md`](composable-scenarios.md). |
+| `genmodel/helix.rs` | `HELIX_RELAY_CONFIG` — the helix YAML block, byte-identical across all named scenarios (const). |
 | `genmodel/cb.rs` | The CB TOML block: `cb_toml(CbParams)` + `cb_toml_mux(node0, node1)` — verbatim port of the Python builders, generate-time knobs injected by string building. |
 | `render.rs` | The **compatibility contract** with the fork: `extract_config_blocks` (pull the two `|` scalars), `substitute_runtime_vars` (strip the `{{ range }}` loop, fill `{{ .VAR }}` dummies), `default_dummies`. Pure. |
 | `preflight.rs` | `sim preflight`: render + run the real helix image + `classify_helix_probe` (pure, 3-valued). |
@@ -130,7 +131,7 @@ different report types because `sim` runs before/around a devnet, not against a 
 This is the load-bearing seam. `sim generate` emits a Kurtosis args-file whose `mev_params` carries
 **two `|` block scalars** that the forked ethereum-package parses and fills at launch:
 
-- `helix_relay_config: |`  — the helix relay's YAML config (byte-identical across all six scenarios).
+- `helix_relay_config: |`  — the helix relay's YAML config (byte-identical across all named scenarios).
 - `commit_boost_config: |` — the commit-boost sidecar's TOML config (varies ≤ ~7 lines per scenario).
 
 Both blocks are **opaque scalars to YAML** and contain unrendered **Go-template holes** that only the
