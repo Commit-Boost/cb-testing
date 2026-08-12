@@ -1,3 +1,9 @@
 [submodule "ethereum-package"]
 	path = ethereum-package
 	url = https://github.com/Commit-Boost/ethereum-package.git
+[submodule "commit-boost-client"]
+	path = commit-boost-client
+	url = https://github.com/Commit-Boost/commit-boost-client.git
+[submodule "helix"]
+	path = helix
+	url = https://github.com/gattaca-com/helix.git

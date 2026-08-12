@@ -88,10 +88,10 @@ test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
 generate-configs:
     cargo run --quiet --bin sim -- generate
 
-# Build the Commit-Boost image the devnet runs, from the sibling commit-boost repo
-# (default ../commit-boost-client). Produces commit-boost/commit-boost:{{tag}};
+# Build the Commit-Boost image the devnet runs, from the bundled commit-boost submodule
+# (default ./commit-boost-client submodule). Produces commit-boost/commit-boost:{{tag}};
 # keep it in sync with MEV_BOOST_IMAGE in .env. Helix is a PUBLIC image (not built).
-build-cb-image tag="kurtosis" cb_dir="../commit-boost-client":
+build-cb-image tag="kurtosis" cb_dir="./commit-boost-client":
     cd {{cb_dir}} && just build-all {{tag}}
 
 # Pre-pull the public images the devnet needs so `kurtosis run` doesn't stall.

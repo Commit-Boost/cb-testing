@@ -50,7 +50,7 @@ A `just ci` green means the pure surface is good; it says nothing about the devn
   Kurtosis enclave (geth + lighthouse + N helix relays + reth-rbuilder + the CB sidecar + dora/spamoor/
   prometheus), observes ~1 epoch, runs every check, prints the report. Needs Docker + Kurtosis 1.18.1 and a
   **locally-built CB image** — run `just build-cb-image` once first (it builds `commit-boost/commit-boost:kurtosis`
-  from the sibling `../commit-boost-client` repo; the helix + reth images are public and pulled). A run is
+  from the bundled `./commit-boost-client` submodule; the helix + reth images are public and pulled). A run is
   ~10 minutes; it is the *final* confirmation, never the debugger. See [`docs/local-kurtosis-e2e.md`](local-kurtosis-e2e.md).
 
 Middle ground: `just test-mux`, `just verify-now`, and `sim preflight <config>` (the ~1s real-image config

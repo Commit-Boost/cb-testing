@@ -13,7 +13,7 @@ Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit
 
 If you're testing a local CB build (the default — the CB sidecar image is built, not pulled), you also need:
 - The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned as a sibling
-  (`../commit-boost-client`, overridable — see `just build-cb-image`)
+  (the `./commit-boost-client` submodule, overridable — see `just build-cb-image`)
 
 > Contributing? See **[`docs/DEVELOPING.md`](docs/DEVELOPING.md)** for the dev loop and how to add checks + scenarios.
 

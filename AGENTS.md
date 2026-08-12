@@ -44,7 +44,7 @@ Internal back-room (agent working material, not part of the public docs surface)
 - `sim` is deliberately **sync / no tokio** (it shells out and blocks); `cb-verify` and `cb-orchestrator`
   are tokio (concurrent HTTP polling / parallel enclaves).
 - **The CB sidecar image is BUILT, not pulled** (`just build-cb-image` -> `commit-boost/commit-boost:kurtosis`
-  from the sibling `../commit-boost-client`). helix / reth-rbuilder / lighthouse are public pulls.
+  from the bundled `./commit-boost-client` submodule). helix / reth-rbuilder / lighthouse are public pulls.
 
 ## USING it
 
@@ -54,7 +54,7 @@ Internal back-room (agent working material, not part of the public docs surface)
 ```bash
 sim doctor                        # host preflight: kurtosis 1.18.1, docker, memory, CB image, submodule
 git submodule update --init       # the forked ethereum-package (empty otherwise; load-bearing)
-just build-cb-image               # once: builds commit-boost/commit-boost:kurtosis from ../commit-boost-client
+just build-cb-image               # once: builds commit-boost/commit-boost:kurtosis from ./commit-boost-client
 just e2e                                            # cb-basic, end to end
 just e2e configs/generated/cb-mux.yml               # any scenario
 ```

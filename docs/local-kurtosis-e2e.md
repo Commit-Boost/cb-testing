@@ -37,7 +37,7 @@ kurtosis version   # verify; record the version here: ____
 ## Step 1 — Build the commit-boost image from `main`  (STATUS: done, CONFIRMED)
 `main` = the v0.11.0 SSZ content (#467/#468/#481/#482 SSZ + #465 Stader + #480 Dirk), tip `635384f`.
 ```bash
-cd ../commit-boost-client && git checkout main && git pull --ff-only origin main
+cd ./commit-boost-client && git checkout main && git pull --ff-only origin main
 just build-all kurtosis        # -> image commit-boost/commit-boost:kurtosis  (crate=commit-boost)
 ```
 Image name is `commit-boost/commit-boost:<tag>` (NOT `pbs:*`; the `.env.example` confirms
