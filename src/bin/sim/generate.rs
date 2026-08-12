@@ -104,7 +104,7 @@ fn names() -> Vec<&'static str> {
 
 /// Build the image map from defaults, overridden by `.env` if present. Mirrors
 /// the Python `.env` key names. A missing `.env` is not an error (defaults win).
-fn images_from_env(env_path: &Path) -> Images {
+pub(crate) fn images_from_env(env_path: &Path) -> Images {
     let mut images = Images::default();
     let Ok(contents) = fs::read_to_string(env_path) else {
         return images;

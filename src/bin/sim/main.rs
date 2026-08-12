@@ -7,9 +7,12 @@
 //! Sync only: the verbs shell `kurtosis`/`docker` with `std::process::Command`,
 //! matching `discovery.rs`. No tokio.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use eyre::WrapErr;
+
+use genmodel::spec::ScenarioSpec;
 
 mod checks_catalog;
 mod cli;
@@ -39,6 +42,67 @@ fn main() {
             out_dir,
             check,
         } => generate(scenario.as_deref(), &out_dir, check),
+        Command::Scenario {
+            spec,
+            base,
+            set,
+            out,
+            show_spec,
+        } => scenario_cmd(spec, base, set, out, show_spec),
+    }
+}
+
+/// Render a composable scenario from a `ScenarioSpec` (`--spec <json>`) or a
+/// named base with typed overrides (`--base`/`--set`). Implemented via
+/// `ScenarioSpec::{from_json, from_base_and_overrides}` + `render`.
+fn scenario_cmd(
+    spec_path: Option<PathBuf>,
+    base: Option<String>,
+    set: Option<String>,
+    out: Option<PathBuf>,
+    show_spec: bool,
+) {
+    let result = (|| -> eyre::Result<()> {
+        let spec = match &spec_path {
+            Some(path) => {
+                eyre::ensure!(
+                    base.is_none() && set.is_none(),
+                    "--spec is mutually exclusive with --base/--set"
+                );
+                let json = std::fs::read_to_string(path)
+                    .wrap_err_with(|| format!("reading {}", path.display()))?;
+                ScenarioSpec::from_json(&json)?
+            }
+            None => ScenarioSpec::from_base_and_overrides(base.as_deref(), set.as_deref())?,
+        };
+        if show_spec {
+            eprintln!("{}", serde_json::to_string_pretty(&spec)?);
+            let mut arms: Vec<String> =
+                spec.armed_features().iter().map(|f| f.id().to_string()).collect();
+            if spec.arms_min_bid() {
+                arms.push("feature.min_bid".to_string());
+            }
+            if spec.arms_poison() {
+                arms.push("poison_relay".to_string());
+            }
+            eprintln!("arms: [{}]", arms.join(", "));
+        }
+        let images = generate::images_from_env(Path::new(".env"));
+        let rendered = spec.render(&spec.auto_comment(), &images, Path::new("keys"))?;
+        match &out {
+            Some(path) => {
+                std::fs::write(path, &rendered)
+                    .wrap_err_with(|| format!("writing {}", path.display()))?;
+                println!("Rendered {}", path.display());
+            }
+            None => print!("{rendered}"),
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        tracing::error!(error = %e, "sim scenario failed");
+        eprintln!("scenario error: {e:?}");
+        std::process::exit(1);
     }
 }
 

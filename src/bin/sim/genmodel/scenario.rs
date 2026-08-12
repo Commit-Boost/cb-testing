@@ -12,6 +12,7 @@ use eyre::{Result, WrapErr};
 
 use super::cb::{CbParams, SignerParams, cb_toml, cb_toml_mux};
 use super::helix::HELIX_RELAY_CONFIG;
+use super::spec;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
 
@@ -41,7 +42,7 @@ impl ElCl {
     };
 
     /// The `participants:` fragment for this pair.
-    fn participants(&self) -> String {
+    pub(super) fn participants(&self) -> String {
         format!(
             "participants:\n  - el_type: {}\n    cl_type: {}",
             self.el, self.cl
@@ -50,15 +51,15 @@ impl ElCl {
 
     /// The first participant's EL RPC endpoint, as the ethereum-package names
     /// it (`el-{index}-{el}-{cl}`, 1-indexed).
-    fn el_rpc_url(&self) -> String {
+    pub(super) fn el_rpc_url(&self) -> String {
         format!("http://el-1-{}-{}:8545", self.el, self.cl)
     }
 }
 
-const COMMON_ADDITIONAL_SERVICES: &str =
+pub(super) const COMMON_ADDITIONAL_SERVICES: &str =
     "additional_services:\n  - dora\n  - spamoor\n  - prometheus";
 
-const COMMON_NETWORK_PARAMS: &str = r#"network_params:
+pub(super) const COMMON_NETWORK_PARAMS: &str = r#"network_params:
   network: kurtosis
   network_id: "3151908"
   deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
@@ -72,7 +73,7 @@ const COMMON_NETWORK_PARAMS: &str = r#"network_params:
   prefunded_accounts: '{"0xb9e79d19f651a941757b35830232E7EFC77E1c79": {"balance": "100000ETH"}}'
 "#;
 
-const MUX_NETWORK_PARAMS: &str = r#"network_params:
+pub(super) const MUX_NETWORK_PARAMS: &str = r#"network_params:
   network: kurtosis
   network_id: "3151908"
   deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
@@ -194,8 +195,77 @@ impl Scenario {
         }
     }
 
+    /// The `ScenarioSpec` this named scenario corresponds to. The migration
+    /// contract: `spec.render(self.comment(), ..) == self.args_file_in(..)` for
+    /// every scenario (test `lower_reproduces_every_scenario`), which pins the
+    /// composable `ScenarioSpec::render` path against the byte-golden'd assembly.
+    pub fn to_spec(self) -> spec::ScenarioSpec {
+        use spec::{
+            ClientPair, HeaderTransport, KeyPresence, MinBid, ScenarioSpec, Sigverify, Topology,
+        };
+        let base = ScenarioSpec {
+            clients: match self {
+                Scenario::BasicAltClients => ClientPair::NethermindPrysm,
+                _ => ClientPair::GethLighthouse,
+            },
+            ..ScenarioSpec::default()
+        };
+        match self {
+            Scenario::Basic | Scenario::BasicAltClients => base,
+            Scenario::MultipleRelays => ScenarioSpec {
+                topology: Topology::DivergentRelays,
+                ..base
+            },
+            Scenario::TimingGames => ScenarioSpec {
+                topology: Topology::TwoRelays,
+                timing_games: true,
+                ..base
+            },
+            Scenario::Mux => ScenarioSpec {
+                topology: Topology::Mux,
+                ..base
+            },
+            Scenario::MinBid => ScenarioSpec {
+                min_bid: MinBid::Floor(0.5),
+                ..base
+            },
+            Scenario::Signer => ScenarioSpec {
+                signer: true,
+                ..base
+            },
+            Scenario::SkipSigverify => ScenarioSpec {
+                sigverify: Sigverify::Skip,
+                ..base
+            },
+            Scenario::SigverifyDiff => ScenarioSpec {
+                sigverify: Sigverify::SkipPoisoned,
+                ..base
+            },
+            Scenario::SigverifyDiffControl => ScenarioSpec {
+                sigverify: Sigverify::PoisonedControl,
+                ..base
+            },
+            Scenario::ExtraValidation => ScenarioSpec {
+                extra_validation: true,
+                ..base
+            },
+            Scenario::WsStream => ScenarioSpec {
+                get_header: HeaderTransport::Stream {
+                    api_key: KeyPresence::Present,
+                },
+                ..base
+            },
+            Scenario::WsStreamNoKey => ScenarioSpec {
+                get_header: HeaderTransport::Stream {
+                    api_key: KeyPresence::Absent,
+                },
+                ..base
+            },
+        }
+    }
+
     /// The leading comment block (verbatim from Python).
-    fn comment(&self) -> &'static str {
+    pub(super) fn comment(&self) -> &'static str {
         match self {
             Scenario::Basic => {
                 "# cb-basic: Single relay (helix) with default Commit-Boost config.\n\
@@ -465,13 +535,13 @@ pub const WRONG_RELAY_PUBKEY: &str = "0xaaf6c1251e73fb600624937760fef218aace5b25
 /// single helix instance as `helix-relay-2` (index = participant_count 2 +
 /// relay_index 0), listening on the fixed in-enclave port 4040 - confirmed by
 /// the live 2-helix runs (helix-relay-2/-3).
-fn poisoned_relay_url() -> String {
+pub(super) fn poisoned_relay_url() -> String {
     format!("http://{WRONG_RELAY_PUBKEY}@helix-relay-2:4040")
 }
 
 // --- mev_params assembly (ports build_mev_params) ---------------------------
 
-fn build_mev_params(
+pub(super) fn build_mev_params(
     relays: &[&str],
     images: &Images,
     cb_block: &str,
@@ -541,7 +611,7 @@ fn push_block_scalar(lines: &mut Vec<String>, body: &str) {
 /// so a missing/malformed keys file surfaces as a clean `run` error (and lets the
 /// caller validate BEFORE writing anything), matching the Python's pre-write
 /// `load_pubkeys` + `sys.exit(1)` rather than panicking mid-generation.
-fn load_pubkeys(keys_dir: &Path, node: u8) -> Result<Vec<String>> {
+pub(super) fn load_pubkeys(keys_dir: &Path, node: u8) -> Result<Vec<String>> {
     let path = keys_dir.join(format!("node-{node}-pubkeys.json"));
     let raw = std::fs::read_to_string(&path)
         .wrap_err_with(|| format!("reading pubkey file {}", path.display()))?;
