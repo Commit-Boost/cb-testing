@@ -53,7 +53,7 @@ Internal back-room (agent working material, not part of the public docs surface)
 
 ```bash
 sim doctor                        # host preflight: kurtosis 1.18.1, docker, memory, CB image, submodule
-git submodule update --init       # the forked ethereum-package (empty otherwise; load-bearing)
+git submodule update --init       # 3 submodules: ethereum-package (fork), commit-boost-client, helix
 just build-cb-image               # once: builds commit-boost/commit-boost:kurtosis from ./commit-boost-client
 just e2e                                            # cb-basic, end to end
 just e2e configs/generated/cb-mux.yml               # any scenario
@@ -201,6 +201,9 @@ This is the same defect class the harness keeps finding in itself: a check that 
 - **`ethereum-package/` is a FORK** (`Commit-Boost/ethereum-package`, branch `cb-testing`), pinned as a
   detached-HEAD submodule and load-bearing (empty without `--init`). Changes there must be **pushed** or
   every other clone breaks. There is no `upstream` remote configured. See docs/fork-delta.md.
+- **`commit-boost-client/` and `helix/` are also submodules** (`Commit-Boost/commit-boost-client` @ a
+  certified `main`; `gattaca-com/helix` @ `develop`), the build sources for `just build-cb-image` and local
+  relay builds. Same push rule: bump the pin to a commit that exists on the remote or `--recursive` clones break.
 - **`configs/generated/` is gitignored, but `src/bin/sim/render.rs` and `genmodel/scenario.rs`
   `include_str!` `configs/generated/cb-basic.yml` at COMPILE time** (a code comment even calls it "TRACKED";
   it is not). A fresh clone therefore cannot build `sim` until that file exists, and `sim` is the generator.

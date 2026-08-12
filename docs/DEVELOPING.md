@@ -20,7 +20,8 @@ does not re-explain the architecture or the check catalog:
   Rust workspace (one lib + five bins: `cb-verify`, `cb-orchestrator`, `sim`, `test-mux`, `test-relay`).
 - **Docker + Kurtosis CLI 1.18.1** — only needed for the devnet e2e, not for unit tests. Pin 1.18.1 (the
   parsers read its human text tables; a newer CLI has a config-version clash — see the runbook).
-- The forked `ethereum-package` submodule: `git submodule update --init` (only needed to launch a devnet).
+- The bundled submodules (`git submodule update --init`, or clone `--recursive`): the forked
+  `ethereum-package` (needed to launch a devnet), plus `commit-boost-client` and `helix` (build sources).
 
 ### The `just` recipes (the whole dev loop)
 

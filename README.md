@@ -43,13 +43,16 @@ command). It is gitignored — do not commit it. Use `.env.example` as the refer
 
 ## Kurtosis setup / gotchas
 
-The repo contains a forked `ethereum-package` as a submodule:
+Kurtosis stands the devnet up from a forked `ethereum-package`, one of the three bundled submodules
+(init all three with `git submodule update --init`, or clone with `--recursive`):
 
-```bash
-git submodule update --init
-```
+| Submodule | Source | Role |
+|---|---|---|
+| `ethereum-package` | forked `Commit-Boost/ethereum-package` | the Kurtosis devnet definition |
+| `commit-boost-client` | `Commit-Boost/commit-boost-client` | CB sidecar source, built into the devnet image |
+| `helix` | `gattaca-com/helix` | relay source, for local branch-switching builds (image is pulled) |
 
-The fork generalizes hardcoded patterns from upstream, enabling configs like commit-boost + helix that weren't possible before. Once [this PR](https://github.com/ethpandaops/ethereum-package/pull/1384) merges we can deprecate the fork.
+The `ethereum-package` fork generalizes hardcoded patterns from upstream, enabling configs like commit-boost + helix that weren't possible before. Once [this PR](https://github.com/ethpandaops/ethereum-package/pull/1384) merges we can deprecate the fork.
 
 ### Kurtosis configs
 
@@ -235,5 +238,7 @@ cb-testing/
       payload_matching.rs # Hash matching
       mux_routing.rs      # Mux config parsing, log analysis
       cb_metrics.rs       # Prometheus metrics checks
-  ethereum-package/       # Forked Kurtosis package (submodule)
+  ethereum-package/       # Forked Kurtosis devnet definition (submodule)
+  commit-boost-client/    # CB sidecar source, built into the devnet image (submodule)
+  helix/                  # Relay source, for local branch-switching builds (submodule)
 ```
