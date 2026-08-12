@@ -1,7 +1,20 @@
 # Composable scenarios — design
 
-Status: design (implementation on `feat/composable-scenarios`). This doc is a PROPOSAL; on ship, mark it
-landed and point it at the implementing files.
+Status: implemented (`feat/composable-scenarios`, `genmodel/spec.rs` + `sim scenario`). Ship-order steps 1-3
+landed; step 4 (promote curated combos to named+goldened) and step 5 (NL front-end) are follow-ups.
+
+## Validation (live)
+
+- Offline: `lower_reproduces_every_scenario` proves `render(spec) == args_file_in` byte-for-byte for all 13
+  named scenarios; round-trip + composite-order + total-render property tests green; full suite + clippy
+  `-D warnings` clean.
+- Real-schema: a novel compose (`get_header=stream` + `clients=nethermind-prysm` + `timing_games`) passes
+  `sim preflight` (helix config-parse against the real image).
+- End-to-end: a novel compose (`cb-timing-games` base + `extra_validation`, two-relays — no named scenario,
+  no golden) rendered by `sim scenario`, stood up a full Kurtosis devnet, and BOTH composed features were
+  positively proven from CB debug logs: `feature.timing_games` PASS (385 marker lines),
+  `feature.extra_validation` PASS (126 marker lines); overall exit 0. The two WARNs (get_header deadline
+  timeouts, p95 latency) are the expected artifacts of aggressive timing games, not failures.
 
 ## Problem
 
