@@ -9,11 +9,13 @@ Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit
   `~/.config/kurtosis/kurtosis-config.yml` — see `docs/local-kurtosis-e2e.md`)
 - [Rust toolchain](https://rustup.rs/) (1.91+, edition 2024)
 - Docker (for Kurtosis)
-- The forked `ethereum-package` submodule: `git submodule update --init`
+- The bundled submodules: clone with `--recursive`, or run `git submodule update --init` in an
+  existing checkout. This pulls three: the forked `ethereum-package`, `commit-boost-client`
+  (the CB sidecar source, built into the devnet image), and `helix` (relay source, for local
+  branch-switching builds).
 
-If you're testing a local CB build (the default — the CB sidecar image is built, not pulled), you also need:
-- The [commit-boost-client](https://github.com/Commit-Boost/commit-boost-client) repo cloned as a sibling
-  (the `./commit-boost-client` submodule, overridable — see `just build-cb-image`)
+If you're testing a local CB build (the default — the CB sidecar image is built, not pulled), the
+`commit-boost-client` submodule is where it builds from (overridable — see `just build-cb-image`).
 
 > Contributing? See **[`docs/DEVELOPING.md`](docs/DEVELOPING.md)** for the dev loop and how to add checks + scenarios.
 
@@ -73,9 +75,9 @@ Six scenarios are generated:
 ## Quick start
 
 ```bash
-# ONE-TIME (from scratch): init the forked ethereum-package, then build the
-# Commit-Boost image the devnet runs (from the sibling commit-boost-client repo)
-git submodule update --init
+# ONE-TIME (from scratch): init the bundled submodules, then build the
+# Commit-Boost image the devnet runs (from the commit-boost-client submodule)
+git submodule update --init   # or clone the repo with --recursive
 just build-cb-image                 # -> commit-boost/commit-boost:kurtosis
 
 # Generate configs, pull public images, launch + verify. Prints the tiered
