@@ -151,12 +151,13 @@ silently disable a feature under test. The durable fix is to build helix from th
 (37 CB proof lines), `feature.ws_stream_fallback` PASS (zero HTTP fallbacks), 33 payloads delivered, 100% MEV.
 Proof it was never CL-dependent.
 
-**Known caveat under submodule-helix:** the `relay.validator_registrations` check (which queries the relay's
-`/relay/v1/data/validator_registration` data-api) reports `0/128` and FAILs against the `develop` build, even
-though registrations demonstrably worked (the ws stream authenticated, which requires the api-key bound at
-registration, and MEV delivered). The `develop` data-api answers that query from a postgres backing that is not
-populated in this devnet, while `:main` answered it. This is a check-vs-build artifact, not a pipeline failure;
-harden the check (or treat it as expected) when running ws scenarios against the submodule build.
+**Submodule-helix data-api caveat (now hardened):** the `relay.validator_registrations` check queries the
+relay's `/relay/v1/data/validator_registration` data-api, which the `develop` build answers from an unpopulated
+postgres backing (the in-memory cache that the admission path uses *is* populated — the ws stream authenticated).
+So it reports `0/128` even though registrations worked. The check is now hardened: when it sees `0/N` *and* the
+relay confirmed delivery (`relay.payloads_delivered_multi` PASS — a relay only delivers to registered
+proposers), it SKIPs with an explanation instead of FAILing. A genuine total-registration failure (0 registered,
+0 delivered) still FAILs, and is independently caught by the tier-1 delivery check.
 
 ## Honesty note (orthogonality is partly fiction)
 

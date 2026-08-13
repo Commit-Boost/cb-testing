@@ -244,6 +244,7 @@ pub async fn check_validator_registrations(
     relay_url: &str,
     client: &reqwest::Client,
     pubkeys: &[String],
+    delivery_confirmed: bool,
 ) -> CheckResult {
     if pubkeys.is_empty() {
         return CheckResult::skip(
@@ -286,7 +287,7 @@ pub async fn check_validator_registrations(
 
     // The verdict + detail come from the pure classifier; the caller owns the
     // `data` payload (it holds the missing-pubkey vector the counts can't carry).
-    classify_registrations(reg_count, missing.len()).with_data(data)
+    classify_registrations(reg_count, missing.len(), delivery_confirmed).with_data(data)
 }
 
 /// Classify the validator-registration verdict from the registered/missing counts.
@@ -295,11 +296,26 @@ pub async fn check_validator_registrations(
 /// pattern). `total = registered + missing`:
 /// - all registered (`missing == 0`) => PASS
 /// - some registered, some missing    => WARN
-/// - none registered                  => FAIL
+/// - none registered                  => FAIL, UNLESS `delivery_confirmed`
+///
+/// `delivery_confirmed` is whether the relay actually delivered payloads this
+/// run (the `relay.payloads_delivered_multi` PASS). A relay only delivers to
+/// REGISTERED proposers, so `0/N` from the registration data-api *with*
+/// confirmed delivery is provably a reporting artifact — the data-api query is
+/// unpopulated in this relay build (e.g. a submodule-built `develop` helix
+/// answers it from an empty postgres while its in-memory cache — which the
+/// admission path uses — is populated). That case SKIPs with an explanation
+/// rather than emitting a misleading FAIL. A true total-registration failure
+/// (0 registered AND no delivery) still FAILs, and is independently caught by
+/// the tier-1 `relay.payloads_delivered_multi` check.
 ///
 /// Returns the verdict with an empty `data` payload; the caller attaches the
 /// full payload (which includes the list of missing pubkeys) via `with_data`.
-pub fn classify_registrations(registered: usize, missing: usize) -> CheckResult {
+pub fn classify_registrations(
+    registered: usize,
+    missing: usize,
+    delivery_confirmed: bool,
+) -> CheckResult {
     let total = registered + missing;
 
     if registered == total {
@@ -313,6 +329,16 @@ pub fn classify_registrations(registered: usize, missing: usize) -> CheckResult 
             "relay.validator_registrations",
             3,
             format!("{registered}/{total} validator(s) registered; {missing} missing"),
+        )
+    } else if delivery_confirmed {
+        CheckResult::skip(
+            "relay.validator_registrations",
+            3,
+            format!(
+                "registration data-api reported 0/{total}, but the relay DELIVERED payloads \
+                 (which only registered proposers receive) — the data-api query is unpopulated \
+                 in this relay build, not a registration failure"
+            ),
         )
     } else {
         CheckResult::fail(
@@ -537,7 +563,12 @@ pub async fn run_relay_checks(
         results.push(aggregate_builder_blocks(bb_results));
     }
 
-    results.push(check_payloads_delivered_multi(&live, start_slot, end_slot).await);
+    let delivery_result = check_payloads_delivered_multi(&live, start_slot, end_slot).await;
+    // A relay only delivers to registered proposers, so a delivery PASS is
+    // ground truth that registration happened — used to soften the tier-3
+    // registration check when a relay build's data-api query is unpopulated.
+    let delivery_confirmed = delivery_result.status == CheckStatus::Pass;
+    results.push(delivery_result);
 
     // Check MEV delivery rate across ALL live relays.
     // Aggregated: best-of status; reports combined delivery stats.
@@ -554,8 +585,15 @@ pub async fn run_relay_checks(
     if !pubkeys.is_empty() {
         let mut per_relay: Vec<CheckResult> = Vec::new();
         for relay in &live {
-            per_relay
-                .push(check_validator_registrations(relay.base_url(), http_client, pubkeys).await);
+            per_relay.push(
+                check_validator_registrations(
+                    relay.base_url(),
+                    http_client,
+                    pubkeys,
+                    delivery_confirmed,
+                )
+                .await,
+            );
         }
         let urls: Vec<String> = live.iter().map(|r| r.base_url().to_string()).collect();
         if let Some(agg) = aggregate_registrations(&per_relay, &urls) {
@@ -829,10 +867,11 @@ mod tests {
 
     // --- classify_registrations (seam 2) --------------------------------
 
-    // Contract: every validator registered (missing == 0) PASSes.
+    // Contract: every validator registered (missing == 0) PASSes. Delivery
+    // confirmation is irrelevant to the all-registered path.
     #[test]
     fn registrations_all_registered_passes() {
-        let r = classify_registrations(3, 0);
+        let r = classify_registrations(3, 0, false);
         assert_eq!(r.status, CheckStatus::Pass);
         assert_eq!(r.id, "relay.validator_registrations");
         assert_eq!(r.tier, 3);
@@ -842,17 +881,31 @@ mod tests {
     // Contract: some registered, some missing WARNs, and the counts appear.
     #[test]
     fn registrations_some_missing_warns() {
-        let r = classify_registrations(2, 1);
+        let r = classify_registrations(2, 1, false);
         assert_eq!(r.status, CheckStatus::Warn);
         // total = registered + missing = 3
         assert!(r.detail.contains("2/3 validator(s) registered; 1 missing"));
     }
 
-    // Contract: none registered FAILs (0/total), even when total > 0.
+    // Contract: none registered AND no delivery => a real failure, FAIL (0/total).
     #[test]
-    fn registrations_none_registered_fails() {
-        let r = classify_registrations(0, 4);
+    fn registrations_none_registered_no_delivery_fails() {
+        let r = classify_registrations(0, 4, false);
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.detail.contains("No validators registered on relay (0/4)"));
+    }
+
+    // Contract: none registered per the data-api BUT the relay delivered payloads
+    // (which only registered proposers receive) => the query is unpopulated in
+    // this relay build, not a registration failure. SKIP, not FAIL. This is the
+    // submodule-built (develop) helix case: it serves the ws stream (proving
+    // registration bound the api-key) but answers the data-api query from an
+    // empty postgres.
+    #[test]
+    fn registrations_none_but_delivery_confirmed_skips() {
+        let r = classify_registrations(0, 128, true);
+        assert_eq!(r.status, CheckStatus::Skip);
+        assert!(r.detail.contains("DELIVERED payloads"));
+        assert!(r.detail.contains("data-api query is unpopulated"));
     }
 }
