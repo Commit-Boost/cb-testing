@@ -81,6 +81,12 @@ struct Cli {
     /// Verbose logging.
     #[arg(short, long)]
     verbose: bool,
+
+    /// Skip the chain-finalization check (pass `--skip-finalization-check` to
+    /// cb-verify). Use with a low `--target-epoch` for a fast MEV-delivery gate
+    /// that does not wait for the chain to finalize (~epoch 4+).
+    #[arg(long)]
+    skip_finalization: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +212,7 @@ async fn main() -> Result<()> {
         let strict = cli.strict;
         let live_metrics = cli.live_metrics;
         let verbose = cli.verbose;
+        let skip_finalization = cli.skip_finalization;
 
         join_set.spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore closed");
@@ -219,6 +226,7 @@ async fn main() -> Result<()> {
                 strict,
                 live_metrics,
                 verbose,
+                skip_finalization,
                 results_dir.as_deref(),
             )
             .await;
@@ -336,6 +344,7 @@ async fn run_enclave_pipeline(
     strict: bool,
     live_metrics: bool,
     verbose: bool,
+    skip_finalization: bool,
     results_dir: Option<&Path>,
 ) -> Result<EnclaveStatus> {
     let start = Instant::now();
@@ -404,6 +413,7 @@ async fn run_enclave_pipeline(
         strict,
         live_metrics,
         verbose,
+        skip_finalization,
     )
     .await;
 
@@ -586,6 +596,7 @@ async fn run_checks(
     strict: bool,
     live_metrics: bool,
     verbose: bool,
+    skip_finalization: bool,
 ) -> Result<CheckSummary> {
     // Find the cb-verify binary (built from the same crate)
     let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
@@ -619,6 +630,9 @@ async fn run_checks(
     }
     if verbose {
         cmd.arg("-v");
+    }
+    if skip_finalization {
+        cmd.arg("--skip-finalization-check");
     }
 
     let output = cmd.output().await.wrap_err("Failed to run cb-verify")?;

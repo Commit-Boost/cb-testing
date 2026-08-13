@@ -1,9 +1,10 @@
 name: Integration Test
 
 on:
-  schedule:
-      # Runs every day at 00:00 UTC
-      - cron: '0 0 * * *'
+  # NO nightly schedule: a full devnet (geth+lighthouse + helix + reth-rbuilder
+  # + CB) needs ~15-20GB and OOMs a free-tier GitHub-hosted runner, so a cron
+  # run just fails and emails every night. The gate is a manual local sweep
+  # (`just test-all`); run this workflow on-demand only, on a big-enough runner.
   workflow_dispatch:
     inputs:
       target_epoch:
