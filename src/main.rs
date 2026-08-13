@@ -610,6 +610,11 @@ async fn run_verification(cli: &Cli) -> i32 {
         );
     }
 
+    // A cb-min-bid scenario EXPECTS zero delivery (the floor rejects every bid);
+    // when feature.min_bid confirms the floor fired, downgrade the delivery FAIL
+    // to a (non-fatal) SKIP so the scenario's success isn't reported as failure.
+    checks::relay_pipeline::reconcile_min_bid_delivery(&mut all_checks);
+
     // Step 5: Report
     let report = VerificationReport {
         enclave: enclave_name.clone(),

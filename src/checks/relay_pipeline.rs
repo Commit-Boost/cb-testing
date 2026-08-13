@@ -349,6 +349,39 @@ pub fn classify_registrations(
     }
 }
 
+/// Reconcile the tier-1 delivery verdict with an enforcing `min_bid` floor.
+///
+/// A `cb-min-bid` scenario EXPECTS zero delivery — the floor rejects every bid,
+/// so `relay.payloads_delivered_multi` FAILs on the *intended* outcome. When
+/// `feature.min_bid` confirms the floor actually fired (PASS = bids rejected
+/// below the floor and no winner under it), that zero delivery is CORRECT, not a
+/// pipeline failure, so the delivery FAIL is downgraded to SKIP (a tier-1 SKIP
+/// is not a run failure).
+///
+/// Keyed on POSITIVE evidence only (`feature.min_bid` PASS). A `feature.min_bid`
+/// PASS requires CB to have received bids and rejected them, which a *dead*
+/// pipeline cannot produce — so a genuinely broken pipeline under min_bid leaves
+/// `feature.min_bid` inconclusive/WARN, no reconciliation happens, and the
+/// delivery FAIL stands. The C1 dead-relay false-green guard is preserved.
+pub fn reconcile_min_bid_delivery(checks: &mut [CheckResult]) {
+    let floor_enforcing = checks
+        .iter()
+        .any(|c| c.id == "feature.min_bid" && c.status == CheckStatus::Pass);
+    if !floor_enforcing {
+        return;
+    }
+    for c in checks.iter_mut() {
+        if c.id == "relay.payloads_delivered_multi" && c.status == CheckStatus::Fail {
+            *c = CheckResult::skip(
+                "relay.payloads_delivered_multi",
+                1,
+                "zero delivery is EXPECTED under an enforcing min_bid floor \
+                 (feature.min_bid PASS — every bid rejected below the floor); not a pipeline failure",
+            );
+        }
+    }
+}
+
 /// Verdicts when EVERY relay in the enclave is unreachable at check time. This is
 /// NOT benign: the relays were launched and the chain observed a full epoch, so
 /// all-dead means the MEV pipeline died mid-run (e.g. relay OOM). The tier-1
@@ -893,6 +926,60 @@ mod tests {
         let r = classify_registrations(0, 4, false);
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.detail.contains("No validators registered on relay (0/4)"));
+    }
+
+    // --- reconcile_min_bid_delivery ------------------------------------
+
+    fn fail(id: &str) -> CheckResult {
+        CheckResult::fail(id, 1, "x")
+    }
+    fn pass(id: &str) -> CheckResult {
+        CheckResult::pass(id, 1, "x")
+    }
+
+    // Contract: floor enforcing (feature.min_bid PASS) => the expected zero-
+    // delivery FAIL is downgraded to SKIP (non-fatal).
+    #[test]
+    fn min_bid_enforcing_downgrades_delivery_fail_to_skip() {
+        let mut checks = vec![
+            pass("feature.min_bid"),
+            fail("relay.payloads_delivered_multi"),
+        ];
+        reconcile_min_bid_delivery(&mut checks);
+        let d = checks
+            .iter()
+            .find(|c| c.id == "relay.payloads_delivered_multi")
+            .unwrap();
+        assert_eq!(d.status, CheckStatus::Skip);
+        assert!(
+            d.detail
+                .contains("EXPECTED under an enforcing min_bid floor")
+        );
+    }
+
+    // Contract: floor NOT confirmed (no feature.min_bid PASS — e.g. inconclusive
+    // under a dead pipeline) => the delivery FAIL STANDS. No false-green.
+    #[test]
+    fn min_bid_not_enforcing_leaves_delivery_fail() {
+        let mut checks = vec![
+            CheckResult::warn("feature.min_bid", 1, "inconclusive"),
+            fail("relay.payloads_delivered_multi"),
+        ];
+        reconcile_min_bid_delivery(&mut checks);
+        let d = checks
+            .iter()
+            .find(|c| c.id == "relay.payloads_delivered_multi")
+            .unwrap();
+        assert_eq!(d.status, CheckStatus::Fail);
+    }
+
+    // Contract: no min_bid check at all (a normal scenario) => delivery FAIL
+    // stands untouched.
+    #[test]
+    fn no_min_bid_leaves_delivery_fail() {
+        let mut checks = vec![fail("relay.payloads_delivered_multi")];
+        reconcile_min_bid_delivery(&mut checks);
+        assert_eq!(checks[0].status, CheckStatus::Fail);
     }
 
     // Contract: none registered per the data-api BUT the relay delivered payloads
