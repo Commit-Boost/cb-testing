@@ -119,6 +119,15 @@ pub struct ScenarioSpec {
     pub signer: bool,
     pub sigverify: Sigverify,
     pub min_bid: MinBid,
+    /// Raw extra `[pbs]` config lines, appended after the typed knobs. A
+    /// Rust-only escape hatch for NAMED scenarios that exercise config knobs the
+    /// typed surface deliberately does not model (e.g. `cb-config-surface`). It
+    /// is `#[serde(skip)]` on purpose: the AI-driving surface (`--spec` JSON /
+    /// `--set`) cannot set it, so the anti-hallucination guarantee (illegal
+    /// configs are not expressible by the model) is preserved — only in-repo
+    /// scenario authors can reach it.
+    #[serde(skip)]
+    pub extra_pbs: Vec<String>,
 }
 
 impl Default for ScenarioSpec {
@@ -133,6 +142,7 @@ impl Default for ScenarioSpec {
             signer: false,
             sigverify: Sigverify::default(),
             min_bid: MinBid::None,
+            extra_pbs: Vec::new(),
         }
     }
 }
@@ -289,6 +299,8 @@ impl ScenarioSpec {
         if let MinBid::Floor(x) = self.min_bid {
             pbs.push(format!("min_bid_eth = {x}"));
         }
+        // Raw escape-hatch lines (named scenarios only) come last.
+        pbs.extend(self.extra_pbs.iter().cloned());
         p.extra_pbs_lines = pbs;
 
         // Per-relay lines, canonical order: timing-games, then ws stream.
@@ -685,6 +697,7 @@ mod tests {
                                         signer: false,
                                         sigverify: sv,
                                         min_bid: mb,
+                                        ..ScenarioSpec::default()
                                     });
                                 }
                             }

@@ -110,6 +110,10 @@ pub fn golden(scenario: &str) -> &'static str {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-mux.yml"
         )),
+        "cb-config-surface" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/golden-configs/cb-config-surface.yml"
+        )),
         other => panic!("no golden fixture for scenario {other:?}"),
     }
 }

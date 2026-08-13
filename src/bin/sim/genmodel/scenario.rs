@@ -140,12 +140,28 @@ pub enum Scenario {
     /// under --require-feature-proof; not part of the green sweep.
     WsStreamNoKey,
     Mux,
+    /// Config-surface coverage: sets several `[pbs]` knobs at once (registration
+    /// batching, register timeout/retry, relay health-check) that no other
+    /// scenario exercises. A successful run proves CB parses and honors these
+    /// keys — the guard against `[pbs]`'s silent-flatten trap (a renamed key is
+    /// ignored, not rejected).
+    ConfigSurface,
 }
+
+/// The `[pbs]` knobs `cb-config-surface` exercises. Explicit, safe values: they
+/// change the parse surface without breaking the pipeline, so MEV still delivers
+/// on a successful run.
+const CONFIG_SURFACE_PBS: [&str; 4] = [
+    "validator_registration_batch_size = 5",
+    "timeout_register_validator_ms = 8000",
+    "register_validator_retry_limit = 5",
+    "relay_check = true",
+];
 
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 13] = [
+    pub const ALL: [Scenario; 14] = [
         Scenario::Basic,
         Scenario::BasicAltClients,
         Scenario::MultipleRelays,
@@ -159,6 +175,7 @@ impl Scenario {
         Scenario::WsStream,
         Scenario::WsStreamNoKey,
         Scenario::Mux,
+        Scenario::ConfigSurface,
     ];
 
     /// The scenario's canonical name (also the golden fixture / output basename).
@@ -177,6 +194,7 @@ impl Scenario {
             Scenario::WsStream => "cb-ws-stream",
             Scenario::WsStreamNoKey => "cb-ws-stream-nokey",
             Scenario::Mux => "cb-mux",
+            Scenario::ConfigSurface => "cb-config-surface",
         }
     }
 
@@ -259,6 +277,10 @@ impl Scenario {
                 get_header: HeaderTransport::Stream {
                     api_key: KeyPresence::Absent,
                 },
+                ..base
+            },
+            Scenario::ConfigSurface => ScenarioSpec {
+                extra_pbs: CONFIG_SURFACE_PBS.iter().map(|s| s.to_string()).collect(),
                 ..base
             },
         }
@@ -383,6 +405,16 @@ impl Scenario {
                  # second Helix relay instance. This tests CB's ability to partition the\n\
                  # validator set and apply per-mux timeout and relay configurations."
             }
+            Scenario::ConfigSurface => {
+                "# cb-config-surface: exercise several [pbs] config knobs at once.\n\
+                 #\n\
+                 # Sets validator_registration_batch_size, timeout_register_validator_ms,\n\
+                 # register_validator_retry_limit, and relay_check. A successful run (MEV\n\
+                 # still delivered) proves CB parses and honors these keys - the guard\n\
+                 # against [pbs]'s silent-flatten trap (a renamed/misspelled key is\n\
+                 # IGNORED, not rejected). Coverage is that the pipeline stays green with\n\
+                 # the knobs set; there is no dedicated per-knob assertion."
+            }
         }
     }
 
@@ -400,7 +432,8 @@ impl Scenario {
             | Scenario::SigverifyDiffControl
             | Scenario::ExtraValidation
             | Scenario::WsStream
-            | Scenario::WsStreamNoKey => &["helix"],
+            | Scenario::WsStreamNoKey
+            | Scenario::ConfigSurface => &["helix"],
             Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => &["helix", "helix"],
         }
     }
@@ -469,6 +502,10 @@ impl Scenario {
                 let node1 = load_pubkeys(keys_dir, 1)?;
                 cb_toml_mux(&node0, &node1)
             }
+            Scenario::ConfigSurface => cb_toml(&CbParams {
+                extra_pbs_lines: CONFIG_SURFACE_PBS.iter().map(|s| s.to_string()).collect(),
+                ..CbParams::basic()
+            }),
         })
     }
 
