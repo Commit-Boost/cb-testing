@@ -35,6 +35,11 @@ jobs:
       # want independent e2e signal from each scenario every night.
       fail-fast: false
       matrix:
+        # Adding a ws header-stream scenario (cb-ws-stream, cb-ws-stream-nokey,
+        # any get_header=stream)? The public helix :main image pulled below STUBS
+        # the stream admission — you must first `just build-helix-image` and set
+        # HELIX_RELAY_IMAGE=local/helix-relay:kurtosis, or the stream silently
+        # degrades to HTTP fallback. See docs/composable-scenarios.md.
         scenario: [cb-basic, cb-mux]
 
     env:

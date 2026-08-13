@@ -32,8 +32,11 @@ just build-cb-image
 just ci
 ```
 
-You do **not** build helix — its relay image is pulled public. The helix submodule is bundled only
-so you can build a custom relay branch locally when you need one (see
+For the default scenarios you do **not** build helix — its relay image is pulled public. **The websocket
+header-stream scenarios (`cb-ws-stream`, `cb-ws-stream-nokey`, any `get_header=stream` compose) are the
+exception**: the public `:main` image stubs the stream admission, so those need a helix built from the
+bundled submodule — see [Testing the websocket header stream](#testing-the-websocket-header-stream). The
+submodule is also there for building a custom relay branch (see
 [Testing a specific branch](#testing-a-specific-cb-or-helix-branch)).
 
 ---
@@ -90,6 +93,26 @@ just verify-strict    enclave="CB-Testnet"    # + live metrics, strict mode
 just verify-now       enclave="CB-Testnet"    # quick health check, no observation window
 just show-logs        enclave="CB-Testnet"    # raw CB PBS logs, parsed (debugging)
 ```
+
+---
+
+## Testing the websocket header stream
+
+The ws header-stream scenarios need a helix built from the bundled `./helix` submodule. The public
+`ghcr.io/gattaca-com/helix-relay:main` image **stubs** the stream admission (it refuses the stream for every
+proposer — the real logic is in gattaca's private build), so against `:main` these scenarios silently degrade
+to HTTP fallback. The `develop` submodule carries the working public admission.
+
+```bash
+just build-helix-image                                  # -> local/helix-relay:kurtosis (from ./helix)
+echo 'HELIX_RELAY_IMAGE=local/helix-relay:kurtosis' >> .env
+just e2e configs/generated/cb-ws-stream.yml             # or any get_header=stream compose
+```
+
+Expected: `feature.ws_header_stream` PASS with zero (or one startup-race) HTTP fallbacks. Note: against the
+submodule build, `relay.validator_registrations` SKIPs (the `develop` data-api query is unpopulated in this
+devnet; the check confirms registration via delivery instead). Remove the `.env` override to return non-ws
+scenarios to the pulled `:main` image.
 
 ---
 
