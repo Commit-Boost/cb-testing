@@ -478,8 +478,11 @@ pub fn curated() -> Vec<(&'static str, ScenarioSpec)> {
         ("cb-basic-teku", basic_on(ClientPair::GethTeku)),
         ("cb-basic-nimbus", basic_on(ClientPair::GethNimbus)),
         ("cb-basic-lodestar", basic_on(ClientPair::GethLodestar)),
-        // ws stream on the prysm pair — the exact Law-7 route-coupling concern
-        // (a prysm-specific ws regression is invisible under geth+lighthouse).
+        // ws stream on prysm — the CL genuinely participates and it WORKS here
+        // (validated: 30 headers streamed). The ws stream does NOT currently serve
+        // on teku/nimbus/lodestar (relay refuses with `api_key: None` → 401 →
+        // HTTP fallback), so those are deliberately NOT curated ws points; the
+        // finding + its root-cause investigation live in docs/composable-scenarios.md.
         (
             "cb-ws-prysm",
             ScenarioSpec {

@@ -110,8 +110,53 @@ before its golden is trusted (a golden of a config that has never run is worthle
 | `cb-ws-prysm` | ws stream on prysm — the highest-suspicion route coupling | 15 / 1 / 0; **ws stream FIRED** (30 headers, 1 startup-race fallback) — the coupling concern is refuted by measurement |
 | `cb-timing-extra-validation` | the composition claim (both markers must fire) | both `feature.timing_games` + `feature.extra_validation` proven from CB logs |
 
-Deferred (add later, each with a live run): `poison × prysm` (skip_sigverify differential on the ALT pair),
-`min_bid (Floor) × prysm` (the `[pbs]` silent-ignore canary against a real CB parse).
+Not curated as ws×CL points: `poison × prysm` and `min_bid × prysm` were dropped on reassessment —
+skip_sigverify and min_bid are CB-internal (the CL never participates; the `commit_boost_config` block is
+byte-identical across CLs), so a client pairing adds no Law-7 coverage that `cb-sigverify-diff` / `cb-min-bid`
+don't already have.
+
+### The ws header stream requires a helix built from the `./helix` submodule (not the public `:main` image)
+
+An initial ws×CL sweep appeared to show the stream failing on teku/nimbus/lodestar while working on
+lighthouse/prysm — but that was **not** CL-dependent. Root cause: the devnet pulls the public helix image
+`ghcr.io/gattaca-com/helix-relay:main`, and in helix `main` the header-stream admission is **stubbed** — the
+`ApiProvider::admit_header_stream` trait method has a default that unconditionally returns
+`Err("header stream not available")`, and the open-source `DefaultApiProvider` does not override it (its
+`get_preferences` even hard-codes `api_key: None`). The real admission logic lives in gattaca's private
+`ApiProvider`, not shipped in the public build. So `:main` refuses the stream for **every** proposer, any CL.
+
+The lighthouse/prysm runs "worked" only because they ran against an **older** `:main`: the image is a mutable
+tag, and it was rebuilt with the stub between those runs and the teku/nimbus/lodestar ones (confirmed by the
+image's build timestamp straddling the success/failure boundary, the running digest, and that `main` has exactly
+one `admit_header_stream` — the stub, no override). The vendored `./helix` submodule (`develop`) still carries
+the **working** public admission (`header_stream.rs` calls `check_api_key`, and `get_preferences` reads the
+`x-api-key` header), which is why helix is vendored.
+
+**To run any ws scenario: build helix from the submodule and point the devnet at it.**
+
+```bash
+just build-helix-image                          # -> local/helix-relay:kurtosis (from ./helix)
+echo 'HELIX_RELAY_IMAGE=local/helix-relay:kurtosis' >> .env
+just e2e configs/generated/cb-ws-stream.yml     # or any composed ws scenario
+```
+
+The ws curated point (`cb-ws-prysm`) and the named `cb-ws-stream` / `cb-ws-stream-nokey` scenarios are only
+reproducible against a submodule-built helix; against the current public `:main` they degrade to HTTP fallback.
+This is a mutable-tag skew trap: pinning `:main` while also vendoring the source meant an upstream rebuild could
+silently disable a feature under test. The durable fix is to build helix from the submodule for ws (above); a
+`develop`-tracking pin or a specific working digest are alternatives.
+
+**Confirmed** (2026-08-13): `sim scenario --set clients=geth-teku,get_header=stream` — the exact CL that
+"failed" against `:main` — streams cleanly against the submodule build: `feature.ws_header_stream` PASS
+(37 CB proof lines), `feature.ws_stream_fallback` PASS (zero HTTP fallbacks), 33 payloads delivered, 100% MEV.
+Proof it was never CL-dependent.
+
+**Known caveat under submodule-helix:** the `relay.validator_registrations` check (which queries the relay's
+`/relay/v1/data/validator_registration` data-api) reports `0/128` and FAILs against the `develop` build, even
+though registrations demonstrably worked (the ws stream authenticated, which requires the api-key bound at
+registration, and MEV delivered). The `develop` data-api answers that query from a postgres backing that is not
+populated in this devnet, while `:main` answered it. This is a check-vs-build artifact, not a pipeline failure;
+harden the check (or treat it as expected) when running ws scenarios against the submodule build.
 
 ## Honesty note (orthogonality is partly fiction)
 

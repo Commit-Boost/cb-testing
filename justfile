@@ -90,9 +90,19 @@ generate-configs:
 
 # Build the Commit-Boost image the devnet runs, from the bundled commit-boost submodule
 # (default ./commit-boost-client submodule). Produces commit-boost/commit-boost:{{tag}};
-# keep it in sync with MEV_BOOST_IMAGE in .env. Helix is a PUBLIC image (not built).
+# keep it in sync with MEV_BOOST_IMAGE in .env.
 build-cb-image tag="kurtosis" cb_dir="./commit-boost-client":
     cd {{cb_dir}} && just build-all {{tag}}
+
+# Build the helix relay image from the bundled ./helix submodule. REQUIRED for the
+# ws header-stream scenarios: the public ghcr.io/gattaca-com/helix-relay:main image
+# STUBS the header-stream admission (admit_header_stream returns "header stream not
+# available"; the real logic is in gattaca's private ApiProvider), so the stream is
+# refused for every proposer. The `develop` submodule still carries the working public
+# admission. Point HELIX_RELAY_IMAGE at this tag in .env to run a ws scenario.
+# Produces local/helix-relay:{{tag}}.
+build-helix-image tag="kurtosis":
+    docker build -t local/helix-relay:{{tag}} -f helix/relay.Dockerfile helix/
 
 # Pre-pull the public images the devnet needs so `kurtosis run` doesn't stall.
 # (The CB sidecar image is built locally — see build-cb-image.)
