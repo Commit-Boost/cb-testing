@@ -455,14 +455,24 @@ async fn run_enclave_pipeline(
 
 /// Phase 1: Launch a Kurtosis enclave.
 async fn launch_enclave(name: &str, config: &Path, package: &str) -> Result<()> {
+    // kurtosis resolves a RELATIVE package/args path against the engine context,
+    // not the CLI cwd, and falls back to "no kurtosis.yml / Docker Compose" — so
+    // pass ABSOLUTE paths (as run-and-verify.sh does). Fall back to the raw value
+    // for a non-filesystem package ref (e.g. a github.com/... locator).
+    let package_abs = std::fs::canonicalize(package)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| package.to_string());
+    let config_abs = std::fs::canonicalize(config)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| config.display().to_string());
     let output = tokio::process::Command::new("kurtosis")
         .args([
             "run",
-            package,
+            &package_abs,
             "--enclave",
             name,
             "--args-file",
-            &config.display().to_string(),
+            &config_abs,
             "--image-download",
             "always",
         ])
