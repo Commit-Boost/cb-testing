@@ -65,7 +65,7 @@ fragments are composed in a FIXED canonical order, pinned by a dedicated composi
 - `sim generate --base <name> --set k=v,...` — a deterministic keyword overlay: start from a named base, apply
   typed field updates, render. Zero model. This is the composability UX.
 - `sim generate --spec <file.json>` — render a full `ScenarioSpec` supplied as JSON (`deny_unknown_fields`).
-  This is the AI-driven entry: an agent (Lisa, chat) composes the spec and passes it; validity is by
+  This is the AI-driven entry: an AI agent or chat UI composes the spec and passes it; validity is by
   construction because output comes from `lower()`.
 
 The system is **AI-driven by construction** — the structured surface IS what an agent targets — without a
