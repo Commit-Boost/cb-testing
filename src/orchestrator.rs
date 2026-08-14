@@ -414,6 +414,8 @@ async fn run_enclave_pipeline(
         live_metrics,
         verbose,
         skip_finalization,
+        min_epochs,
+        target_epoch,
     )
     .await;
 
@@ -599,6 +601,7 @@ async fn observe_enclave(name: &str, min_epochs: u64, target_epoch: u64) -> Resu
 }
 
 /// Phase 4: Run cb-verify against the enclave.
+#[allow(clippy::too_many_arguments)]
 async fn run_checks(
     name: &str,
     config: &Path,
@@ -607,6 +610,8 @@ async fn run_checks(
     live_metrics: bool,
     verbose: bool,
     skip_finalization: bool,
+    min_epochs: u64,
+    target_epoch: u64,
 ) -> Result<CheckSummary> {
     // Find the cb-verify binary (built from the same crate)
     let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
@@ -626,8 +631,13 @@ async fn run_checks(
     cmd.arg("--config").arg(config);
     cmd.arg("--json");
     cmd.arg("--timeout").arg("3600");
-    cmd.arg("--min-epochs").arg("0"); // Already observed
-    cmd.arg("--target-epoch").arg("0"); // Already ready
+    // Pass the ACTUAL observed window so cb-verify measures the full
+    // [target*32, (target+min)*32] range, not a single slot. The pipeline has
+    // already waited for the chain to reach the window end, so cb-verify's own
+    // wait returns immediately. (min-epochs=0 would collapse to [head, head] and
+    // measure MEV delivery over ONE slot — unreliable.)
+    cmd.arg("--min-epochs").arg(min_epochs.to_string());
+    cmd.arg("--target-epoch").arg(target_epoch.to_string());
 
     if let Some(dir) = results_dir {
         cmd.arg("--output-dir").arg(dir);
