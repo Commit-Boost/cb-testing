@@ -171,6 +171,11 @@ test-one config jobs="1":
 # fails by design), cb-ws-stream* (need a submodule-built helix — see
 # build-helix-image + docs/composable-scenarios.md), cb-signer.
 # NOTE run `just build-cb-image` once first (the CB image must exist).
+# RESOURCE NOTE: cb-mux is the heaviest scenario (2 relays + 256 validators). On a
+# constrained/shared box, --jobs 2 can CPU-starve it — register_validator deadline
+# timeouts (555) + get_header 4xx + zero delivery is the starvation signature, NOT a
+# defect. Re-run the offender solo (`just e2e configs/generated/cb-mux.yml`) or run
+# the whole gate at `just sweep-gate 1` for a definitive (slower) result.
 sweep-gate jobs="2": generate-configs pull-images
     cargo run --release --bin cb-orchestrator -- \
         --jobs {{jobs}} --target-epoch 1 --min-epochs 1 --skip-finalization \

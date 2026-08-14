@@ -162,6 +162,7 @@ pinned to a certified `main`) and rebuild.
 | Checks report `inconclusive` | The check armed but couldn't gather evidence (e.g. no bid landed in the window). Not a pass and not a hard fail — read its line in the report; often a timing/scenario issue, not a CB bug. |
 | Enclave left running after a crash | `kurtosis enclave rm -f <name>` (list with `kurtosis enclave ls`). |
 | Need to kill a run | Never bare `pkill`. Stop the enclave with `kurtosis enclave rm -f`, or Ctrl-C the `just` process. |
+| A sweep scenario FAILs with register_validator deadline timeouts (555) + get_header 4xx | Resource starvation, not a defect — the heaviest scenario (cb-mux) got CPU-starved under `--jobs 2` on a shared box. Re-run it solo (`just e2e configs/generated/cb-mux.yml`) or run the gate at `just sweep-gate 1`. |
 
 For the design of the verdict model (why only tier-1 is fatal, what `inconclusive` means, how checks
 are attributed to a fork) see [`ARCH.md`](ARCH.md) and [`DESIGN.md`](DESIGN.md).
