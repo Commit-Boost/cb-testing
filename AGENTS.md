@@ -85,8 +85,12 @@ Against an already-running enclave (no observation window): `just verify-now <en
 (`src/bin/sim/genmodel/scenario.rs`) — the frozen, byte-goldened regression set: `cb-basic`,
 `cb-basic-nethermind-prysm` (Law 7 alt EL/CL pair), `cb-multiple-relays` (divergent per-relay subsidies),
 `cb-min-bid`, `cb-signer`, `cb-skip-sigverify`, `cb-sigverify-diff` + `cb-sigverify-diff-control` (a real
-ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-ws-stream` + `cb-ws-stream-nokey`
-(the ws stream + its negative control), `cb-mux` (256 validators split across two relays).
+ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-config-surface` (several `[pbs]`
+config knobs at once — registration batch/timeout/retry, relay-check), `cb-ws-stream` +
+`cb-ws-stream-nokey` (the ws stream + its negative control), `cb-mux` (256 validators split across two
+relays). The MEV-delivery gate is `just sweep-gate` (the green subset; `--target-epoch 1
+--skip-finalization` for a fast window — a `--min-epochs 0` window collapses to one slot and measures
+delivery over a single slot, which passes/fails by luck).
 
 **Composable scenarios** (`src/bin/sim/genmodel/spec.rs`, [`docs/composable-scenarios.md`](docs/composable-scenarios.md)):
 `ScenarioSpec` is a flat closed-enum surface that composes features freely and renders through the SAME seams

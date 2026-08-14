@@ -68,17 +68,27 @@ Add `--json` to the verifier for the machine-readable verdict (what CI consumes)
 ## 2. Run the whole scenario sweep
 
 ```bash
-just test-all                     # 2 enclaves in parallel, no saved results
+just sweep-gate                   # THE GATE: the core green MEV scenarios, all must pass
+just test-all                     # every generated config, 2 in parallel
 just test-all 4 /tmp/cb-results   # 4 in parallel, write per-scenario JSON to the dir
 ```
 
-`test-all` drives every generated config through the `cb-orchestrator`, each in its own enclave, up
-to `--jobs` at a time, and prints a one-line-per-scenario summary. With `N` configs and `--jobs=4`
-expect roughly 4x the throughput of running them one by one. This is the command to run before you
-trust a CB or helix change against the full matrix.
+**`just sweep-gate` is the release gate.** It runs the core "green vegetable" scenarios (basic,
+alt-clients, multiple-relays, mux, skip-sigverify, sigverify-diff, timing-games, extra-validation,
+config-surface, min-bid) with a fast window (wait 1 epoch, observe 1, skip finalization) and must exit
+0 — a full devnet OOMs free-tier GitHub runners, so there is no nightly CI for this; the sweep is the
+gate. It deliberately excludes the negative controls (`cb-sigverify-diff-control`, which fails by
+design), the ws scenarios (`cb-ws-stream*`, which need a submodule-built helix — see
+[Testing the websocket header stream](#testing-the-websocket-header-stream)), and `cb-signer`.
+
+`test-all` / `cb-orchestrator` drive each config through its own enclave, up to `--jobs` at a time.
+Two flags matter for a fast, trustworthy sweep: `--target-epoch 1 --min-epochs 1` (observe a full epoch
+window — without a proper window the MEV-delivery check measures a single slot and passes/fails by luck)
+and `--skip-finalization` (don't wait for the chain to finalize, ~epoch 4+). The default `target-epoch`
+is high so finalization passes without that flag, but it is much slower.
 
 The scenarios live in `configs/generated/` (regenerate with `just generate-configs`). The README
-table lists what each one exercises (basic, mux/multi-relay, timing-games, extra-validation, ...).
+table lists what each one exercises.
 
 ---
 

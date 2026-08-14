@@ -163,3 +163,24 @@ test-one config jobs="1":
     cargo run --release --bin cb-orchestrator -- \
         --jobs {{jobs}} \
         {{config}}
+
+# The MEV-delivery GATE: run the core "green vegetable" scenarios with a fast
+# window (wait 1 epoch, observe 1 epoch, skip finalization) — all must pass (exit 0).
+# This is the manual gate (a full devnet OOMs free GitHub runners, so there is no
+# nightly CI for it). Excludes: cb-sigverify-diff-control (poison negative control,
+# fails by design), cb-ws-stream* (need a submodule-built helix — see
+# build-helix-image + docs/composable-scenarios.md), cb-signer.
+# NOTE run `just build-cb-image` once first (the CB image must exist).
+sweep-gate jobs="2": generate-configs pull-images
+    cargo run --release --bin cb-orchestrator -- \
+        --jobs {{jobs}} --target-epoch 1 --min-epochs 1 --skip-finalization \
+        configs/generated/cb-basic.yml \
+        configs/generated/cb-basic-nethermind-prysm.yml \
+        configs/generated/cb-multiple-relays.yml \
+        configs/generated/cb-mux.yml \
+        configs/generated/cb-skip-sigverify.yml \
+        configs/generated/cb-sigverify-diff.yml \
+        configs/generated/cb-timing-games.yml \
+        configs/generated/cb-extra-validation.yml \
+        configs/generated/cb-config-surface.yml \
+        configs/generated/cb-min-bid.yml

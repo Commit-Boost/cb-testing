@@ -76,7 +76,8 @@ just generate-configs
 | `cb-skip-sigverify.yml` | Fast path with BLS signature verification disabled |
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
-| `cb-ws-stream.yml` | getHeader over the websocket bid stream |
+| `cb-config-surface.yml` | Exercises several `[pbs]` config knobs at once (registration batch/timeout/retry, relay-check) |
+| `cb-ws-stream.yml` | getHeader over the websocket bid stream (needs a submodule-built helix) |
 
 For any combination outside the frozen named set (a feature on a specific client, another CL, ...), compose
 one with `sim scenario` — see [Composable scenarios](#composable-scenarios-sim-scenario) below.

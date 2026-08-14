@@ -172,7 +172,16 @@ across all live relays, unioned by slot.
 
 - **PASS** — ≥1 delivered payload (across any relay).
 - **FAIL** — zero delivered payloads across all relays.
-- **SKIP** — all relays unreachable at check time (fragile-source SKIP from `run_relay_checks`).
+- **SKIP** — all relays unreachable at check time (fragile-source SKIP from `run_relay_checks`); OR an
+  enforcing `min_bid` floor explains the zero delivery — when `feature.min_bid` PASSes (every bid
+  rejected below the floor), zero delivery is the *expected* outcome, so `reconcile_min_bid_delivery`
+  downgrades this FAIL to SKIP. Keyed on positive evidence only: a dead pipeline leaves `feature.min_bid`
+  inconclusive, so a genuine delivery failure still FAILs.
+
+Observation-window note: the delivery check measures over `[start, end]`. The window must span a full
+epoch — a single-slot window (e.g. the orchestrator's old `--min-epochs 0`, `[head, head]`) makes this
+check pass or fail on whether one payload happened to land in that exact slot. Use `--target-epoch 1
+--min-epochs 1` (or higher) for a meaningful window.
 
 ### `relay.builder_blocks_received` — tier 2 (relay data API)
 
@@ -203,9 +212,13 @@ aggregated to the worst status.
 
 - **PASS** — all pubkeys registered.
 - **WARN** — some registered, some missing.
-- **FAIL** — none registered (`0/total`).
-- **SKIP** — pubkey list empty, or all relays unreachable. If the upstream pubkey fetch failed
-  entirely, the check is **omitted** from the report rather than SKIPped.
+- **FAIL** — none registered (`0/total`) **and** the relay did not deliver payloads.
+- **SKIP** — pubkey list empty, or all relays unreachable (if the upstream pubkey fetch failed
+  entirely, the check is **omitted** rather than SKIPped); OR `0/total` from the data API **but** the
+  relay delivered payloads (`relay.payloads_delivered_multi` PASS). A relay only delivers to *registered*
+  proposers, so a `0/total` with confirmed delivery is a data-api reporting artifact (a submodule-built
+  `develop` helix answers this query from an unpopulated postgres while the in-memory cache the admission
+  path uses is populated), not a registration failure.
 
 ### `payload_hash_match` — tier 1 (relay data API + beacon)
 
