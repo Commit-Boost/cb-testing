@@ -2,14 +2,16 @@
 # run-epbs-sim.sh — reproducible ePBS (gloas) + commit-boost + keymanager loop.
 #
 # Stands up a gloas devnet with buildoor (gloas_fork_epoch 0, minimal, 6s slots),
-# lodestar CL+VC with keymanager enabled, inserts a commit-boost PBS sidecar into
-# the enclave network, runs `cb-km apply` to point every validator's builder_config
-# at commit-boost (auth_data=buildoor), then observes the loop and asserts:
+# lodestar CL+VC with keymanager enabled, adds a commit-boost PBS sidecar as a
+# first-class kurtosis enclave service (CB_LAUNCH=service; docker = legacy path),
+# runs `cb-km apply` to point every validator's builder_config at commit-boost
+# (auth_data=buildoor), then observes the loop and asserts:
 #   BN -> CB execution_payload_bid calls, buildoor bids via CB (auction winner),
 #   and builder-built blocks on chain (signed_execution_payload_bid.value != 0).
 #
-# This is the epbs-branch SCRATCH harness (manual CB-insert) pending a real
-# ethereum-package `epbs` mev_type that launches CB as the sidecar. See docs/EPBS.md.
+# A real ethereum-package `epbs` mev_type that launches CB as the sidecar (no
+# manual add + no `cb-km apply`) needs an upstream-package change — see the
+# "Native ePBS mev_type: investigation & submodule-upgrade blockers" in docs/EPBS.md.
 #
 # One devnet at a time (~15G). Usage: scripts/run-epbs-sim.sh  (or `just epbs-sim`).
 set -euo pipefail
@@ -27,6 +29,12 @@ EP_PACKAGE="${EP_PACKAGE:-github.com/ethpandaops/ethereum-package}"
 ARGS_FILE="${ARGS_FILE:-configs/epbs/gloas-epbs.yaml}"
 CB_IMAGE="${CB_IMAGE:-commit-boost/commit-boost:km-e2e}"
 CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the templates
+# How commit-boost joins the devnet:
+#   service (default) = a first-class kurtosis enclave service (proper enclave DNS,
+#                       one `kurtosis enclave rm` teardown, shows in `enclave inspect`).
+#   docker            = legacy raw `docker run` on the enclave network (fallback).
+CB_LAUNCH="${CB_LAUNCH:-service}"
+CB_ARTIFACT="${CB_ARTIFACT:-cb-epbs-config}"  # kurtosis files-artifact name (service path)
 CB_KM_BIN="${CB_KM_BIN:-}"
 BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-600}"  # s to wait for the builder deposit to activate
 OBSERVE_SLOTS="${OBSERVE_SLOTS:-16}"     # slots to watch once buildoor is active
@@ -37,14 +45,28 @@ RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives he
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# ---- CB launch abstraction (service | docker) -------------------------------
+# The commit-boost sidecar is read from a few places (boot check, buildoor
+# activation poll, final assertions); route those through one shim so both the
+# first-class enclave-service path and the legacy docker path share the logic.
+cb_logs() {
+  if [[ "$CB_LAUNCH" == "service" ]]; then
+    kurtosis service logs "$ENCLAVE" "$CB_NAME" 2>&1 || true
+  else
+    docker logs "$CB_NAME" 2>&1 || true
+  fi
+}
+
 # ---- cleanup ----------------------------------------------------------------
 cleanup() {
   local rc=$?
   if [[ "$KEEP" == "1" ]]; then
-    log "KEEP=1 — leaving enclave '$ENCLAVE' and container '$CB_NAME' running"
+    log "KEEP=1 — leaving enclave '$ENCLAVE' and CB sidecar '$CB_NAME' running"
   else
-    log "cleanup: removing CB container + enclave"
-    docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
+    log "cleanup: removing enclave (+ CB sidecar)"
+    # service path: the CB service is inside the enclave, torn down with it.
+    # docker path: the CB container is a separate object, remove it explicitly.
+    [[ "$CB_LAUNCH" == "docker" ]] && docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
     kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
   fi
   exit $rc
@@ -72,9 +94,11 @@ avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
 echo "cb-km:   $CB_KM_BIN"
 echo "CB img:  $CB_IMAGE"
+echo "CB join: $CB_LAUNCH"
 echo "enclave: $ENCLAVE   observe: ${OBSERVE_SLOTS} slots   pass>=${MIN_BUILDER_SLOTS}"
 
-# clean any stale run
+# clean any stale run (docker-path container is a separate object; the enclave rm
+# clears a service-path CB with the rest of the enclave)
 docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
 kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
 
@@ -119,17 +143,39 @@ sed -e "s|__VC_KM_URL__|$VC_KM|" \
     configs/epbs/km-overlay.toml.tmpl > "$RUN_DIR/km-overlay.toml"
 grep -q '__' "$RUN_DIR/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
 
-# ---- 4. insert commit-boost PBS into the enclave network --------------------
-log "starting commit-boost PBS ($CB_NAME on $NET)"
-docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
-docker run -d --name "$CB_NAME" --network "$NET" \
-  -v "$(pwd)/$RUN_DIR:/cb:ro" \
-  -e CB_CONFIG=/cb/cb-config.toml \
-  -e RUST_LOG=info,cb_pbs=debug \
-  "$CB_IMAGE" pbs >/dev/null
-sleep 4
-docker ps --format '{{.Names}}' | grep -qx "$CB_NAME" || { docker logs "$CB_NAME" 2>&1 | tail -20; die "CB container exited on boot"; }
-echo "CB up: $(docker ps --filter name=^${CB_NAME}$ --format '{{.Status}}')"
+# ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
+if [[ "$CB_LAUNCH" == "service" ]]; then
+  log "adding commit-boost PBS as a first-class enclave service ($CB_NAME)"
+  # Upload the rendered CB config as a kurtosis files-artifact and add CB as a
+  # real enclave service: it gets enclave DNS ($CB_NAME resolvable by the VC and
+  # buildoor by name), is torn down by `kurtosis enclave rm`, and shows up in
+  # `kurtosis enclave inspect` — no manual container to track.
+  kurtosis files upload "$ENCLAVE" "$RUN_DIR" --name "$CB_ARTIFACT" >/dev/null \
+    || die "kurtosis files upload of $RUN_DIR failed"
+  # NOTE: --env is ONE comma-separated string, so RUST_LOG must not contain a
+  # comma; RUST_LOG=debug gives the cb_pbs bid/auction lines the asserts grep for.
+  kurtosis service add "$ENCLAVE" "$CB_NAME" "$CB_IMAGE" \
+    --files "/cb:$CB_ARTIFACT" \
+    --env "CB_CONFIG=/cb/cb-config.toml,RUST_LOG=debug" \
+    --ports "pbs=http:18550" \
+    --cmd pbs >/dev/null \
+    || { cb_logs | tail -20; die "kurtosis service add for CB failed"; }
+  sleep 4
+  kurtosis service inspect "$ENCLAVE" "$CB_NAME" >/dev/null 2>&1 \
+    || { cb_logs | tail -20; die "CB service not present after add"; }
+  echo "CB service added: $CB_NAME (pbs:18550) in enclave $ENCLAVE"
+else
+  log "starting commit-boost PBS via docker ($CB_NAME on $NET)"
+  docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$CB_NAME" --network "$NET" \
+    -v "$(pwd)/$RUN_DIR:/cb:ro" \
+    -e CB_CONFIG=/cb/cb-config.toml \
+    -e RUST_LOG=info,cb_pbs=debug \
+    "$CB_IMAGE" pbs >/dev/null
+  sleep 4
+  docker ps --format '{{.Names}}' | grep -qx "$CB_NAME" || { docker logs "$CB_NAME" 2>&1 | tail -20; die "CB container exited on boot"; }
+  echo "CB up: $(docker ps --filter name=^${CB_NAME}$ --format '{{.Status}}')"
+fi
 
 # ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
 log "cb-km apply (point 64 validators' builder_config at CB)"
@@ -144,13 +190,13 @@ echo "apply OK"
 log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 buildoor_live=0
 for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
-  if docker logs "$CB_NAME" 2>&1 | grep -q 'received new header.*buildoor-mux'; then buildoor_live=1; break; fi
+  if cb_logs | grep -q 'received new header.*buildoor-mux'; then buildoor_live=1; break; fi
   cur=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0)
   printf '  head=%s waiting for first buildoor bid via CB...\r' "$cur"
   sleep 6
 done
 echo
-(( buildoor_live == 1 )) || { docker logs "$CB_NAME" 2>&1 | tail -15; die "buildoor never bid through CB within ${BUILDOOR_ACTIVATION_TIMEOUT}s"; }
+(( buildoor_live == 1 )) || { cb_logs | tail -15; die "buildoor never bid through CB within ${BUILDOOR_ACTIVATION_TIMEOUT}s"; }
 echo "buildoor is active — first bid seen"
 
 # ---- 6b. observe the loop ----------------------------------------------------
@@ -168,7 +214,7 @@ echo
 # ---- 7. assert --------------------------------------------------------------
 log "verifying the loop"
 # CB-side: bid requests + buildoor auction wins in the observed window
-CB_LOG=$(docker logs "$CB_NAME" 2>&1 || true)
+CB_LOG=$(cb_logs)
 bid_calls=$(grep -c 'execution_payload_bid' <<<"$CB_LOG" || true)
 auction_wins=$(grep -c 'auction winner.*buildoor-mux' <<<"$CB_LOG" || true)
 
@@ -203,6 +249,6 @@ if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 )); th
     "$n_built" "$OBSERVE_SLOTS"
   exit 0
 else
-  docker logs "$CB_NAME" 2>&1 | tail -30
+  cb_logs | tail -30
   die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
 fi
