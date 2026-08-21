@@ -189,3 +189,11 @@ sweep-gate jobs="2": generate-configs pull-images
         configs/generated/cb-extra-validation.yml \
         configs/generated/cb-config-surface.yml \
         configs/generated/cb-min-bid.yml
+
+# ePBS (gloas) + commit-boost + keymanager loop (epbs-branch scratch harness).
+# Stands up a gloas devnet with buildoor, inserts commit-boost as the PBS sidecar,
+# runs `cb-km apply`, and asserts builder-built blocks flow VC -> CB -> buildoor.
+# One devnet at a time (~15G). See docs/EPBS.md. Env knobs: OBSERVE_SLOTS, KEEP=1,
+# CB_KM_BIN, CB_IMAGE. PREREQ: local/lodestar:km + the CB km-e2e image + cb-km binary.
+epbs-sim:
+    ./scripts/run-epbs-sim.sh

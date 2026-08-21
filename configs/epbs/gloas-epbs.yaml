@@ -1,0 +1,50 @@
+# ePBS (gloas) devnet args for the commit-boost + keymanager builder-config loop.
+#
+# Launched against UPSTREAM github.com/ethpandaops/ethereum-package (see
+# scripts/run-epbs-sim.sh EP_PACKAGE). This repo's pinned ethereum-package
+# submodule predates gloas-genesis compatibility: it bakes a genesis.ssz the
+# gloas `local/lodestar:km` image cannot deserialize (progressiveContainer
+# offset mismatch) and its resolver wires a mev-boost sidecar. Upgrading the
+# submodule + wiring a real `epbs` mev_type that launches commit-boost as the
+# sidecar is the follow-up ticket; see docs/EPBS.md.
+#
+# The fork's `epbs` mev_type wires sidecar=none (no commit-boost in the loop);
+# this scenario instead uses mev_type=buildoor (builder only, no sidecar) and
+# inserts commit-boost MANUALLY after launch so the VC's gloas bid flow is routed
+# VC -> keymanager builder_config -> commit-boost -> buildoor.
+#
+# minimal preset + 6s slots so gloas activates at epoch 0 and the loop is observable fast.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    cl_type: lodestar
+    # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
+    cl_image: local/lodestar:km
+    vc_image: local/lodestar:km
+    cl_log_level: debug
+    vc_log_level: debug
+    vc_extra_params:
+      - --graffiti=builder-dev
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  # pinned digest known-good with epbs_builder (matches the proven rig)
+  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

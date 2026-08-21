@@ -3,6 +3,7 @@
 *.swo
 .DS_Store
 configs/generated
+configs/epbs/.run
 kurtosis-configs/
 scripts/kurtosis-configs/
 .env

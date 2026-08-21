@@ -1,0 +1,9 @@
+# cb-km operational overlay. advertised_url is the CB PBS endpoint the VC's
+# builder_config docs point at (resolvable inside the enclave network); the [[vcs]]
+# block is the keymanager API the projected docs are POSTed to.
+# __VC_KM_URL__ is filled in by scripts/run-epbs-sim.sh from the live enclave port.
+advertised_url = "http://cb-epbs:18550"
+
+[[vcs]]
+url = "__VC_KM_URL__"
+token_path = "__TOKEN_PATH__"
