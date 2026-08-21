@@ -13,7 +13,20 @@
 # manual add + no `cb-km apply`) needs an upstream-package change — see the
 # "Native ePBS mev_type: investigation & submodule-upgrade blockers" in docs/EPBS.md.
 #
-# One devnet at a time (~15G). Usage: scripts/run-epbs-sim.sh  (or `just epbs-sim`).
+# Opt-in assertion modes turn the two merged keymanager features into live
+# regression checks (both are cb-km-driven; CB just routes):
+#   --assert p2p       also assert the min_bid p2p floor: the BN rejects
+#                      buildoor's higher p2p bid ("Ignoring p2p bid below min
+#                      bid") so the selected bidSource is the CB URL, not p2p.
+#   --assert preserve  after `cb-km apply`, POST a third-party builder_config
+#                      entry to a key, then `cb-km apply --preserve-entries` and
+#                      assert BOTH our entry and the third-party entry survive
+#                      (a plain apply drops it). Keymanager-only: skips the
+#                      builder-activation wait + observe window.
+# No flag = the default builder-built assertion (unchanged).
+#
+# One devnet at a time (~15G). Usage: scripts/run-epbs-sim.sh [--assert p2p|preserve]
+# (or `just epbs-sim` / `just epbs-sim-assert p2p`).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,6 +55,21 @@ MIN_BUILDER_SLOTS="${MIN_BUILDER_SLOTS:-8}"  # PASS threshold (builder-built via
 KEEP="${KEEP:-0}"                        # 1 = leave the enclave + CB running
 RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives here
 
+# opt-in assertion mode (default = today's builder-built assertion)
+ASSERT_MODE="${ASSERT_MODE:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --assert)   ASSERT_MODE="${2:-}"; shift 2 ;;
+    --assert=*) ASSERT_MODE="${1#*=}"; shift ;;
+    -h|--help)  sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+case "$ASSERT_MODE" in
+  ""|p2p|preserve) : ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+esac
+
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 
@@ -55,6 +83,75 @@ cb_logs() {
   else
     docker logs "$CB_NAME" 2>&1 || true
   fi
+}
+
+# Beacon node logs: bid selection (the min_bid p2p floor + the winning bidSource)
+# is logged by the BN's produceBlockV3 path, not the VC. cl_log_level=debug in the
+# args file surfaces the debug-level "Ignoring p2p bid below min bid" line.
+bn_logs() { kurtosis service logs "$ENCLAVE" cl-1-lodestar-geth 2>&1 || true; }
+
+# ---- keymanager helpers (used out-of-enclave, exactly like cb-km) -----------
+# Authenticated GET/POST of a validator's builder_config, against the same
+# exposed VC keymanager port + static token cb-km uses (see docs/EPBS.md,
+# "How the keymanager calls happen"). KM_TOKEN/VC_KM are set before use.
+km_get()  { curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/validator/$1/builder_config"; }
+km_post() { # $1=pubkey $2=json-body -> prints the HTTP status code
+  curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $KM_TOKEN" -H 'Content-Type: application/json' \
+    -d "$2" "$VC_KM/eth/v1/validator/$1/builder_config"
+}
+# the entry URLs stored on a key (one per line)
+km_entry_urls() {
+  km_get "$1" | python3 -c \
+    "import sys,json;d=json.load(sys.stdin).get('data',{});[print(e.get('url','')) for e in (d.get('builders') or [])]" \
+    2>/dev/null || true
+}
+
+# --- assert preserve: --preserve-entries keeps a third-party builder entry ----
+# A plain `cb-km apply` full-replaces each key's builder_config, so an entry a
+# THIRD-PARTY writer pinned is erased. `--preserve-entries` GETs first and folds
+# such entries back in. This proves both halves live: a control key shows plain
+# apply dropping the entry; the preserve key shows both entries surviving.
+assert_preserve() {
+  log "assert preserve: third-party builder_config entry survives --preserve-entries"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local CB_URL="http://cb-epbs:18550"
+  # two deterministic mux keys from configs/epbs/cb-config.toml.tmpl
+  local K1="0x81b676591b823270a3284ace7d81cbce2d6cdce55bb0e053874d7e3a08f729453009d3e662ec3130379f43c0f3210b6d"
+  local K2="0x81ea9f74ef7d935b807474e38954ae3934856219a23e074954b2e860c5a3c400f9aedb42cd27cb4ceb697ca36d1e58cb"
+  # a distinct third-party writer's entry (distinct url + auth_data); buildoor's
+  # pubkey is reused only as a valid BLS point for builder_pubkeys.
+  local TP_URL="http://third-party-relay:19999"
+  local TP_AUTH="0x74686972647061727479"   # "thirdparty"
+  local TP_BP="0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416"
+  local TP_DOC
+  TP_DOC="{\"builders\":[{\"url\":\"$TP_URL\",\"auth_data\":\"$TP_AUTH\",\"builder_pubkeys\":[\"$TP_BP\"]}]}"
+
+  # sanity: our apply put the CB entry on both keys
+  km_entry_urls "$K1" | grep -qF "$CB_URL" || die "preserve: CB entry not on $K1 after apply"
+  km_entry_urls "$K2" | grep -qF "$CB_URL" || die "preserve: CB entry not on $K2 after apply"
+
+  # --- CONTROL: a plain apply DROPS a third-party entry (K2) ---
+  log "control: plain apply drops a third-party entry"
+  local code
+  code="$(km_post "$K2" "$TP_DOC")"; [[ "$code" == 2* ]] || die "control: POST third-party to K2 not accepted (HTTP $code)"
+  km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: third-party entry not stored on K2"
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
+  km_entry_urls "$K2" | grep -qF "$CB_URL" || die "control: CB entry missing on K2 after plain apply"
+  ! km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: plain apply did NOT drop the third-party entry"
+  echo "  control OK: plain apply replaced K2 with only the CB entry (third-party dropped)"
+
+  # --- PRESERVE: apply --preserve-entries KEEPS a third-party entry (K1) ---
+  log "preserve: apply --preserve-entries keeps a third-party entry"
+  code="$(km_post "$K1" "$TP_DOC")"; [[ "$code" == 2* ]] || die "preserve: POST third-party to K1 not accepted (HTTP $code)"
+  km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry not stored on K1"
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --preserve-entries
+  km_entry_urls "$K1" | grep -qF "$CB_URL" || die "preserve: CB entry missing on K1 after --preserve-entries"
+  km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry DROPPED by --preserve-entries (regression)"
+  echo "  preserve OK: K1 carries BOTH the CB entry and the third-party entry"
+
+  log "RESULT"
+  printf '\033[1;32mPASS: --preserve-entries kept the third-party builder_config entry; plain apply dropped it\033[0m\n'
 }
 
 # ---- cleanup ----------------------------------------------------------------
@@ -85,16 +182,24 @@ esac
 docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not present locally"
 
 if [[ -z "$CB_KM_BIN" ]]; then
-  if command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
+  if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
+  elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
   elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
   else die "cb-km binary not found — set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
 fi
 "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
+# preserve mode needs the merged --preserve-entries flag (epbs branch)
+if [[ "$ASSERT_MODE" == "preserve" ]]; then
+  "$CB_KM_BIN" apply --help 2>&1 | grep -q -- '--preserve-entries' \
+    || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build the epbs branch: \
+(cd /home/j/code/commit-boost-client && cargo build -p cb-km-tool --release) and set CB_KM_BIN"
+fi
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
 echo "cb-km:   $CB_KM_BIN"
 echo "CB img:  $CB_IMAGE"
 echo "CB join: $CB_LAUNCH"
+echo "assert:  ${ASSERT_MODE:-default (builder-built)}"
 echo "enclave: $ENCLAVE   observe: ${OBSERVE_SLOTS} slots   pass>=${MIN_BUILDER_SLOTS}"
 
 # clean any stale run (docker-path container is a separate object; the enclave rm
@@ -182,6 +287,13 @@ log "cb-km apply (point 64 validators' builder_config at CB)"
 "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
 echo "apply OK"
 
+# preserve mode is a pure keymanager-API check: it needs the applied docs but not
+# the builder loop, so run it now and finish (skip activation wait + observe).
+if [[ "$ASSERT_MODE" == "preserve" ]]; then
+  assert_preserve
+  exit 0
+fi
+
 # ---- 6a. wait for buildoor to become active on chain -------------------------
 # buildoor submits a builder DEPOSIT to the EIP-8282 registry on boot and only
 # bids once that deposit is included AND activated (an activation-queue delay,
@@ -243,12 +355,39 @@ echo "  BN -> CB bid calls (window+):     $bid_calls"
 echo "  buildoor auction wins via CB:     $auction_wins"
 echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 
+# ---- 7b. p2p-floor assertion (opt-in) ---------------------------------------
+# The rendered CB config sets min_bid_p2p_eth = "0.2" (top-level [pbs]), which
+# cb-km projects as the key-level min_bid (200000000 Gwei), ABOVE buildoor's
+# ~101000000 p2p bid, while the CB entry keeps min_bid = 0 so CB bids survive.
+# The BN then rejects the higher p2p bid and selects the CB bid. Assert that from
+# the BN's bid-selection logs (produceBlockV3, cl_log_level=debug).
+p2p_ok=1
+if [[ "$ASSERT_MODE" == "p2p" ]]; then
+  log "assert p2p: min_bid p2p floor rejects buildoor's p2p bid; CB is selected"
+  BN_LOG="$(bn_logs)"
+  p2p_rejected=$(grep -c 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
+  cb_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*cb-epbs' || true)
+  p2p_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*p2p' || true)
+  sample=$(grep -m1 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
+  echo "  p2p bids rejected below floor:    $p2p_rejected"
+  [[ -n "$sample" ]] && echo "    e.g. ${sample#*: }"
+  echo "  blocks selected via CB bidSource: $cb_selected"
+  echo "  blocks selected via p2p bidSource:$p2p_selected"
+  if ! (( p2p_rejected >= 1 && cb_selected >= 1 )); then
+    p2p_ok=0
+    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+  fi
+fi
+
 log "RESULT"
-if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 )); then
+if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
   printf '\033[1;32mPASS: %s/%s observed slots builder-built via commit-boost (buildoor)\033[0m\n' \
     "$n_built" "$OBSERVE_SLOTS"
+  [[ "$ASSERT_MODE" == "p2p" ]] && printf '\033[1;32mPASS: p2p bid floored (%s rejections); %s blocks selected the CB bidSource\033[0m\n' \
+    "$p2p_rejected" "$cb_selected"
   exit 0
 else
   cb_logs | tail -30
+  (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1)"
   die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
 fi

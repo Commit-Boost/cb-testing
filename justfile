@@ -199,3 +199,11 @@ sweep-gate jobs="2": generate-configs pull-images
 # PREREQ: local/lodestar:km + the CB km-e2e image + cb-km binary.
 epbs-sim:
     ./scripts/run-epbs-sim.sh
+
+# ePBS sim with an opt-in feature-level regression assertion.
+#   just epbs-sim-assert p2p       assert the min_bid p2p floor rejects buildoor's
+#                                  p2p bid so the CB bidSource is selected.
+#   just epbs-sim-assert preserve  assert `cb-km apply --preserve-entries` keeps a
+#                                  third-party builder_config entry (plain apply drops it).
+epbs-sim-assert mode:
+    ./scripts/run-epbs-sim.sh --assert {{mode}}

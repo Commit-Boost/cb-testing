@@ -76,6 +76,66 @@ and exits non-zero on failure. One devnet at a time (~15G RAM).
 - `cb-km` — the mux → keymanager projector (`cargo build -p cb-km-tool --release`;
   the script auto-discovers it on `PATH` or a known worktree, else set `CB_KM_BIN`).
 
+## How the keymanager calls happen (it's not kurtosis)
+
+A common misread of this harness: kurtosis does **not** make any keymanager API
+call. Kurtosis only **enables** the keymanager API on the validator client. The
+`builder_config` POSTs that route the gloas bid flow through commit-boost are made
+by our own tool, `cb-km apply`, from **outside** the enclave. The two halves:
+
+**1. Kurtosis enables the keymanager API (a participant flag, nothing more).**
+`configs/epbs/gloas-epbs.yaml` sets one flag on the participant:
+
+```yaml
+participants:
+  - el_type: geth
+    cl_type: lodestar
+    vc_image: local/lodestar:km
+    keymanager_enabled: true      # <-- the whole kurtosis contribution
+    validator_count: 64
+```
+
+That flag makes the ethereum-package launch lodestar's VC with the keymanager
+turned on and authenticated, and publish its port —
+`--keymanager --keymanager.authEnabled=true --keymanager.port=...
+--keymanager.tokenFile=/keymanager/keymanager.txt`
+(`ethereum-package/src/vc/lodestar.star`). The bearer token is a **well-known
+static file** shipped by the package
+(`static_files/keymanager/keymanager.txt`); `configs/epbs/km-token.txt` is a copy
+of that same value, which is why an out-of-enclave client authenticates. Kurtosis
+never calls the API; it only stands up an authenticated, reachable keymanager and
+writes the token file the VC checks against.
+
+**2. `cb-km apply` (our tool) makes the actual `builder_config` POSTs.**
+Everything that writes a `builder_config` is done by `cb-km` from the host — it
+could equally be `curl` or any orchestrator. `scripts/run-epbs-sim.sh`:
+
+- discovers the keymanager **port** kurtosis published and stages the **token**
+  into the overlay (`run-epbs-sim.sh` lines 111, 137, 141-143):
+  ```bash
+  VC_KM="$(kurtosis port print "$ENCLAVE" vc-1-geth-lodestar http-validator)"   # the km port
+  cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"                          # the bearer token
+  sed -e "s|__VC_KM_URL__|$VC_KM|" -e "s|__TOKEN_PATH__|$(pwd)/$RUN_DIR/km-token.txt|" \
+      configs/epbs/km-overlay.toml.tmpl > "$RUN_DIR/km-overlay.toml"
+  ```
+- then invokes `cb-km`, which projects the CB mux config into one `builder_config`
+  doc per validator and **POSTs** each to
+  `$VC_KM/eth/v1/validator/<pubkey>/builder_config` with `Authorization: Bearer
+  <token>` (`run-epbs-sim.sh` line 182):
+  ```bash
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
+  ```
+
+The same authenticated `GET`/`POST` on
+`/eth/v1/validator/<pubkey>/builder_config` is all the `--assert preserve` mode
+uses directly via `curl` — proof that the keymanager calls are an out-of-enclave
+step, not a kurtosis one.
+
+**The loop in one line:** kurtosis boots a keymanager-enabled VC; `cb-km apply`
+writes each key's `builder_config` (`url = commit-boost`, `auth_data = buildoor`);
+the VC then calls commit-boost for bids per that stored config, and CB fans the
+request out to buildoor.
+
 ## Known caveats
 
 - **Bid signature verification is skipped** (`skip_sigverify = true` in the CB
