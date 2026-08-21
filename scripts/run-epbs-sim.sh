@@ -237,10 +237,15 @@ echo "head slot = $head_slot"
 log "rendering CB config from live BN"
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
 GVR=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_validators_root'])")
-[[ -n "$GEN_TIME" && "$GVR" == 0x* ]] || die "could not read genesis_time / genesis_validators_root"
+# Strict-shape both before they reach sed: they interpolate into a config the CB
+# process trusts, so a malformed BN response must fail loud, not inject.
+[[ "$GEN_TIME" =~ ^[0-9]+$ ]] || die "genesis_time is not a plain integer: '$GEN_TIME'"
+[[ "$GVR" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "genesis_validators_root is not a 32-byte hex root: '$GVR'"
 echo "genesis_time=$GEN_TIME  genesis_validators_root=$GVR"
 
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
+# km-token.txt is the well-known static ethereum-package keymanager token (public,
+# sim-only). It is NOT a secret and must never be reused against a real VC. See docs/EPBS.md.
 cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"
 sed -e "s|__GENESIS_TIME__|$GEN_TIME|" \
     -e "s|__GENESIS_VALIDATORS_ROOT__|$GVR|" \
