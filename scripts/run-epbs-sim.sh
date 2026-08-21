@@ -15,9 +15,11 @@
 #
 # Opt-in assertion modes turn the two merged keymanager features into live
 # regression checks (both are cb-km-driven; CB just routes):
-#   --assert p2p       also assert the min_bid p2p floor: the BN rejects
-#                      buildoor's higher p2p bid ("Ignoring p2p bid below min
-#                      bid") so the selected bidSource is the CB URL, not p2p.
+#   --assert p2p       also assert the min_bid p2p floor: a p2p bid never wins
+#                      and the selected bidSource is the CB URL, not p2p. When
+#                      buildoor gossips a competing p2p bid it is floored
+#                      ("Ignoring p2p bid below min bid"); when it does not, the
+#                      floor is UNEXERCISED but the guarantee still holds.
 #   --assert preserve  after `cb-km apply`, POST a third-party builder_config
 #                      entry to a key, then `cb-km apply --preserve-entries` and
 #                      assert BOTH our entry and the third-party entry survive
@@ -359,23 +361,39 @@ echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 # The rendered CB config sets min_bid_p2p_eth = "0.2" (top-level [pbs]), which
 # cb-km projects as the key-level min_bid (200000000 Gwei), ABOVE buildoor's
 # ~101000000 p2p bid, while the CB entry keeps min_bid = 0 so CB bids survive.
-# The BN then rejects the higher p2p bid and selects the CB bid. Assert that from
-# the BN's bid-selection logs (produceBlockV3, cl_log_level=debug).
+# The feature guarantee: a p2p bid NEVER wins and CB is the selected source; a
+# competing p2p bid below the floor is rejected ("Ignoring p2p bid below min
+# bid"). Asserted from the BN's bid-selection logs (produceBlockV3, debug). Note:
+# buildoor does not always gossip a competing p2p bid; when it does not, the floor
+# is UNEXERCISED (nothing to reject) but the guarantee (p2p never wins) still holds.
 p2p_ok=1
 if [[ "$ASSERT_MODE" == "p2p" ]]; then
-  log "assert p2p: min_bid p2p floor rejects buildoor's p2p bid; CB is selected"
+  log "assert p2p: min_bid p2p floor keeps p2p bids from winning; CB is selected"
   BN_LOG="$(bn_logs)"
+  # candidates log as "<url|p2p>:total=..:boost=.."; a p2p candidate means
+  # buildoor gossiped a p2p bid that reached the proposer's pool this run.
+  p2p_candidates=$(grep 'Ranked builder bid candidates' <<<"$BN_LOG" | grep -c 'p2p:total=' || true)
   p2p_rejected=$(grep -c 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
   cb_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*cb-epbs' || true)
   p2p_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*p2p' || true)
   sample=$(grep -m1 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
+  echo "  p2p bids seen as candidates:      $p2p_candidates"
   echo "  p2p bids rejected below floor:    $p2p_rejected"
   [[ -n "$sample" ]] && echo "    e.g. ${sample#*: }"
   echo "  blocks selected via CB bidSource: $cb_selected"
   echo "  blocks selected via p2p bidSource:$p2p_selected"
-  if ! (( p2p_rejected >= 1 && cb_selected >= 1 )); then
-    p2p_ok=0
+  if (( cb_selected < 1 || p2p_selected > 0 )); then
+    p2p_ok=0   # real breach: CB never won, or a p2p bid WON despite the floor
     bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+  elif (( p2p_candidates >= 1 && p2p_rejected < 1 )); then
+    p2p_ok=0   # a p2p bid competed but was not floored — floor regression
+    echo "  a competing p2p bid was NOT floored — floor regression"
+    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+  elif (( p2p_rejected >= 1 )); then
+    echo "  p2p floor PROVEN: a competing p2p bid was rejected below the floor and CB won"
+  else
+    echo "  NOTE: no competing p2p bid was gossiped this run — floor UNEXERCISED"
+    echo "        (the CB bid was the sole candidate; the floor is wired but had nothing to reject)"
   fi
 fi
 
@@ -383,11 +401,18 @@ log "RESULT"
 if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
   printf '\033[1;32mPASS: %s/%s observed slots builder-built via commit-boost (buildoor)\033[0m\n' \
     "$n_built" "$OBSERVE_SLOTS"
-  [[ "$ASSERT_MODE" == "p2p" ]] && printf '\033[1;32mPASS: p2p bid floored (%s rejections); %s blocks selected the CB bidSource\033[0m\n' \
-    "$p2p_rejected" "$cb_selected"
+  if [[ "$ASSERT_MODE" == "p2p" ]]; then
+    if (( p2p_rejected >= 1 )); then
+      printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
+        "$p2p_rejected" "$cb_selected"
+    else
+      printf '\033[1;32mPASS: p2p never won (%s blocks CB, 0 p2p); floor UNEXERCISED (no competing p2p bid)\033[0m\n' \
+        "$cb_selected"
+    fi
+  fi
   exit 0
 else
   cb_logs | tail -30
-  (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1)"
+  (( p2p_ok == 1 )) || die "p2p assertion failed (cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0, p2p_candidates=$p2p_candidates rejected=$p2p_rejected)"
   die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
 fi
