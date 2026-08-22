@@ -136,6 +136,31 @@ writes each key's `builder_config` (`url = commit-boost`, `auth_data = buildoor`
 the VC then calls commit-boost for bids per that stored config, and CB fans the
 request out to buildoor.
 
+## Assertion modes
+
+The default run asserts the builder loop end to end (builder-built blocks via CB).
+Two opt-in modes (`--assert <mode>`, or `just epbs-sim-assert <mode>`) turn a
+merged keymanager feature into a live regression check:
+
+- **`p2p`**: the `min_bid` p2p floor. cb-km projects `min_bid_p2p_eth = "0.2"`
+  into a key-level `min_bid` of 200000000 Gwei, above buildoor's p2p bid, while
+  the CB (builder-API) entry keeps `min_bid = 0`. buildoor runs two bid channels:
+  a builder-API path served to CB on request, and a **p2p-bidder** that publishes
+  a competing 101000000 Gwei bid every slot to the BN's `publishExecutionPayloadBid`
+  endpoint (which pools it and gossips it). The BN's `produceBlockV4` therefore
+  floors that p2p bid on every builder-built slot and selects the CB bid instead.
+  The mode HARD-fails unless the floor fires at least once
+  (`Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=200000000`),
+  the selected `bidSource` is the CB URL on every selection, and no p2p bid ever
+  wins. A floored p2p bid is nulled *before* candidate ranking, so it never
+  appears in `Ranked builder bid candidates`; the rejection line is the floor's
+  only signal, and the asserts read the **full** BN log (`kurtosis service logs -a`)
+  because the once-per-slot rejection line does not survive the default 200-line
+  tail.
+- **`preserve`**: `cb-km apply --preserve-entries` keeps a third-party
+  `builder_config` entry that a plain apply drops. Keymanager-API only; skips the
+  builder loop.
+
 ## Known caveats
 
 - **Bid signature verification is skipped** (`skip_sigverify = true` in the CB
