@@ -26,9 +26,24 @@
 #                      assert BOTH our entry and the third-party entry survive
 #                      (a plain apply drops it). Keymanager-only: skips the
 #                      builder-activation wait + observe window.
+#   --assert domain-control
+#                      prove the CB bid sigverify has teeth (PROVEN: correct domain
+#                      accepts + builds, wrong domain rejects + builds 0). Turn
+#                      sigverify ON and run two arms in one enclave: the LIVE gloas
+#                      signing domain (fork version from the BN /eth/v1/config/spec,
+#                      genesis root from /eth/v1/beacon/genesis) ACCEPTS bids and
+#                      builds blocks; a one-byte-flipped fork version makes CB REJECT
+#                      every bid ("failed signature verification") and build none.
+#                      HARD-fails unless BOTH arms behave. Reads the fork version
+#                      LIVE, never the template constant (the upstream devnet moves).
+#                      REQUIRES a CB image built from epbs WITH the progressive-SSZ
+#                      [patch.crates-io] stack (commit-boost commit ade56d4 or later),
+#                      e.g. `just build-all <tag>` then CB_IMAGE=<tag>; an older image
+#                      cannot verify gloas bids and the mode fails loud with the fix.
 # No flag = the default builder-built assertion (unchanged).
 #
-# One devnet at a time (~15G). Usage: scripts/run-epbs-sim.sh [--assert p2p|preserve]
+# One devnet at a time (~15G). Usage:
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|domain-control]
 # (or `just epbs-sim` / `just epbs-sim-assert p2p`).
 set -euo pipefail
 
@@ -69,8 +84,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$ASSERT_MODE" in
-  ""|p2p|preserve) : ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  ""|p2p|preserve|domain-control) : ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|domain-control)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -99,6 +114,47 @@ cb_logs() {
 # not the 200-line tail (the tail hiding it was the sole cause of the earlier
 # "floor unexercised" flake).
 bn_logs() { kurtosis service logs -a "$ENCLAVE" cl-1-lodestar-geth 2>&1 || true; }
+
+# current head slot (integer), used by the observe/domain-control loops
+dc_head() { curl -sf "$BN/eth/v1/beacon/headers/head" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0; }
+
+# count builder-built blocks (signed_execution_payload_bid.value != 0) in [s0,s1]
+count_builder_built() { # $1=s0 $2=s1 -> prints integer
+  python3 - "$BN" "$1" "$2" <<'PY'
+import sys,json,urllib.request
+bn,s0,s1=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
+n=0
+for slot in range(s0,s1+1):
+    try:
+        with urllib.request.urlopen(f"{bn}/eth/v2/beacon/blocks/{slot}",timeout=5) as r:
+            body=json.load(r)['data']['message']['body']
+        bid=body.get('signed_execution_payload_bid',{}).get('message',{})
+        if bid.get('value','0') not in ('0','',None): n+=1
+    except Exception:
+        pass
+print(n)
+PY
+}
+
+# domain-control swaps the CB service's config in place (service path only): remove
+# the running CB, upload the new rendered config dir as a fresh files-artifact, and
+# re-add CB pointing at it. Each swap yields a FRESH CB container (and fresh logs),
+# so per-arm "failed signature verification" counts are clean.
+cb_swap() { # $1=config-dir $2=artifact-name
+  kurtosis service rm "$ENCLAVE" "$CB_NAME" >/dev/null 2>&1 || true
+  kurtosis files upload "$ENCLAVE" "$1" --name "$2" >/dev/null \
+    || die "domain-control: files upload of $1 failed"
+  kurtosis service add "$ENCLAVE" "$CB_NAME" "$CB_IMAGE" \
+    --files "/cb:$2" \
+    --env "CB_CONFIG=/cb/cb-config.toml,RUST_LOG=debug" \
+    --ports "pbs=http:18550" \
+    --cmd pbs >/dev/null \
+    || { cb_logs | tail -20; die "domain-control: CB service add ($2) failed"; }
+  sleep 4
+  kurtosis service inspect "$ENCLAVE" "$CB_NAME" >/dev/null 2>&1 \
+    || { cb_logs | tail -20; die "domain-control: CB service not present after swap ($2)"; }
+}
 
 # ---- keymanager helpers (used out-of-enclave, exactly like cb-km) -----------
 # Authenticated GET/POST of a validator's builder_config, against the same
@@ -162,6 +218,125 @@ assert_preserve() {
 
   log "RESULT"
   printf '\033[1;32mPASS: --preserve-entries kept the third-party builder_config entry; plain apply dropped it\033[0m\n'
+}
+
+# --- assert domain-control: the CB bid sigverify has real teeth ---------------
+# Turns sigverify ON (skip_sigverify=false) and runs two arms in one enclave:
+#   correct: the LIVE gloas signing domain (fork version read from the BN's
+#            /eth/v1/config/spec, genesis root already rendered from
+#            /eth/v1/beacon/genesis) => CB ACCEPTS buildoor's bids (no
+#            "failed signature verification") and builder-built blocks appear.
+#   wrong:   one byte of the fork version flipped => CB REJECTS every bid
+#            ("failed signature verification", relay_id="buildoor-mux") and no
+#            builder-built block is produced (buildoor's only other candidate, its
+#            p2p bid, sits below the min_bid floor, so the BN self-builds).
+# HARD-fails unless BOTH arms behave. The fork version is read LIVE, never the
+# template constant: the harness launches a MOVING upstream devnet whose gloas
+# fork version can drift from the hardcoded default.
+assert_domain_control() {
+  [[ "$CB_LAUNCH" == "service" ]] || die "domain-control requires CB_LAUNCH=service (config swap uses kurtosis files/service)"
+  log "assert domain-control: sigverify ON; correct domain accepts+builds, wrong domain rejects+starves"
+
+  # live signing-domain parameters (fork version from the BN spec)
+  local SPEC LIVE_FV TMPL_FV
+  SPEC=$(curl -sf "$BN/eth/v1/config/spec" || true)
+  LIVE_FV=$(python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('GLOAS_FORK_VERSION',''))" <<<"$SPEC" 2>/dev/null || true)
+  [[ "$LIVE_FV" =~ ^0x[0-9a-fA-F]{8}$ ]] || die "domain-control: BN spec GLOAS_FORK_VERSION not a 4-byte hex: '$LIVE_FV'"
+  TMPL_FV=$(grep -oE 'gloas_fork_version = "0x[0-9a-fA-F]{8}"' configs/epbs/cb-config.toml.tmpl | grep -oE '0x[0-9a-fA-F]{8}' | head -1)
+  echo "  live GLOAS_FORK_VERSION (BN spec): $LIVE_FV"
+  echo "  hardcoded template constant:      $TMPL_FV"
+  if [[ "${LIVE_FV,,}" == "${TMPL_FV,,}" ]]; then
+    echo "  STALENESS: live == template (the hardcoded bid-domain constant is current)"
+  else
+    echo "  STALENESS: live != template; the hardcoded gloas_fork_version is STALE against this devnet (ticket e14e42d5)"
+  fi
+
+  # wrong domain = the live fork version with its first byte flipped (XOR 0xff)
+  local hex b0 wb0 WRONG_FV
+  hex="${LIVE_FV#0x}"
+  b0=$((16#${hex:0:2})); wb0=$(( b0 ^ 0xff ))
+  WRONG_FV=$(printf '0x%02x%s' "$wb0" "${hex:2}")
+
+  # render the two CB configs from the base rendered config; only skip_sigverify +
+  # gloas_fork_version change (GVR is already the live genesis root from step 3)
+  local DC_C="$RUN_DIR/dc-correct" DC_W="$RUN_DIR/dc-wrong"
+  rm -rf "$DC_C" "$DC_W"; mkdir -p "$DC_C" "$DC_W"
+  sed -e 's/^skip_sigverify = true/skip_sigverify = false/' \
+      -e "s|^gloas_fork_version = \"0x[0-9a-fA-F]*\"|gloas_fork_version = \"$LIVE_FV\"|" \
+      "$RUN_DIR/cb-config.toml" > "$DC_C/cb-config.toml"
+  sed -e 's/^skip_sigverify = true/skip_sigverify = false/' \
+      -e "s|^gloas_fork_version = \"0x[0-9a-fA-F]*\"|gloas_fork_version = \"$WRONG_FV\"|" \
+      "$RUN_DIR/cb-config.toml" > "$DC_W/cb-config.toml"
+  grep -q '^skip_sigverify = false' "$DC_C/cb-config.toml" || die "domain-control: correct config missing skip_sigverify=false"
+  grep -qF "gloas_fork_version = \"$LIVE_FV\""  "$DC_C/cb-config.toml" || die "domain-control: correct config missing live fork version"
+  grep -qF "gloas_fork_version = \"$WRONG_FV\"" "$DC_W/cb-config.toml" || die "domain-control: wrong config missing flipped fork version"
+
+  local DCO="${DC_OBSERVE_SLOTS:-8}" i cur
+
+  # ---- arm 1/2: CORRECT domain (expect ACCEPT + builder-built) ----
+  log "domain-control arm 1/2: CORRECT domain ($LIVE_FV), sigverify ON"
+  cb_swap "$DC_C" dc-correct-cfg
+  local c_live=0
+  for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
+    if cb_logs | grep -q 'received new header.*buildoor-mux'; then c_live=1; break; fi
+    cur=$(dc_head); printf '  head=%s waiting for buildoor bid (correct arm)...\r' "$cur"; sleep 6
+  done
+  echo
+  (( c_live == 1 )) || { cb_logs | tail -15; die "domain-control: buildoor never bid through CB (correct arm)"; }
+  local c_start c_end c_fail c_built
+  c_start=$(dc_head); c_end=$(( c_start + DCO ))
+  echo "  observing correct arm slots ${c_start}..${c_end}"
+  for i in $(seq 1 $(( DCO + 3 )) ); do
+    cur=$(dc_head); printf '  head=%s / target=%s\r' "$cur" "$c_end"; (( cur >= c_end )) && break; sleep 6
+  done; echo
+  c_fail=$(cb_logs | grep -c 'failed signature verification' || true)
+  c_built=$(count_builder_built "$c_start" "$c_end")
+  echo "  correct arm: cb-epbs 'failed signature verification' = $c_fail (want 0)"
+  echo "  correct arm: builder-built blocks in window          = $c_built (want >=1)"
+
+  # ---- arm 2/2: WRONG domain (expect REJECT + zero builder-built) ----
+  log "domain-control arm 2/2: WRONG domain ($WRONG_FV), sigverify ON"
+  cb_swap "$DC_W" dc-wrong-cfg
+  sleep 6   # let the fresh CB serve at least one full slot before the window opens
+  local w_start w_end w_fail w_built w_sample
+  w_start=$(dc_head); w_end=$(( w_start + DCO ))
+  echo "  observing wrong arm slots ${w_start}..${w_end}"
+  for i in $(seq 1 $(( DCO + 3 )) ); do
+    cur=$(dc_head); printf '  head=%s / target=%s\r' "$cur" "$w_end"; (( cur >= w_end )) && break; sleep 6
+  done; echo
+  w_fail=$(cb_logs | grep -c 'failed signature verification' || true)
+  w_built=$(count_builder_built "$w_start" "$w_end")
+  w_sample=$(cb_logs | grep -m1 'failed signature verification' || true)
+  echo "  wrong arm: cb-epbs 'failed signature verification'   = $w_fail (want >=1)"
+  [[ -n "$w_sample" ]] && echo "    e.g. $(grep -oE 'err=[^"]*failed signature verification[^ ]*|failed signature verification' <<<"$w_sample" | head -1)"
+  echo "  wrong arm: builder-built blocks in window            = $w_built (want 0)"
+
+  log "RESULT"
+  # STALE-IMAGE GUARD (the one real footgun): if the CORRECT-domain arm rejected
+  # every bid and built nothing, the CB image almost certainly predates the
+  # progressive-SSZ bid-hashing patch (commit-boost commit ade56d4), so it cannot
+  # verify gloas bids under ANY domain and both arms look identical. That is NOT a
+  # domain failure, so report the actionable remedy instead of a generic verdict.
+  # (A rejecting WRONG arm is expected and handled by the normal checks below.)
+  if (( c_fail >= 1 && c_built == 0 )); then
+    bn_logs | grep -E 'Selected (builder|local) block|failed signature' | tail -10
+    die "domain-control: the CORRECT-domain arm ($LIVE_FV) rejected all bids ($c_fail sigverify failures) and built 0 blocks. \
+The CB image ($CB_IMAGE) likely predates the progressive-SSZ bid-hashing patch (commit-boost commit ade56d4), so it cannot \
+verify gloas bids under any domain. Rebuild the CB image from an epbs checkout that carries the sigp progressive-SSZ \
+[patch.crates-io] stack (e.g. 'just build-all <tag>') and re-run with CB_IMAGE=<tag>."
+  fi
+  local ok=1
+  (( c_fail == 0 )) || { ok=0; echo "  FAIL: correct domain produced $c_fail sigverify failures (want 0)"; }
+  (( c_built >= 1 )) || { ok=0; echo "  FAIL: correct domain built no builder blocks (want >=1)"; }
+  (( w_fail >= 1 )) || { ok=0; echo "  FAIL: wrong domain produced no sigverify failures (want >=1)"; }
+  (( w_built == 0 )) || { ok=0; echo "  FAIL: wrong domain still built $w_built builder blocks (want 0)"; }
+  if (( ok == 1 )); then
+    printf '\033[1;32mPASS: domain-control PROVEN. correct domain (%s) accepted + built %s; wrong domain (%s) rejected %s bids + built 0\033[0m\n' \
+      "$LIVE_FV" "$c_built" "$WRONG_FV" "$w_fail"
+  else
+    bn_logs | grep -E 'Selected (builder|local) block|failed signature' | tail -20
+    die "domain-control failed (correct: fail=$c_fail built=$c_built; wrong: fail=$w_fail built=$w_built)"
+  fi
 }
 
 # ---- cleanup ----------------------------------------------------------------
@@ -306,6 +481,14 @@ echo "apply OK"
 # the builder loop, so run it now and finish (skip activation wait + observe).
 if [[ "$ASSERT_MODE" == "preserve" ]]; then
   assert_preserve
+  exit 0
+fi
+
+# domain-control drives its own two-arm loop (correct vs wrong signing domain),
+# swapping the CB config between arms; it reuses the applied keymanager docs but
+# not the default single observe window, so run it now and finish.
+if [[ "$ASSERT_MODE" == "domain-control" ]]; then
+  assert_domain_control
   exit 0
 fi
 
