@@ -15,11 +15,12 @@
 #
 # Opt-in assertion modes turn the two merged keymanager features into live
 # regression checks (both are cb-km-driven; CB just routes):
-#   --assert p2p       also assert the min_bid p2p floor: a p2p bid never wins
-#                      and the selected bidSource is the CB URL, not p2p. When
-#                      buildoor gossips a competing p2p bid it is floored
-#                      ("Ignoring p2p bid below min bid"); when it does not, the
-#                      floor is UNEXERCISED but the guarantee still holds.
+#   --assert p2p       also assert the min_bid p2p floor. buildoor's p2p-bidder
+#                      publishes a 101000000 Gwei bid every slot, below the
+#                      200000000 Gwei floor, so the BN floors it on every
+#                      builder-built slot ("Ignoring p2p bid below min bid").
+#                      HARD-fails unless the floor fires (>=1 rejection), CB is
+#                      the selected bidSource (>=1), and no p2p bid ever wins (0).
 #   --assert preserve  after `cb-km apply`, POST a third-party builder_config
 #                      entry to a key, then `cb-km apply --preserve-entries` and
 #                      assert BOTH our entry and the third-party entry survive
@@ -79,18 +80,25 @@ die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # The commit-boost sidecar is read from a few places (boot check, buildoor
 # activation poll, final assertions); route those through one shim so both the
 # first-class enclave-service path and the legacy docker path share the logic.
+# `-a` (all logs) is load-bearing: `kurtosis service logs` defaults to the last
+# 200 lines, and the BN emits far more than that per slot at debug level, so a
+# plain tail almost never contains the once-per-slot bid-selection lines the
+# asserts grep for. Reading the full history makes the counts deterministic.
 cb_logs() {
   if [[ "$CB_LAUNCH" == "service" ]]; then
-    kurtosis service logs "$ENCLAVE" "$CB_NAME" 2>&1 || true
+    kurtosis service logs -a "$ENCLAVE" "$CB_NAME" 2>&1 || true
   else
     docker logs "$CB_NAME" 2>&1 || true
   fi
 }
 
 # Beacon node logs: bid selection (the min_bid p2p floor + the winning bidSource)
-# is logged by the BN's produceBlockV3 path, not the VC. cl_log_level=debug in the
-# args file surfaces the debug-level "Ignoring p2p bid below min bid" line.
-bn_logs() { kurtosis service logs "$ENCLAVE" cl-1-lodestar-geth 2>&1 || true; }
+# is logged by the BN's produceBlockV4 path, not the VC. cl_log_level=debug in the
+# args file surfaces the debug-level "Ignoring p2p bid below min bid" line. `-a`
+# for the same reason as cb_logs: the rejection line lives in the full history,
+# not the 200-line tail (the tail hiding it was the sole cause of the earlier
+# "floor unexercised" flake).
+bn_logs() { kurtosis service logs -a "$ENCLAVE" cl-1-lodestar-geth 2>&1 || true; }
 
 # ---- keymanager helpers (used out-of-enclave, exactly like cb-km) -----------
 # Authenticated GET/POST of a validator's builder_config, against the same
@@ -365,40 +373,39 @@ echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 # ---- 7b. p2p-floor assertion (opt-in) ---------------------------------------
 # The rendered CB config sets min_bid_p2p_eth = "0.2" (top-level [pbs]), which
 # cb-km projects as the key-level min_bid (200000000 Gwei), ABOVE buildoor's
-# ~101000000 p2p bid, while the CB entry keeps min_bid = 0 so CB bids survive.
-# The feature guarantee: a p2p bid NEVER wins and CB is the selected source; a
-# competing p2p bid below the floor is rejected ("Ignoring p2p bid below min
-# bid"). Asserted from the BN's bid-selection logs (produceBlockV3, debug). Note:
-# buildoor does not always gossip a competing p2p bid; when it does not, the floor
-# is UNEXERCISED (nothing to reject) but the guarantee (p2p never wins) still holds.
+# 101000000 Gwei p2p bid, while the CB (builder-API) entry keeps min_bid = 0 so
+# CB bids survive. buildoor's p2p-bidder publishes a competing bid every slot
+# (POSTed to the BN's publishExecutionPayloadBid endpoint, which pools it AND
+# gossips it: "Published execution payload bid ... value=101000000"), so the BN's
+# produceBlockV4 floors it on every builder-built slot:
+#   "Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=200000000".
+# A floored p2p bid is nulled BEFORE the candidate ranking, so it never shows up
+# in "Ranked builder bid candidates"; the rejection line is the floor's only
+# signal (do NOT gate on a p2p ranked-candidate; there is none when the floor
+# works). The guarantee, asserted HARD from the BN's full bid-selection log:
+# the floor FIRES (>=1 rejection), CB is the selected source (>=1), and no p2p
+# bid ever wins (0).
 p2p_ok=1
 if [[ "$ASSERT_MODE" == "p2p" ]]; then
-  log "assert p2p: min_bid p2p floor keeps p2p bids from winning; CB is selected"
+  log "assert p2p: min_bid p2p floor rejects buildoor's competing p2p bid; CB is selected"
   BN_LOG="$(bn_logs)"
-  # candidates log as "<url|p2p>:total=..:boost=.."; a p2p candidate means
-  # buildoor gossiped a p2p bid that reached the proposer's pool this run.
-  p2p_candidates=$(grep 'Ranked builder bid candidates' <<<"$BN_LOG" | grep -c 'p2p:total=' || true)
   p2p_rejected=$(grep -c 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
   cb_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*cb-epbs' || true)
   p2p_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*p2p' || true)
   sample=$(grep -m1 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
-  echo "  p2p bids seen as candidates:      $p2p_candidates"
   echo "  p2p bids rejected below floor:    $p2p_rejected"
   [[ -n "$sample" ]] && echo "    e.g. ${sample#*: }"
   echo "  blocks selected via CB bidSource: $cb_selected"
   echo "  blocks selected via p2p bidSource:$p2p_selected"
-  if (( cb_selected < 1 || p2p_selected > 0 )); then
+  if (( p2p_rejected < 1 )); then
+    p2p_ok=0   # the floor never fired: buildoor's p2p bid was not rejected this run
+    echo "  the p2p floor never fired (no 'Ignoring p2p bid below min bid'); check buildoor's p2p-bidder"
+    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+  elif (( cb_selected < 1 || p2p_selected > 0 )); then
     p2p_ok=0   # real breach: CB never won, or a p2p bid WON despite the floor
     bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
-  elif (( p2p_candidates >= 1 && p2p_rejected < 1 )); then
-    p2p_ok=0   # a p2p bid competed but was not floored — floor regression
-    echo "  a competing p2p bid was NOT floored — floor regression"
-    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
-  elif (( p2p_rejected >= 1 )); then
-    echo "  p2p floor PROVEN: a competing p2p bid was rejected below the floor and CB won"
   else
-    echo "  NOTE: no competing p2p bid was gossiped this run — floor UNEXERCISED"
-    echo "        (the CB bid was the sole candidate; the floor is wired but had nothing to reject)"
+    echo "  p2p floor PROVEN: $p2p_rejected competing p2p bid(s) rejected below the floor; CB won every selection"
   fi
 fi
 
@@ -407,17 +414,12 @@ if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p
   printf '\033[1;32mPASS: %s/%s observed slots builder-built via commit-boost (buildoor)\033[0m\n' \
     "$n_built" "$OBSERVE_SLOTS"
   if [[ "$ASSERT_MODE" == "p2p" ]]; then
-    if (( p2p_rejected >= 1 )); then
-      printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
-        "$p2p_rejected" "$cb_selected"
-    else
-      printf '\033[1;32mPASS: p2p never won (%s blocks CB, 0 p2p); floor UNEXERCISED (no competing p2p bid)\033[0m\n' \
-        "$cb_selected"
-    fi
+    printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
+      "$p2p_rejected" "$cb_selected"
   fi
   exit 0
 else
   cb_logs | tail -30
-  (( p2p_ok == 1 )) || die "p2p assertion failed (cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0, p2p_candidates=$p2p_candidates rejected=$p2p_rejected)"
+  (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0)"
   die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
 fi
