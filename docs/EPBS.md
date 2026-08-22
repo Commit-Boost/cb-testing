@@ -21,8 +21,8 @@ and exits non-zero on failure. One devnet at a time (~15G RAM).
    buildoor as the ePBS builder. `minimal` preset, 6s slots, `gloas_fork_epoch: 0`,
    64 validators with `keymanager_enabled`, one builder.
 2. **Render the CB config** (`configs/epbs/cb-config.toml.tmpl`) from the live
-   beacon node: the two per-run values — `genesis_time` and
-   `genesis_validators_root` — are substituted; everything else (fork versions,
+   beacon node: the two per-run values - `genesis_time` and
+   `genesis_validators_root` - are substituted; everything else (fork versions,
    the deterministic 64-key mux derived from the fixed mnemonic, the buildoor
    relay + pubkey) is static.
 3. **Add commit-boost** (`commit-boost/commit-boost:km-e2e`, branch `epbs`) as the
@@ -32,10 +32,10 @@ and exits non-zero on failure. One devnet at a time (~15G RAM).
    added with `kurtosis service add`, so it gets enclave DNS (`cb-epbs`
    resolvable by the VC, `buildoor` resolvable by CB), appears in
    `kurtosis enclave inspect`, and is torn down by `kurtosis enclave rm` with the
-   rest of the enclave — no separate container to track. `CB_LAUNCH=docker` keeps
+   rest of the enclave - no separate container to track. `CB_LAUNCH=docker` keeps
    the legacy raw `docker run` on the enclave network as a fallback.
 4. **`cb-km apply`** projects the CB mux config into per-validator keymanager
-   `builder_config` docs and POSTs them to the VC's keymanager API — pointing all
+   `builder_config` docs and POSTs them to the VC's keymanager API - pointing all
    64 validators' builder URL at commit-boost with `auth_data = buildoor`.
 5. **Wait for buildoor activation.** buildoor submits a builder *deposit* to the
    EIP-8282 registry on boot and only bids once that deposit is included and
@@ -70,10 +70,10 @@ and exits non-zero on failure. One devnet at a time (~15G RAM).
 
 ### Prerequisites (local images / binary)
 
-- `local/lodestar:km` — ChainSafe nflaig builder-api gloas image (gloas builder
+- `local/lodestar:km` - ChainSafe nflaig builder-api gloas image (gloas builder
   API + keymanager `builder_config`).
-- `commit-boost/commit-boost:km-e2e` — CB with the ePBS bid pipe + km-tool (branch `epbs`).
-- `cb-km` — the mux → keymanager projector (`cargo build -p cb-km-tool --release`;
+- `commit-boost/commit-boost:km-e2e` - CB with the ePBS bid pipe + km-tool (branch `epbs`).
+- `cb-km` - the mux → keymanager projector (`cargo build -p cb-km-tool --release`;
   the script auto-discovers it on `PATH` or a known worktree, else set `CB_KM_BIN`).
 
 ## How the keymanager calls happen (it's not kurtosis)
@@ -96,7 +96,7 @@ participants:
 ```
 
 That flag makes the ethereum-package launch lodestar's VC with the keymanager
-turned on and authenticated, and publish its port —
+turned on and authenticated, and publish its port - 
 `--keymanager --keymanager.authEnabled=true --keymanager.port=...
 --keymanager.tokenFile=/keymanager/keymanager.txt`
 (`ethereum-package/src/vc/lodestar.star`). The bearer token is a **well-known
@@ -107,7 +107,7 @@ never calls the API; it only stands up an authenticated, reachable keymanager an
 writes the token file the VC checks against.
 
 **2. `cb-km apply` (our tool) makes the actual `builder_config` POSTs.**
-Everything that writes a `builder_config` is done by `cb-km` from the host — it
+Everything that writes a `builder_config` is done by `cb-km` from the host - it
 could equally be `curl` or any orchestrator. `scripts/run-epbs-sim.sh`:
 
 - discovers the keymanager **port** kurtosis published and stages the **token**
@@ -128,7 +128,7 @@ could equally be `curl` or any orchestrator. `scripts/run-epbs-sim.sh`:
 
 The same authenticated `GET`/`POST` on
 `/eth/v1/validator/<pubkey>/builder_config` is all the `--assert preserve` mode
-uses directly via `curl` — proof that the keymanager calls are an out-of-enclave
+uses directly via `curl` - proof that the keymanager calls are an out-of-enclave
 step, not a kurtosis one.
 
 **The loop in one line:** kurtosis boots a keymanager-enabled VC; `cb-km apply`
@@ -211,7 +211,7 @@ harness above, not a native mev_type.
 **The submodule is the `Commit-Boost/ethereum-package` FORK, on purpose.** The
 repo's ~10 non-epbs scenarios (`cb-basic`, `cb-mux`, …) depend on the fork's
 decomposed MEV resolver (`src/package_io/mev_resolver.star`) and its
-`commit-boost` **sidecar launcher** — a fork-only feature. Upstream
+`commit-boost` **sidecar launcher** - a fork-only feature. Upstream
 `ethpandaops/ethereum-package` has **no** `mev_resolver.star` and no commit-boost
 sidecar at all. So the submodule cannot simply be pointed at upstream: that would
 delete the sidecar wiring the rest of the suite runs on.
@@ -220,11 +220,11 @@ delete the sidecar wiring the rest of the suite runs on.
 `1b255a4` (branch `cb-testing`) sits on upstream base `8a11379` (ethpandaops
 merge point, PR #1366 era). The gloas-genesis + EIP-8282 + lifecycle fixes that
 `local/lodestar:km` needs landed upstream around `0350d2e9` ("Enable buildoor for
-Nimbus", #1476, 2026-08-13) — the ref this harness launches. Concretely, the
+Nimbus", #1476, 2026-08-13) - the ref this harness launches. Concretely, the
 pinned fork:
   - rejects `network_params.deploy_eip8282_contracts` and
     `buildoor_params.lifecycle` (not in its `sanity_check.star` /
-    `input_parser.star` schema — only `run_lifecycle_test` and `epbs_builder`
+    `input_parser.star` schema - only `run_lifecycle_test` and `epbs_builder`
     exist there);
   - bakes a `genesis.ssz` the gloas image cannot deserialize
     (`progressiveContainer` offset mismatch).
@@ -232,7 +232,7 @@ pinned fork:
 **Bringing gloas into the fork is not a clean one-session op.** The fork's
 CB-specific commits (custom mev_type `7efe6fe`, the commit-boost sidecar launcher,
 the signer container, helix N-relay, subsidies) are **interleaved with periodic
-`upstream/main` merges**, not a tidy patch series — so neither "merge upstream
+`upstream/main` merges**, not a tidy patch series - so neither "merge upstream
 `0350d2e9` into `cb-testing`" (~110 PRs, conflicts concentrated in
 `mev/` + `package_io/`, and it revalidates the whole suite on a memory-tight box)
 nor "cherry-pick the CB feature onto upstream" is low-risk. This belongs in its
@@ -244,7 +244,7 @@ The fork's `epbs` mev_type resolves `sidecar=none` by design, and its
 (pre-gloas) commit-boost sidecar: its launcher writes the traditional VC
 `--builder` endpoint and has **no** notion of the gloas keymanager `builder_config`
 (the per-validator doc with `auth_data=buildoor`). Routing the gloas bid flow
-through CB is exactly what `cb-km apply` does — a step the package launcher does
+through CB is exactly what `cb-km apply` does - a step the package launcher does
 not perform. So "native, no `cb-km apply`" requires teaching an ethereum-package
 sidecar launcher to project the gloas `builder_config`, which is an upstream
 (fork) package change and out of scope for this harness.
@@ -254,8 +254,8 @@ sidecar launcher to project the gloas `builder_config`, which is an upstream
 typed `sim` scenario generator; (2) bump the `Commit-Boost/ethereum-package`
 submodule to a gloas-capable base **and** add an epbs-aware commit-boost sidecar
 launcher that writes the gloas `builder_config`, then wire a real `epbs`/`custom`
-mev_type — retiring the manual CB add + `cb-km apply`; (3) remove
+mev_type - retiring the manual CB add + `cb-km apply`; (3) remove
 `skip_sigverify` once progressive-SSZ hashing lands.
 
-- **This is the `epbs`-branch harness**, not yet the typed `sim` generator — see
+- **This is the `epbs`-branch harness**, not yet the typed `sim` generator - see
   follow-up (1) above.

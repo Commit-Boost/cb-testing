@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-epbs-sim.sh — reproducible ePBS (gloas) + commit-boost + keymanager loop.
+# run-epbs-sim.sh - reproducible ePBS (gloas) + commit-boost + keymanager loop.
 #
 # Stands up a gloas devnet with buildoor (gloas_fork_epoch 0, minimal, 6s slots),
 # lodestar CL+VC with keymanager enabled, adds a commit-boost PBS sidecar as a
@@ -10,7 +10,7 @@
 #   and builder-built blocks on chain (signed_execution_payload_bid.value != 0).
 #
 # A real ethereum-package `epbs` mev_type that launches CB as the sidecar (no
-# manual add + no `cb-km apply`) needs an upstream-package change — see the
+# manual add + no `cb-km apply`) needs an upstream-package change - see the
 # "Native ePBS mev_type: investigation & submodule-upgrade blockers" in docs/EPBS.md.
 #
 # Opt-in assertion modes turn the two merged keymanager features into live
@@ -343,7 +343,7 @@ verify gloas bids under any domain. Rebuild the CB image from an epbs checkout t
 cleanup() {
   local rc=$?
   if [[ "$KEEP" == "1" ]]; then
-    log "KEEP=1 — leaving enclave '$ENCLAVE' and CB sidecar '$CB_NAME' running"
+    log "KEEP=1 - leaving enclave '$ENCLAVE' and CB sidecar '$CB_NAME' running"
   else
     log "cleanup: removing enclave (+ CB sidecar)"
     # service path: the CB service is inside the enclave, torn down with it.
@@ -370,7 +370,7 @@ if [[ -z "$CB_KM_BIN" ]]; then
   if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
   elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
   elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
-  else die "cb-km binary not found — set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
+  else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
 fi
 "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
 # preserve mode needs the merged --preserve-entries flag (epbs branch)
@@ -444,7 +444,7 @@ if [[ "$CB_LAUNCH" == "service" ]]; then
   # Upload the rendered CB config as a kurtosis files-artifact and add CB as a
   # real enclave service: it gets enclave DNS ($CB_NAME resolvable by the VC and
   # buildoor by name), is torn down by `kurtosis enclave rm`, and shows up in
-  # `kurtosis enclave inspect` — no manual container to track.
+  # `kurtosis enclave inspect` - no manual container to track.
   kurtosis files upload "$ENCLAVE" "$RUN_DIR" --name "$CB_ARTIFACT" >/dev/null \
     || die "kurtosis files upload of $RUN_DIR failed"
   # NOTE: --env is ONE comma-separated string, so RUST_LOG must not contain a
@@ -507,7 +507,7 @@ for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
 done
 echo
 (( buildoor_live == 1 )) || { cb_logs | tail -15; die "buildoor never bid through CB within ${BUILDOOR_ACTIVATION_TIMEOUT}s"; }
-echo "buildoor is active — first bid seen"
+echo "buildoor is active - first bid seen"
 
 # ---- 6b. observe the loop ----------------------------------------------------
 start_slot=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])")
