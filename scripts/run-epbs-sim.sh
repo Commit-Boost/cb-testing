@@ -53,7 +53,7 @@ CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the tem
 CB_LAUNCH="${CB_LAUNCH:-service}"
 CB_ARTIFACT="${CB_ARTIFACT:-cb-epbs-config}"  # kurtosis files-artifact name (service path)
 CB_KM_BIN="${CB_KM_BIN:-}"
-BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-600}"  # s to wait for the builder deposit to activate
+BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-1200}"  # s to wait for the builder deposit to activate (queue delay varies run to run, seen out to ~slot 100)
 OBSERVE_SLOTS="${OBSERVE_SLOTS:-16}"     # slots to watch once buildoor is active
 MIN_BUILDER_SLOTS="${MIN_BUILDER_SLOTS:-8}"  # PASS threshold (builder-built via CB; allows some missed slots)
 KEEP="${KEEP:-0}"                        # 1 = leave the enclave + CB running
@@ -318,7 +318,9 @@ fi
 log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 buildoor_live=0
 for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
-  if cb_logs | grep -q 'received new header.*buildoor-mux'; then buildoor_live=1; break; fi
+  # key on info-level signals (per-header receipt is debug and may be filtered):
+  # either buildoor's header reached CB or it won CB's auction.
+  if cb_logs | grep -qE 'auction winner.*buildoor-mux|received (new )?header.*buildoor-mux'; then buildoor_live=1; break; fi
   cur=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0)
   printf '  head=%s waiting for first buildoor bid via CB...\r' "$cur"
   sleep 6
