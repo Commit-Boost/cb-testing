@@ -160,41 +160,12 @@ merged keymanager feature into a live regression check:
 - **`preserve`**: `cb-km apply --preserve-entries` keeps a third-party
   `builder_config` entry that a plain apply drops. Keymanager-API only; skips the
   builder loop.
-- **`domain-control`**: proves the CB bid signature verification has real teeth,
-  with sigverify ON (`skip_sigverify = false`) over two arms in one enclave. The
-  correct arm uses the LIVE gloas signing domain (the fork version read from the
-  BN's `/eth/v1/config/spec` `GLOAS_FORK_VERSION`, and the genesis root already
-  rendered from `/eth/v1/beacon/genesis`); the wrong arm flips one byte of the fork
-  version. It reports whether the live fork version matches the hardcoded template
-  constant, then HARD-fails unless the correct arm ACCEPTS (no
-  `failed signature verification` from `cb-epbs`) and builds at least one block
-  while the wrong arm REJECTS (>=1 `failed signature verification`,
-  `relay_id="buildoor-mux"`) and builds none (buildoor's p2p bid, the only other
-  candidate, is held below the `min_bid` floor so the BN self-builds). The fork
-  version is read live, never the template constant, so the correct arm is a genuine
-  domain (the harness launches a moving upstream devnet whose gloas fork version can
-  drift). Measured PROVEN: correct domain `0x80000038` = 0 failures / 9 built; wrong
-  domain `0x7f000038` = 10 failures / 0 built.
-
-  Image requirement: this mode needs a CB image built from `epbs` WITH the
-  progressive-SSZ `[patch.crates-io]` stack (commit-boost commit `ade56d4` "bump
-  lighthouse to unstable for progressive gloas SSZ" or later). Build one with
-  `just build-all <tag>` in the commit-boost checkout and pass `CB_IMAGE=<tag>`
-  (e.g. `km-domaincheck`). An older CB image cannot verify the devnet's gloas bids
-  under ANY domain, so the correct arm would reject too; the mode detects that
-  signature (correct arm rejected all bids and built 0) and fails loud with the
-  rebuild instruction rather than a generic verdict. The `p2p` and `preserve` modes
-  do not have this requirement (they run with `skip_sigverify` / the pipe path).
 
 ## Known caveats
 
-- **Bid signature verification is skipped** (`skip_sigverify = true` in the CB
-  config, with the same explanatory comment). The gloas signing-domain overrides
-  in the config are correct, but the devnet stack hashes gloas containers as
-  EIP-7495 progressive containers (+ EIP-7916 progressive blob list) while CB's
-  pinned lighthouse (v8.2.2) hashes classic SSZ containers, so the computed
-  signing roots differ. Sigverify stays off until the progressive-SSZ hashing is
-  upgraded (ticket exists).
+- **Commit-boost forwards ePBS bids without verifying their signatures.** The
+  beacon node verifies the bid's `builder_index` against the on-chain builder
+  registry and collateral, so the CB bid path is a blind pipe by design.
 
 - **Uses UPSTREAM `github.com/ethpandaops/ethereum-package`, not this repo's
   pinned `ethereum-package` submodule** (`EP_PACKAGE`). See the section below for

@@ -205,12 +205,5 @@ epbs-sim:
 #                                  p2p bid so the CB bidSource is selected.
 #   just epbs-sim-assert preserve  assert `cb-km apply --preserve-entries` keeps a
 #                                  third-party builder_config entry (plain apply drops it).
-#   just epbs-sim-assert domain-control
-#                                  assert CB bid sigverify has teeth: the correct
-#                                  live domain accepts+builds, a wrong domain rejects+starves.
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
-
-# Shorthand for the sigverify domain-control assertion (two-arm teeth test).
-epbs-sim-domain-control:
-    ./scripts/run-epbs-sim.sh --assert domain-control
