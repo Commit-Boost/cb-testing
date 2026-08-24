@@ -201,9 +201,27 @@ epbs-sim:
     ./scripts/run-epbs-sim.sh
 
 # ePBS sim with an opt-in feature-level regression assertion.
-#   just epbs-sim-assert p2p       assert the min_bid p2p floor rejects buildoor's
-#                                  p2p bid so the CB bidSource is selected.
-#   just epbs-sim-assert preserve  assert `cb-km apply --preserve-entries` keeps a
-#                                  third-party builder_config entry (plain apply drops it).
+#   just epbs-sim-assert p2p               min_bid p2p floor rejects buildoor's p2p bid.
+#   just epbs-sim-assert preserve          --preserve-entries keeps a third-party entry.
+#   just epbs-sim-assert block-submission  CB's POST /beacon_blocks reveal endpoint fired.
+#   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
+#   just epbs-sim-assert request-auth      verify_builder_request_auth ON, 0 AuthSigVerify.
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
+
+# Assert CB's POST /eth/v1/builder/beacon_blocks reveal endpoint fired (>=1 block
+# accepted, no 5xx). Runs the full builder loop, then checks the reveal path.
+epbs-sim-block-submission:
+    ./scripts/run-epbs-sim.sh --assert block-submission
+
+# Assert builder failure never stalls the proposer: after buildoor builds >=1
+# block it is stopped, and the chain must keep advancing with self-built blocks
+# while CB returns 204 (never 500).
+epbs-sim-builder-down:
+    ./scripts/run-epbs-sim.sh --assert builder-down
+
+# Assert the request-auth signing domain agrees end to end: render CB with
+# verify_builder_request_auth = true and require builder-built blocks with zero
+# AuthSigVerify / 401 on the bid endpoint.
+epbs-sim-request-auth:
+    ./scripts/run-epbs-sim.sh --assert request-auth

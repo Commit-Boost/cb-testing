@@ -13,8 +13,7 @@
 # manual add + no `cb-km apply`) needs an upstream-package change - see the
 # "Native ePBS mev_type: investigation & submodule-upgrade blockers" in docs/EPBS.md.
 #
-# Opt-in assertion modes turn the two merged keymanager features into live
-# regression checks (both are cb-km-driven; CB just routes):
+# Opt-in assertion modes turn a merged feature into a live regression check:
 #   --assert p2p       also assert the min_bid p2p floor. buildoor's p2p-bidder
 #                      publishes a 101000000 Gwei bid every slot, below the
 #                      200000000 Gwei floor, so the BN floors it on every
@@ -26,11 +25,32 @@
 #                      assert BOTH our entry and the third-party entry survive
 #                      (a plain apply drops it). Keymanager-only: skips the
 #                      builder-activation wait + observe window.
+#   --assert block-submission  also assert CB's POST /eth/v1/builder/beacon_blocks
+#                      endpoint fired: the proposer reveals each builder-built
+#                      block through CB, which fans it out to buildoor. HARD-fails
+#                      unless >=1 block was accepted ("signed beacon block
+#                      submitted") and there were no 5xx (NoBuilderResponse). The
+#                      benign non-2xx classes (a non-gloas or undecodable body ->
+#                      400) are tolerated and reported; a 500 is CB's fault.
+#   --assert builder-down  after buildoor activates and >=1 builder-built slot is
+#                      seen, STOP buildoor and assert the proposer stays live: the
+#                      chain keeps advancing, the new blocks are self-built
+#                      (signed_execution_payload_bid.value == 0), and CB returns
+#                      204 "no header available" and NEVER 500. Proves builder
+#                      failure never stalls the proposer.
+#   --assert request-auth  render CB with verify_builder_request_auth = true and
+#                      assert the loop STILL produces builder-built blocks with
+#                      ZERO AuthSigVerify / 401 on the bid endpoint. Proves CB's
+#                      request-auth signing domain (genesis_fork_version + zero
+#                      genesis_validators_root, per builder-specs) agrees with the
+#                      real lodestar VC signer end to end. Independent of the bid
+#                      skip_sigverify progressive-SSZ blocker (the request-auth
+#                      message is a plain container, not a progressive one).
 # No flag = the default builder-built assertion (unchanged).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve]
-# (or `just epbs-sim` / `just epbs-sim-assert p2p`).
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth]
+# (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -70,9 +90,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$ASSERT_MODE" in
-  ""|p2p|preserve) : ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  ""|p2p|preserve|block-submission|builder-down|request-auth) : ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
+
+# builder-down runs a second observe window after stopping buildoor
+BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor is stopped
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -163,6 +186,175 @@ assert_preserve() {
 
   log "RESULT"
   printf '\033[1;32mPASS: --preserve-entries kept the third-party builder_config entry; plain apply dropped it\033[0m\n'
+}
+
+# head slot as a plain integer (0 on any error)
+bn_head_slot() {
+  curl -sf "$BN/eth/v1/beacon/headers/head" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0
+}
+
+# Classify each block in [s0,s1]: prints two lines, "builder=<slots>" and
+# "self=<slots>" (comma-separated). A gloas block is builder-built when its
+# signed_execution_payload_bid.message.value != 0, self-built when value == 0.
+classify_blocks() { # $1=s0 $2=s1
+  python3 - "$BN" "$1" "$2" <<'PY'
+import sys,json,urllib.request
+bn,s0,s1=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
+builder,selfb=[],[]
+for slot in range(s0,s1+1):
+    try:
+        with urllib.request.urlopen(f"{bn}/eth/v2/beacon/blocks/{slot}",timeout=5) as r:
+            body=json.load(r)['data']['message']['body']
+        bid=body.get('signed_execution_payload_bid',{}).get('message',{})
+        v=bid.get('value','0')
+        (builder if v not in ('0','',None) else selfb).append(slot)
+    except Exception:
+        pass  # missed slot / 404
+print("builder="+",".join(map(str,builder)))
+print("self="+",".join(map(str,selfb)))
+PY
+}
+
+# --- assert block-submission: CB's POST /eth/v1/builder/beacon_blocks fired -----
+# The proposer reveals every builder-built block by POSTing the SignedBeaconBlock
+# to its builder URL (CB), which fans it out to buildoor (submit_signed_beacon_block).
+# Handler outcomes (crates/pbs/src/routes/submit_signed_beacon_block.rs):
+#   202 -> info "signed beacon block submitted"  (>=1 builder accepted)
+#   4xx -> warn "submit_signed_beacon_block failed" (client fault: a non-gloas
+#          body = NotGloasBlock/400, an undecodable body = DecodeError/400)
+#   5xx -> error "submit_signed_beacon_block failed" (NoBuilderResponse/500 = CB
+#          fault: zero addressed builders accepted the block).
+# PASS: >=1 accepted AND zero 5xx. Benign 4xx are reported, not failed on.
+assert_block_submission() {
+  log "assert block-submission: CB's POST /eth/v1/builder/beacon_blocks endpoint fired"
+  local CB_LOG; CB_LOG="$(cb_logs)"
+  local accepted failed server_err client_err
+  accepted=$(grep -c 'signed beacon block submitted' <<<"$CB_LOG" || true)
+  failed=$(grep -c 'submit_signed_beacon_block failed' <<<"$CB_LOG" || true)
+  # 5xx are logged at error level, 4xx at warn level (see the handler)
+  server_err=$(grep 'submit_signed_beacon_block failed' <<<"$CB_LOG" | grep -c 'no builder accepted' || true)
+  client_err=$(( failed - server_err ))
+  (( client_err < 0 )) && client_err=0
+  echo "  blocks accepted (202, 'signed beacon block submitted'): $accepted"
+  echo "  submissions failed total:                               $failed"
+  echo "    of which 5xx (NoBuilderResponse, CB fault):           $server_err"
+  echo "    of which 4xx (non-gloas / undecodable body, benign):  $client_err"
+  if (( client_err > 0 )); then
+    echo "  sample non-2xx (reported, benign):"
+    grep 'submit_signed_beacon_block failed' <<<"$CB_LOG" | grep -v 'no builder accepted' | tail -3 | sed 's/^/    /'
+  fi
+  if (( accepted >= 1 && server_err == 0 )); then
+    printf '\033[1;32mPASS: beacon_blocks endpoint fired (%s accepted, 0 5xx; %s benign 4xx)\033[0m\n' "$accepted" "$client_err"
+    return 0
+  fi
+  cb_logs | grep -E 'beacon_blocks|signed beacon block|submit_signed_beacon_block' | tail -30
+  die "block-submission failed (accepted=$accepted need>=1, 5xx=$server_err need=0)"
+}
+
+# --- assert request-auth: builder loop survives verify_builder_request_auth ------
+# The config was rendered with verify_builder_request_auth = true. CB now checks
+# the caller's SignedBuilderRequestAuth signature against the proposer pubkey on
+# every bid request. If CB's request-auth domain disagrees with what the lodestar
+# VC signed, CB returns 401 (AuthSigVerify) and the loop dies. PASS = builder-built
+# blocks still land AND zero AuthSigVerify/401. A 401 is a REAL domain-mismatch
+# finding: dump the domain params CB used.
+assert_request_auth() { # $1=n_built
+  log "assert request-auth: builder loop survives verify_builder_request_auth = true"
+  local n_built="$1"
+  local CB_LOG; CB_LOG="$(cb_logs)"
+  local authfail
+  authfail=$(grep -c -E 'auth signature verification failed|AuthSigVerify' <<<"$CB_LOG" || true)
+  echo "  builder-built blocks on chain (verify on):  $n_built"
+  echo "  AuthSigVerify / 401 on the bid endpoint:    $authfail"
+  if (( n_built >= MIN_BUILDER_SLOTS && authfail == 0 )); then
+    printf '\033[1;32mPASS: request-auth verify ON, %s builder-built slots, 0 AuthSigVerify - CB domain agrees with lodestar\033[0m\n' "$n_built"
+    return 0
+  fi
+  if (( authfail > 0 )); then
+    printf '\033[1;31mFINDING: request-auth signature verification FAILED (%s x 401) - CB domain disagrees with lodestar VC\033[0m\n' "$authfail"
+    echo "  CB request-auth domain = compute_domain(DOMAIN_BUILDER_REQUEST_AUTH):"
+    echo "    genesis_fork_version = $(grep -oE 'genesis_fork_version = \"0x[0-9a-fA-F]+\"' "$RUN_DIR/cb-config.toml" | head -1)"
+    echo "    genesis_validators_root = 0x0000..0000 (zero root, per builder-specs request_auth)"
+    echo "  live BN GENESIS_FORK_VERSION = $(curl -sf "$BN/eth/v1/config/spec" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('GENESIS_FORK_VERSION'))" 2>/dev/null || echo '?')"
+    echo "  live BN genesis_validators_root = $(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_validators_root'])" 2>/dev/null || echo '?')"
+    cb_logs | grep -E 'auth signature|AuthSigVerify|get_execution_payload_bid failed' | tail -20
+  fi
+  die "request-auth failed (built=$n_built need>=$MIN_BUILDER_SLOTS, authfail=$authfail need=0)"
+}
+
+# --- assert builder-down: builder failure never stalls the proposer -------------
+# buildoor is stopped after >=1 builder-built slot. The proposer must fall back to
+# self-building: the chain keeps advancing, the new blocks carry
+# signed_execution_payload_bid.value == 0 (local block), and CB returns 204 "no
+# header available" (relay unreachable -> no bid) and never a 500. Hard-fail on a
+# stalled chain or any 5xx from the bid endpoint.
+assert_builder_down() { # $1=slot at which buildoor was already confirmed building
+  log "assert builder-down: stop buildoor, prove the proposer stays live"
+  # discover the buildoor service name in the enclave (config DNS is 'buildoor')
+  local BUILDOOR_SVC
+  BUILDOOR_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE '^[[:space:]]*[0-9a-f]+[[:space:]]+buildoor[^[:space:]]*' | awk '{print $2}' | head -1)"
+  [[ -z "$BUILDOOR_SVC" ]] && BUILDOOR_SVC="buildoor"
+  echo "  buildoor service = $BUILDOOR_SVC"
+
+  local stop_slot; stop_slot="$(bn_head_slot)"
+  local cb_watermark; cb_watermark="$(cb_logs | wc -l)"
+  log "stopping buildoor at head slot $stop_slot (CB log watermark $cb_watermark lines)"
+  kurtosis service stop "$ENCLAVE" "$BUILDOOR_SVC" >/dev/null 2>&1 \
+    || die "could not stop buildoor service '$BUILDOOR_SVC'"
+  sleep 2
+  kurtosis service inspect "$ENCLAVE" "$BUILDOOR_SVC" 2>/dev/null | grep -qiE 'STOPPED|Status.*stop' \
+    && echo "  buildoor stopped" || echo "  buildoor stop issued (status not confirmed via inspect)"
+
+  local target=$(( stop_slot + BUILDER_DOWN_SLOTS ))
+  log "observing slots ${stop_slot}..${target} with buildoor DOWN ($(( BUILDER_DOWN_SLOTS * 6 ))s)"
+  local cur=0
+  for i in $(seq 1 $(( BUILDER_DOWN_SLOTS + 4 )) ); do
+    cur="$(bn_head_slot)"
+    printf '  head=%s / target=%s (builder down)\r' "$cur" "$target"
+    (( cur >= target )) && break
+    sleep 6
+  done
+  echo
+
+  # 1) chain advanced (proposer did not stall)
+  local advanced=$(( cur - stop_slot ))
+  echo "  head advanced $advanced slots after buildoor stop (target window $BUILDER_DOWN_SLOTS)"
+
+  # 2) classify blocks strictly AFTER the stop settled (stop_slot+2 onward): they
+  #    must be self-built (value==0); a builder-built block with buildoor down is
+  #    unexpected.
+  local from=$(( stop_slot + 2 ))
+  local cls; cls="$(classify_blocks "$from" "$cur")"
+  local built_after selfb_after
+  built_after="$(sed -n 's/^builder=//p' <<<"$cls")"
+  selfb_after="$(sed -n 's/^self=//p' <<<"$cls")"
+  local n_built_after n_self_after
+  n_built_after=$( [[ -n "$built_after" ]] && awk -F, '{print NF}' <<<"$built_after" || echo 0 )
+  n_self_after=$( [[ -n "$selfb_after" ]] && awk -F, '{print NF}' <<<"$selfb_after" || echo 0 )
+  echo "  self-built blocks after stop (value==0):  $n_self_after  [slots: $selfb_after]"
+  echo "  builder-built blocks after stop:          $n_built_after  [slots: $built_after]"
+
+  # 3) CB bid endpoint: 204 "no header available", never a 500, in the post-stop log
+  local CB_TAIL; CB_TAIL="$(cb_logs | tail -n +$(( cb_watermark + 1 )))"
+  local cb_204 cb_500
+  cb_204=$(grep -c 'no header available for slot' <<<"$CB_TAIL" || true)
+  cb_500=$(grep 'get_execution_payload_bid failed' <<<"$CB_TAIL" | grep -c -E 'Internal|internal server error' || true)
+  echo "  CB 204 'no header available' after stop:   $cb_204"
+  echo "  CB 500 (Internal) after stop:              $cb_500"
+
+  log "RESULT"
+  # advance tolerance: allow up to 3 missed slots across the window
+  if (( advanced >= BUILDER_DOWN_SLOTS - 3 && n_self_after >= 1 && n_built_after == 0 && cb_500 == 0 && cb_204 >= 1 )); then
+    printf '\033[1;32mPASS: buildoor down -> chain advanced %s slots, %s self-built blocks, CB 204x%s and 0 500s\033[0m\n' \
+      "$advanced" "$n_self_after" "$cb_204"
+    return 0
+  fi
+  cb_logs | tail -n +$(( cb_watermark + 1 )) | grep -E 'no header|get_execution_payload_bid failed|Internal' | tail -20
+  (( advanced >= BUILDER_DOWN_SLOTS - 3 )) || die "builder-down: chain STALLED (advanced $advanced, need >= $(( BUILDER_DOWN_SLOTS - 3 )))"
+  (( cb_500 == 0 )) || die "builder-down: CB returned $cb_500 x 500 with buildoor down (must be 204)"
+  (( n_built_after == 0 )) || die "builder-down: $n_built_after builder-built block(s) appeared with buildoor DOWN"
+  die "builder-down: expected self-built blocks (self=$n_self_after) and >=1 CB 204 (204=$cb_204)"
 }
 
 # ---- cleanup ----------------------------------------------------------------
@@ -263,6 +455,20 @@ sed -e "s|__VC_KM_URL__|$VC_KM|" \
     -e "s|__TOKEN_PATH__|$(pwd)/$RUN_DIR/km-token.txt|" \
     configs/epbs/km-overlay.toml.tmpl > "$RUN_DIR/km-overlay.toml"
 grep -q '__' "$RUN_DIR/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
+
+# request-auth mode: turn ON the request-auth signature check (default off in the
+# template). CB verifies the caller's SignedBuilderRequestAuth against the
+# proposer pubkey using the builder-specs request-auth domain
+# (compute_domain(DOMAIN_BUILDER_REQUEST_AUTH) = genesis_fork_version + zero root).
+# This is orthogonal to skip_sigverify (that gates the BID signature, which the
+# devnet's progressive-SSZ hashing still blocks); the request-auth message is a
+# plain container, so its root agrees across clients.
+if [[ "$ASSERT_MODE" == "request-auth" ]]; then
+  sed -i 's|^skip_sigverify = true$|skip_sigverify = true\nverify_builder_request_auth = true|' "$RUN_DIR/cb-config.toml"
+  grep -q '^verify_builder_request_auth = true$' "$RUN_DIR/cb-config.toml" \
+    || die "request-auth: failed to enable verify_builder_request_auth in cb-config.toml"
+  echo "request-auth: verify_builder_request_auth = true"
+fi
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
@@ -373,6 +579,16 @@ echo "  BN -> CB bid calls (window+):     $bid_calls"
 echo "  buildoor auction wins via CB:     $auction_wins"
 echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 
+# builder-down diverges here: it only needs the builder PROVEN live (>=1
+# builder-built slot), then stops buildoor and asserts proposer liveness.
+if [[ "$ASSERT_MODE" == "builder-down" ]]; then
+  (( n_built >= 1 && auction_wins >= 1 )) \
+    || { cb_logs | tail -20; die "builder-down precondition: buildoor never built a block (built=$n_built, wins=$auction_wins)"; }
+  echo "  precondition OK: buildoor built >=1 block before stop"
+  assert_builder_down "$start_slot"
+  exit 0
+fi
+
 # ---- 7b. p2p-floor assertion (opt-in) ---------------------------------------
 # The rendered CB config sets min_bid_p2p_eth = "0.2" (top-level [pbs]), which
 # cb-km projects as the key-level min_bid (200000000 Gwei), ABOVE buildoor's
@@ -420,9 +636,15 @@ if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p
     printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
       "$p2p_rejected" "$cb_selected"
   fi
+  # request-auth: the loop passed with verify_builder_request_auth ON, so also
+  # assert zero AuthSigVerify. block-submission: also assert the reveal endpoint fired.
+  [[ "$ASSERT_MODE" == "request-auth" ]]     && { assert_request_auth "$n_built"; }
+  [[ "$ASSERT_MODE" == "block-submission" ]] && { assert_block_submission; }
   exit 0
 else
   cb_logs | tail -30
   (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0)"
+  # request-auth: the loop dying WHILE verify is on is the domain-mismatch finding.
+  [[ "$ASSERT_MODE" == "request-auth" ]] && assert_request_auth "$n_built"
   die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
 fi
