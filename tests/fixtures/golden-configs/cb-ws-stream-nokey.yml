@@ -1,8 +1,9 @@
 # cb-ws-stream-nokey: NEGATIVE CONTROL for the ws criteria.
 #
-# Stream configured with NO api key: helix refuses every handshake
-# ("no api key registered for this proposer"), every slot falls back
-# to HTTP, MEV stays green - and feature.ws_header_stream goes
+# Stream configured but admission DISABLED (header_stream.admit_all:
+# false). Post-helix-#511 the public DefaultApiProvider gates the stream
+# on that flag, not an api key, so it refuses every handshake, every slot
+# falls back to HTTP, MEV stays green - and feature.ws_header_stream goes
 # INCONCLUSIVE. EXPECTED to fail under --require-feature-proof; that
 # failure is this scenario's proof that the criteria discriminate.
 # Not part of the green sweep.
@@ -54,6 +55,12 @@ mev_params:
       - url: "{{ .BEACON_URI }}"
 
     gossip_payload_on_header: false
+
+    # helix PR #511 "header stream toggler": the public DefaultApiProvider
+    # gates the header stream on this flag, not on an api key. true admits
+    # every proposer's stream; false refuses all (the nokey negative control).
+    header_stream:
+      admit_all: false
 
     simulators:
       - url: "{{ .BLOCKSIM_URI }}"

@@ -1,9 +1,10 @@
 # cb-ws-stream: getHeader over the websocket bid stream.
 #
-# CB `get_header = "stream"` + helix HeaderStream route. The relay's
-# X-Api-Key header rides validator registration, helix TOFU-binds it,
-# and the stream authenticates. THE TRAP this scenario guards: the HTTP
-# fallback keeps every MEV check green when the stream is broken, so
+# CB `get_header = "stream"` + helix HeaderStream route. Admission is
+# granted by header_stream.admit_all: true - post-helix-#511 the public
+# DefaultApiProvider gates the stream on that flag, not the X-Api-Key
+# (now vestigial). THE TRAP this scenario guards: the HTTP fallback keeps
+# every MEV check green when the stream is broken, so
 # feature.ws_header_stream (proof markers) is the real assertion - run
 # under --require-feature-proof.
 
@@ -54,6 +55,12 @@ mev_params:
       - url: "{{ .BEACON_URI }}"
 
     gossip_payload_on_header: false
+
+    # helix PR #511 "header stream toggler": the public DefaultApiProvider
+    # gates the header stream on this flag, not on an api key. true admits
+    # every proposer's stream; false refuses all (the nokey negative control).
+    header_stream:
+      admit_all: true
 
     simulators:
       - url: "{{ .BLOCKSIM_URI }}"

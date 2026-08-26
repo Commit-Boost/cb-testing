@@ -1,10 +1,11 @@
 //! The helix relay YAML block — a verbatim port of the Python
 //! `build_helix_relay_config()` output (`scripts/generate_kurtosis_configs.py`).
 //!
-//! This block is byte-IDENTICAL across all 6 scenarios (verified by diff), so it
-//! is a single `const`. The `{{ .POSTGRES_* }}`, `{{ .BEACON_URI }}`, and
-//! `{{ .BLOCKSIM_URI }}` are runtime holes filled by the ethereum-package at
-//! launch — they stay as literal text here.
+//! This block is byte-IDENTICAL across the non-stream scenarios, so it is a
+//! single `const`; the ws-stream scenarios layer one extra `header_stream`
+//! admission block on top via [`helix_relay_config`]. The `{{ .POSTGRES_* }}`,
+//! `{{ .BEACON_URI }}`, and `{{ .BLOCKSIM_URI }}` are runtime holes filled by the
+//! ethereum-package at launch — they stay as literal text here.
 //!
 //! The ~40 lines of comments are the expensive, hard-won knowledge (the
 //! `network_config` removal, the binary-verified 10-field `CoresConfig`) — PRESERVE
@@ -105,6 +106,38 @@ cores:
   housekeeper: 0
 
 is_local_dev: false"#;
+
+/// The `header_stream` admission block, inserted for ws-stream scenarios only.
+/// helix PR #511 ("header stream toggler") gates the header stream on this flag
+/// in the public `DefaultApiProvider` (which does NOT check an api key at all).
+/// `admit_all: true` admits every proposer's stream; `false` refuses all, which
+/// is how the nokey negative control still forces the HTTP fallback.
+fn header_stream_block(admit_all: bool) -> String {
+    format!(
+        "\n# helix PR #511 \"header stream toggler\": the public DefaultApiProvider\n\
+         # gates the header stream on this flag, not on an api key. true admits\n\
+         # every proposer's stream; false refuses all (the nokey negative control).\n\
+         header_stream:\n  admit_all: {admit_all}\n"
+    )
+}
+
+/// Render the helix relay config. `admit_all == None` for non-stream scenarios
+/// (no `header_stream` block, byte-identical to [`HELIX_RELAY_CONFIG`]); `Some(v)`
+/// for the ws-stream scenarios, emitting the PR #511 admission toggle just after
+/// `gossip_payload_on_header`.
+pub fn helix_relay_config(admit_all: Option<bool>) -> String {
+    match admit_all {
+        None => HELIX_RELAY_CONFIG.to_string(),
+        Some(v) => HELIX_RELAY_CONFIG.replacen(
+            "gossip_payload_on_header: false\n",
+            &format!(
+                "gossip_payload_on_header: false\n{}",
+                header_stream_block(v)
+            ),
+            1,
+        ),
+    }
+}
 
 #[cfg(test)]
 mod tests {

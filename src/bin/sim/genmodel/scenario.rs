@@ -11,7 +11,7 @@ use std::path::Path;
 use eyre::{Result, WrapErr};
 
 use super::cb::{CbParams, SignerParams, cb_toml, cb_toml_mux};
-use super::helix::HELIX_RELAY_CONFIG;
+use super::helix::helix_relay_config;
 use super::spec;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
@@ -130,14 +130,16 @@ pub enum Scenario {
     ExtraValidation,
     TimingGames,
     /// getHeader over the websocket bid stream (CB `get_header = "stream"` +
-    /// helix HeaderStream route). The api key rides relay `headers`, so
-    /// registration TOFU-binds it and the stream authenticates.
+    /// helix HeaderStream route). Admitted by `header_stream.admit_all: true`;
+    /// post-helix-#511 the public DefaultApiProvider gates on that flag, not the
+    /// X-Api-Key (now vestigial).
     WsStream,
-    /// NEGATIVE CONTROL: stream configured but NO api key. helix refuses every
-    /// handshake, every slot falls back to HTTP, MEV stays green - and
-    /// feature.ws_header_stream goes INCONCLUSIVE, which is the point: this
-    /// scenario exists to prove the criteria discriminate. Expected to FAIL
-    /// under --require-feature-proof; not part of the green sweep.
+    /// NEGATIVE CONTROL: stream configured but admission disabled
+    /// (`header_stream.admit_all: false`). helix refuses every handshake, every
+    /// slot falls back to HTTP, MEV stays green - and feature.ws_header_stream
+    /// goes INCONCLUSIVE, which is the point: this scenario exists to prove the
+    /// criteria discriminate. Expected to FAIL under --require-feature-proof; not
+    /// part of the green sweep.
     WsStreamNoKey,
     Mux,
     /// Config-surface coverage: sets several `[pbs]` knobs at once (registration
@@ -308,19 +310,21 @@ impl Scenario {
             Scenario::WsStream => {
                 "# cb-ws-stream: getHeader over the websocket bid stream.\n\
                  #\n\
-                 # CB `get_header = \"stream\"` + helix HeaderStream route. The relay's\n\
-                 # X-Api-Key header rides validator registration, helix TOFU-binds it,\n\
-                 # and the stream authenticates. THE TRAP this scenario guards: the HTTP\n\
-                 # fallback keeps every MEV check green when the stream is broken, so\n\
+                 # CB `get_header = \"stream\"` + helix HeaderStream route. Admission is\n\
+                 # granted by header_stream.admit_all: true - post-helix-#511 the public\n\
+                 # DefaultApiProvider gates the stream on that flag, not the X-Api-Key\n\
+                 # (now vestigial). THE TRAP this scenario guards: the HTTP fallback keeps\n\
+                 # every MEV check green when the stream is broken, so\n\
                  # feature.ws_header_stream (proof markers) is the real assertion - run\n\
                  # under --require-feature-proof."
             }
             Scenario::WsStreamNoKey => {
                 "# cb-ws-stream-nokey: NEGATIVE CONTROL for the ws criteria.\n\
                  #\n\
-                 # Stream configured with NO api key: helix refuses every handshake\n\
-                 # (\"no api key registered for this proposer\"), every slot falls back\n\
-                 # to HTTP, MEV stays green - and feature.ws_header_stream goes\n\
+                 # Stream configured but admission DISABLED (header_stream.admit_all:\n\
+                 # false). Post-helix-#511 the public DefaultApiProvider gates the stream\n\
+                 # on that flag, not an api key, so it refuses every handshake, every slot\n\
+                 # falls back to HTTP, MEV stays green - and feature.ws_header_stream goes\n\
                  # INCONCLUSIVE. EXPECTED to fail under --require-feature-proof; that\n\
                  # failure is this scenario's proof that the criteria discriminate.\n\
                  # Not part of the green sweep."
@@ -533,6 +537,18 @@ impl Scenario {
         }
     }
 
+    /// The `header_stream.admit_all` value for the ws-stream scenarios, or `None`
+    /// for the non-stream ones (which emit no `header_stream` block). Mirrors
+    /// [`spec::HeaderTransport::admit_all`] via the `to_spec` mapping; the
+    /// `lower_reproduces_every_scenario` contract test proves the two agree.
+    fn header_stream_admit_all(&self) -> Option<bool> {
+        match self {
+            Scenario::WsStream => Some(true),
+            Scenario::WsStreamNoKey => Some(false),
+            _ => None,
+        }
+    }
+
     /// Assemble the full Kurtosis args-file for this scenario. Reads
     /// `keys/node-{0,1}-pubkeys.json` under `keys_dir` for the mux scenario only.
     pub fn args_file_in(&self, images: &Images, keys_dir: &Path) -> Result<String> {
@@ -543,6 +559,7 @@ impl Scenario {
             &cb_block,
             self.builder_subsidy(),
             matches!(self, Scenario::Signer),
+            self.header_stream_admit_all(),
         );
         Ok([
             self.comment(),
@@ -584,6 +601,7 @@ pub(super) fn build_mev_params(
     cb_block: &str,
     subsidy: &str,
     signer: bool,
+    header_stream_admit_all: Option<bool>,
 ) -> String {
     let mut lines: Vec<String> = vec!["mev_params:".to_string()];
 
@@ -622,7 +640,7 @@ pub(super) fn build_mev_params(
 
     // helix block scalar: indent non-empty lines 4 spaces, blanks stay empty.
     lines.push("  helix_relay_config: |".to_string());
-    push_block_scalar(&mut lines, HELIX_RELAY_CONFIG);
+    push_block_scalar(&mut lines, &helix_relay_config(header_stream_admit_all));
     lines.push(String::new());
 
     // commit-boost block scalar.

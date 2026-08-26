@@ -79,6 +79,20 @@ pub enum HeaderTransport {
     },
 }
 
+impl HeaderTransport {
+    /// The helix `header_stream.admit_all` value this transport needs, or `None`
+    /// for HTTP (no `header_stream` block). Post-helix-#511 the public
+    /// `DefaultApiProvider` gates the stream on this flag, not the api key, so a
+    /// `Present`-key stream still needs `admit_all: true` to be admitted, and the
+    /// `Absent`-key negative control uses `false` to keep forcing the HTTP fallback.
+    pub fn admit_all(&self) -> Option<bool> {
+        match self {
+            HeaderTransport::Http => None,
+            HeaderTransport::Stream { api_key } => Some(matches!(api_key, KeyPresence::Present)),
+        }
+    }
+}
+
 /// Signature-verification mode. Collapses the mutually-exclusive skip/poison
 /// combinations into one closed choice so illegal shapes are not constructible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -410,6 +424,7 @@ impl ScenarioSpec {
             &cb_block,
             self.builder_subsidy(),
             self.signer,
+            self.get_header.admit_all(),
         );
 
         Ok([

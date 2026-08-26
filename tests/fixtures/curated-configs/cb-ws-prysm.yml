@@ -48,6 +48,12 @@ mev_params:
 
     gossip_payload_on_header: false
 
+    # helix PR #511 "header stream toggler": the public DefaultApiProvider
+    # gates the header stream on this flag, not on an api key. true admits
+    # every proposer's stream; false refuses all (the nokey negative control).
+    header_stream:
+      admit_all: true
+
     simulators:
       - url: "{{ .BLOCKSIM_URI }}"
         namespace: flashbots
