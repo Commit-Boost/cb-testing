@@ -1,0 +1,69 @@
+# Cross-client gloas (ePBS) builder-flow coverage via ethpandaops assertoor.
+#
+# WHAT this tests: the GENERIC gloas builder mechanism (buildoor deposit ->
+# registry activation -> builder-built blocks -> every CL follows and attests),
+# across a spread of consensus clients, using ethpandaops' own gloas-dev assertoor
+# playbooks. This is the VC -> buildoor DIRECT path: no commit-boost in the loop.
+# For the CB-in-loop path (VC -> commit-boost -> buildoor) see gloas-epbs.yaml /
+# gloas-epbs-2cl.yaml + scripts/run-epbs-sim.sh, which only lodestar can drive
+# (only local/lodestar:km carries the keymanager builder_config).
+#
+# WHY it earns its keep: multi-client coverage is a standing ePBS regression goal.
+# assertoor reports per-playbook pass/fail, so this answers "which CLs correctly
+# implement the devnet-8 gloas builder flow" without any bespoke assertion code.
+#
+# All images are the stable glamsterdam-devnet-8 tags (prysm has no devnet-8 gloas
+# build yet, so it is omitted). lodestar here is the CLEAN devnet-8 image, NOT
+# local/lodestar:km -- the builder-config/keymanager branch is only needed for the
+# CB path, and this path talks to buildoor directly.
+#
+# Run standalone (no run-epbs-sim.sh needed):
+#   kurtosis run --enclave epbs-matrix github.com/ethpandaops/ethereum-package \
+#     --args-file configs/epbs/gloas-epbs-matrix.yaml --image-download always
+#   # then watch assertoor (dora + assertoor UIs are exposed):
+#   kurtosis enclave inspect epbs-matrix | grep -E 'assertoor|dora'
+participants_matrix:
+  el:
+    - el_type: geth
+      el_image: ethpandaops/geth:glamsterdam-devnet-8
+  cl:
+    # Minimal-preset capable CLs. nimbus + grandine are OMITTED here: their
+    # glamsterdam-devnet-8 images are compiled MAINNET-preset only and hard-fail
+    # on the minimal preset ("Config not compatible with binary, compile with
+    # -d:const_preset=minimal" / "minimal preset is not included in this
+    # executable"). Cover nimbus + grandine with a separate mainnet-preset matrix
+    # (slower; assertoor timeouts must be widened for 12s slots).
+    - cl_type: lodestar
+      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8
+    - cl_type: lighthouse
+      cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    - cl_type: teku
+      cl_image: ethpandaops/teku:glamsterdam-devnet-8
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 1
+  withdrawal_type: "0x01"
+  deploy_eip8282_contracts: true
+additional_services:
+  - assertoor
+  - dora
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: false
+  # Playbooks are PINNED to an assertoor commit SHA (not refs/heads/master) so a
+  # run is reproducible; refs/heads/master is a moving target. A byte-identical
+  # copy of each is vendored at configs/epbs/assertoor-playbooks/ (see PINNED_SHA.txt)
+  # for review/diff when bumping the pin.
+  tests:
+    - { file: "https://raw.githubusercontent.com/ethpandaops/assertoor/89366be6cb211522249a6d9424adb47631864432/playbooks/gloas-dev/builder-lifecycle.yaml" }
+    - { file: "https://raw.githubusercontent.com/ethpandaops/assertoor/89366be6cb211522249a6d9424adb47631864432/playbooks/gloas-dev/builder-deposit.yaml" }
+global_log_level: debug

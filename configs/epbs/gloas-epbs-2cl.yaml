@@ -1,0 +1,80 @@
+# ePBS (gloas) devnet, TWO consensus clients.
+#
+# WHY this variant exists: the single-lodestar gloas-epbs.yaml cannot FINALIZE on
+# the mainnet preset because the local/lodestar:km gloas image packs only ~1
+# attestation aggregate per block; on mainnet's 32-slot epochs that leaves the
+# chain short of the 2/3 justification threshold, so it never finalizes, so
+# buildoor's builder deposit (activation needs a FINALIZED eligibility epoch)
+# never activates, so the live --assert block-submission path cannot reach
+# builder-built slots on the one preset whose block layout CB actually decodes.
+#
+# This config adds a second participant (lighthouse) purely to CARRY FINALIZATION:
+# it attests, and its proposer slots pack full aggregates, so the chain justifies
+# and finalizes. lighthouse has NOT implemented the gloas builder API, so its own
+# proposer slots build locally and never route through CB -- that is fine, we only
+# need it to finalize. buildoor still bids through lodestar's slots via CB.
+#
+# Multi-CL coverage is also a standing ePBS regression goal, so this doubles as
+# the first cross-client harness.
+#
+# lodestar MUST stay participant #1: scripts/run-epbs-sim.sh discovers the BN and
+# keymanager VC by the fixed service names cl-1-lodestar-geth / vc-1-geth-lodestar.
+#
+# Run: ARGS_FILE=configs/epbs/gloas-epbs-2cl.yaml PRESET=mainnet \
+#      OBSERVE_SLOTS=40 MIN_BUILDER_SLOTS=6 bash scripts/run-epbs-sim.sh --assert block-submission
+participants:
+  # --- participant #1: lodestar, the CB / buildoor path (keymanager builder_config) ---
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    cl_type: lodestar
+    # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
+    cl_image: local/lodestar:km
+    vc_image: local/lodestar:km
+    cl_log_level: debug
+    vc_log_level: debug
+    vc_extra_params:
+      - --graffiti=builder-dev
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+  # --- participant #2: lighthouse, the finalization carrier (no builder API) ---
+  # lighthouse blocks build locally and never reach CB, so the image only needs to
+  # attest and pack full aggregates on this devnet; the clean devnet-8 tag does.
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    vc_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    cl_log_level: debug
+    vc_extra_params:
+      - --graffiti=finalizer
+    supernode: true
+    keymanager_enabled: false
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  # pinned digest known-good with epbs_builder (matches the proven rig)
+  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  # NO seconds_per_slot override on the mainnet preset. The gloas devnet renamed
+  # SECONDS_PER_SLOT -> SLOT_DURATION_MS: a custom 6s applies to the chain (the CLs
+  # honor SLOT_DURATION_MS=6000) but the CLs still serve the LEGACY SECONDS_PER_SLOT
+  # at the mainnet default 12 in /config/spec, and buildoor derives its slot clock
+  # from that legacy field. Result: chain at 6s, buildoor at 12s, buildoor rejects
+  # every bid as "slot too far ahead" and never builds. Leaving it native (12s
+  # everywhere) keeps chain + spec + buildoor consistent. Minimal-preset runs
+  # (gloas-epbs.yaml) can keep seconds_per_slot: 6 because minimal's legacy default
+  # is already 6, so there is no skew there.
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true

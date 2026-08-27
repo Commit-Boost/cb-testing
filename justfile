@@ -225,3 +225,19 @@ epbs-sim-builder-down:
 # AuthSigVerify / 401 on the bid endpoint.
 epbs-sim-request-auth:
     ./scripts/run-epbs-sim.sh --assert request-auth
+
+# Cross-client gloas builder-flow coverage via assertoor (geth x lodestar/lighthouse/
+# teku/nimbus/grandine, minimal preset). This is the VC -> buildoor DIRECT path with
+# NO commit-boost in the loop: it answers "which CLs correctly implement the devnet-8
+# gloas builder flow", complementing the CB-in-loop epbs-sim asserts above. assertoor
+# reports per-playbook pass/fail (UI + HTTP API + process exit code); dora gives a
+# block explorer. See configs/epbs/gloas-epbs-matrix.yaml.
+epbs-matrix:
+    kurtosis run github.com/ethpandaops/ethereum-package \
+      --enclave epbs-matrix \
+      --args-file configs/epbs/gloas-epbs-matrix.yaml \
+      --image-download always
+
+# Print the assertoor + dora URLs for a running epbs-matrix enclave.
+epbs-matrix-urls:
+    kurtosis enclave inspect epbs-matrix | grep -iE 'assertoor|dora'

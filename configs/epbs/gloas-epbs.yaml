@@ -13,7 +13,17 @@
 # inserts commit-boost MANUALLY after launch so the VC's gloas bid flow is routed
 # VC -> keymanager builder_config -> commit-boost -> buildoor.
 #
-# minimal preset + 6s slots so gloas activates at epoch 0 and the loop is observable fast.
+# minimal preset + 6s slots so gloas activates at epoch 0 and the loop is observable fast
+# (8-slot epochs, buildoor activates ~slot 33). This is the FAST default for the
+# p2p/preserve/default assertion modes.
+#
+# NOTE the preset is a runtime knob: `PRESET=mainnet` (or `--assert block-submission`,
+# which defaults to it) makes scripts/run-epbs-sim.sh render this file with preset=mainnet.
+# mainnet preset is REQUIRED for the block-submission /beacon_blocks decode path: commit-boost
+# is compiled MainnetEthSpec, so a minimal-preset block (100-byte SyncAggregate vs mainnet's
+# 160) makes CB's SSZ decoder over-read and 400 every reveal (OffsetOutOfBounds). On mainnet
+# the on-wire block sizes match CB and the gloas SignedBeaconBlock decodes (202). Cost:
+# SLOTS_PER_EPOCH=32, so buildoor activates ~slot 128 and the run is ~30-45 min.
 participants:
   - el_type: geth
     el_image: ethpandaops/geth:glamsterdam-devnet-8
@@ -27,6 +37,18 @@ participants:
       - --graffiti=builder-dev
     supernode: true
     keymanager_enabled: true
+    # 64 validators finalize on the minimal preset (8-slot epochs, ~8 validators per
+    # slot committee). NOTE they do NOT finalize on the mainnet preset: this
+    # lodestar gloas image packs only ~1 attestation aggregate per block, which
+    # covers a whole committee on minimal's dense slots but leaves mainnet's 32-slot
+    # epochs short of the 2/3 justification threshold (epoch 0 never justifies).
+    # Bumping to 512 did NOT fix it (same 1-aggregate-per-block, still 0 justified at
+    # epoch 2), so the count stays lean for the fast minimal modes. Consequence:
+    # buildoor (activation needs a FINALIZED eligibility epoch) never activates under
+    # PRESET=mainnet here, so the live --assert block-submission path cannot reach
+    # builder-built slots in this harness. The /beacon_blocks decode fix itself is
+    # verified out-of-band by POSTing a real mainnet-preset gloas SignedBeaconBlock
+    # straight to CB (decodes; minimal-preset block 400s with OffsetOutOfBounds).
     validator_count: 64
 mev_type: buildoor
 buildoor_params:

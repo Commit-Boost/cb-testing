@@ -25,13 +25,18 @@
 #                      assert BOTH our entry and the third-party entry survive
 #                      (a plain apply drops it). Keymanager-only: skips the
 #                      builder-activation wait + observe window.
-#   --assert block-submission  also assert CB's POST /eth/v1/builder/beacon_blocks
-#                      endpoint fired: the proposer reveals each builder-built
-#                      block through CB, which fans it out to buildoor. HARD-fails
-#                      unless >=1 block was accepted ("signed beacon block
-#                      submitted") and there were no 5xx (NoBuilderResponse). The
-#                      benign non-2xx classes (a non-gloas or undecodable body ->
-#                      400) are tolerated and reported; a 500 is CB's fault.
+#   --assert block-submission  also assert CB DECODES the reveal at POST
+#                      /eth/v1/builder/beacon_blocks: the proposer reveals each
+#                      builder-built block through CB, which SSZ-decodes the gloas
+#                      SignedBeaconBlock and fans it out to buildoor. HARD-fails
+#                      unless >=1 reveal got a 2xx AND there were zero 4xx
+#                      (decode over-read / non-gloas body) AND zero 5xx AND zero
+#                      OffsetOutOfBounds in the lodestar log. Defaults to the
+#                      MAINNET preset (PRESET=mainnet): CB is compiled
+#                      MainnetEthSpec, so a minimal-preset block over-reads and
+#                      400s every reveal (OffsetOutOfBounds); mainnet block sizes
+#                      match CB and decode. On mainnet a non-2xx is a real
+#                      regression, so none are tolerated.
 #   --assert builder-down  after buildoor activates and >=1 builder-built slot is
 #                      seen, STOP buildoor and assert the proposer stays live: the
 #                      chain keeps advancing, the new blocks are self-built
@@ -64,6 +69,13 @@ ENCLAVE="${ENCLAVE:-epbs-sim}"
 # or point at a local checkout ($REPO_ROOT/ethereum-package) once it is upgraded.
 EP_PACKAGE="${EP_PACKAGE:-github.com/ethpandaops/ethereum-package}"
 ARGS_FILE="${ARGS_FILE:-configs/epbs/gloas-epbs.yaml}"
+# PRESET override for network_params.preset in the args file (minimal|mainnet).
+# Empty = use the file's value as-is. minimal = fast (8-slot epochs, buildoor
+# activates ~slot 33) and is enough for the p2p/preserve/default modes. mainnet =
+# REQUIRED for --assert block-submission's /beacon_blocks decode (CB is compiled
+# MainnetEthSpec; a minimal-preset block over-reads its decoder and 400s), at the
+# cost of 32-slot epochs (buildoor activates ~slot 128) and a ~30-45 min run.
+PRESET="${PRESET:-}"
 CB_IMAGE="${CB_IMAGE:-commit-boost/commit-boost:km-e2e}"
 CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the templates
 # How commit-boost joins the devnet:
@@ -92,6 +104,22 @@ done
 case "$ASSERT_MODE" in
   ""|p2p|preserve|block-submission|builder-down|request-auth) : ;;
   *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+esac
+
+# block-submission's /beacon_blocks decode only succeeds on the mainnet preset
+# (CB is compiled MainnetEthSpec). Default this mode to mainnet unless the caller
+# picked a preset explicitly.
+if [[ "$ASSERT_MODE" == "block-submission" && -z "$PRESET" ]]; then
+  PRESET=mainnet
+fi
+# mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
+# activation poll room unless the caller already raised it above the default.
+if [[ "$PRESET" == "mainnet" && "$BUILDOOR_ACTIVATION_TIMEOUT" == "1200" ]]; then
+  BUILDOOR_ACTIVATION_TIMEOUT=2400
+fi
+case "$PRESET" in
+  ""|minimal|mainnet) : ;;
+  *) printf 'unknown PRESET: %s (want minimal|mainnet)\n' "$PRESET" >&2; exit 2 ;;
 esac
 
 # builder-down runs a second observe window after stopping buildoor
@@ -216,40 +244,51 @@ print("self="+",".join(map(str,selfb)))
 PY
 }
 
-# --- assert block-submission: CB's POST /eth/v1/builder/beacon_blocks fired -----
-# The proposer reveals every builder-built block by POSTing the SignedBeaconBlock
-# to its builder URL (CB), which fans it out to buildoor (submit_signed_beacon_block).
-# Handler outcomes (crates/pbs/src/routes/submit_signed_beacon_block.rs):
-#   202 -> info "signed beacon block submitted"  (>=1 builder accepted)
-#   4xx -> warn "submit_signed_beacon_block failed" (client fault: a non-gloas
-#          body = NotGloasBlock/400, an undecodable body = DecodeError/400)
-#   5xx -> error "submit_signed_beacon_block failed" (NoBuilderResponse/500 = CB
-#          fault: zero addressed builders accepted the block).
-# PASS: >=1 accepted AND zero 5xx. Benign 4xx are reported, not failed on.
+# --- assert block-submission: CB's POST /eth/v1/builder/beacon_blocks decodes ----
+# The proposer reveals every builder-built (CB-won) block by POSTing the gloas
+# SignedBeaconBlock to its builder URL (CB), which decodes it (SSZ) and fans it out
+# to buildoor. The load-bearing signal is CB's per-request access log, which emits
+# exactly one line per reveal:
+#   "Responded with <code> ... method=/eth/v1/builder/beacon_blocks"
+# (this CB image does NOT log a 'signed beacon block submitted' body line, so the
+# access-log status IS the signal - the old grep for that string always read 0).
+# Class meaning on a gloas reveal:
+#   2xx -> decoded + accepted.
+#   4xx -> CB rejected the body: an SSZ over-read (OffsetOutOfBounds/DecodeError)
+#          or a non-gloas body (NotGloasBlock). This is the exact failure the
+#          preset mismatch caused: CB is compiled MainnetEthSpec, so a
+#          minimal-preset block (100-byte SyncAggregate vs mainnet 160) over-reads
+#          and 400s every reveal. On the mainnet preset the sizes match and it
+#          decodes. The decode over-read surfaces by name in the proposer's
+#          submit-to-builder error body ("... status=400 ... OffsetOutOfBounds"),
+#          which we read from the lodestar (BN) log.
+#   5xx -> CB fault (no builder accepted / NoBuilderResponse).
+# PASS: >=1 2xx AND zero 5xx AND zero 4xx AND zero OffsetOutOfBounds in the BN log.
+# (On a healthy mainnet-preset run every /beacon_blocks reveal is a CB-won gloas
+# block, so a non-2xx here is a real regression, not benign.)
 assert_block_submission() {
-  log "assert block-submission: CB's POST /eth/v1/builder/beacon_blocks endpoint fired"
-  local CB_LOG; CB_LOG="$(cb_logs)"
-  local accepted failed server_err client_err
-  accepted=$(grep -c 'signed beacon block submitted' <<<"$CB_LOG" || true)
-  failed=$(grep -c 'submit_signed_beacon_block failed' <<<"$CB_LOG" || true)
-  # 5xx are logged at error level, 4xx at warn level (see the handler)
-  server_err=$(grep 'submit_signed_beacon_block failed' <<<"$CB_LOG" | grep -c 'no builder accepted' || true)
-  client_err=$(( failed - server_err ))
-  (( client_err < 0 )) && client_err=0
-  echo "  blocks accepted (202, 'signed beacon block submitted'): $accepted"
-  echo "  submissions failed total:                               $failed"
-  echo "    of which 5xx (NoBuilderResponse, CB fault):           $server_err"
-  echo "    of which 4xx (non-gloas / undecodable body, benign):  $client_err"
-  if (( client_err > 0 )); then
-    echo "  sample non-2xx (reported, benign):"
-    grep 'submit_signed_beacon_block failed' <<<"$CB_LOG" | grep -v 'no builder accepted' | tail -3 | sed 's/^/    /'
-  fi
-  if (( accepted >= 1 && server_err == 0 )); then
-    printf '\033[1;32mPASS: beacon_blocks endpoint fired (%s accepted, 0 5xx; %s benign 4xx)\033[0m\n' "$accepted" "$client_err"
+  log "assert block-submission: CB decodes lodestar's gloas SignedBeaconBlock at /beacon_blocks"
+  local CB_LOG BN_LOG bb accepted client_err server_err decode_fail
+  CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"   # strip ANSI so the status parses
+  BN_LOG="$(bn_logs)"
+  bb="$(grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | grep -oE 'Responded with [0-9]{3}')"
+  accepted=$(grep -c 'Responded with 2' <<<"$bb" || true)
+  client_err=$(grep -c 'Responded with 4' <<<"$bb" || true)
+  server_err=$(grep -c 'Responded with 5' <<<"$bb" || true)
+  decode_fail=$(grep -c 'OffsetOutOfBounds' <<<"$BN_LOG" || true)
+  echo "  /beacon_blocks 2xx (decoded + accepted):       $accepted"
+  echo "  /beacon_blocks 4xx (decode/other reject):      $client_err"
+  echo "  /beacon_blocks 5xx (CB fault):                 $server_err"
+  echo "  lodestar OffsetOutOfBounds decode failures:    $decode_fail"
+  if (( accepted >= 1 && server_err == 0 && client_err == 0 && decode_fail == 0 )); then
+    printf '\033[1;32mPASS: /beacon_blocks decoded (%s accepted 2xx, 0 4xx, 0 5xx, 0 OffsetOutOfBounds)\033[0m\n' "$accepted"
     return 0
   fi
-  cb_logs | grep -E 'beacon_blocks|signed beacon block|submit_signed_beacon_block' | tail -30
-  die "block-submission failed (accepted=$accepted need>=1, 5xx=$server_err need=0)"
+  echo "  --- CB /beacon_blocks access lines (tail) ---"
+  grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | tail -10 | sed 's/^/    /'
+  echo "  --- lodestar submit-to-builder failures (tail) ---"
+  grep -iE 'submit signed block to builder|OffsetOutOfBounds' <<<"$BN_LOG" | tail -6 | sed 's/^/    /'
+  die "block-submission failed (accepted=$accepted need>=1, 4xx=$client_err need=0, 5xx=$server_err need=0, OffsetOutOfBounds=$decode_fail need=0)"
 }
 
 # --- assert request-auth: builder loop survives verify_builder_request_auth ------
@@ -404,6 +443,18 @@ echo "CB img:  $CB_IMAGE"
 echo "CB join: $CB_LAUNCH"
 echo "assert:  ${ASSERT_MODE:-default (builder-built)}"
 echo "enclave: $ENCLAVE   observe: ${OBSERVE_SLOTS} slots   pass>=${MIN_BUILDER_SLOTS}"
+
+# PRESET override: render a copy of the args file with network_params.preset
+# swapped, and launch from that. Leaves the committed args file untouched, so the
+# preset is a pure runtime knob (minimal = fast default; mainnet = block-submission).
+if [[ -n "$PRESET" ]]; then
+  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+  sed -E "s/^([[:space:]]*preset:[[:space:]]*).*/\1$PRESET/" "$ARGS_FILE" > "$RENDERED_ARGS"
+  grep -qE "^[[:space:]]*preset:[[:space:]]*$PRESET[[:space:]]*$" "$RENDERED_ARGS" \
+    || die "PRESET render failed: no 'preset:' line to override in $ARGS_FILE"
+  ARGS_FILE="$RENDERED_ARGS"
+  echo "preset:  $PRESET (rendered -> $ARGS_FILE, activation timeout ${BUILDOOR_ACTIVATION_TIMEOUT}s)"
+fi
 
 # clean any stale run (docker-path container is a separate object; the enclave rm
 # clears a service-path CB with the rest of the enclave)

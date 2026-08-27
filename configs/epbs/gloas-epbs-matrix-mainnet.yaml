@@ -1,0 +1,48 @@
+# Cross-client gloas builder-flow matrix, MAINNET preset, for the CLs whose
+# glamsterdam-devnet-8 images are compiled mainnet-preset-only (nimbus, grandine).
+# lodestar is included as a stable anchor so the chain stays healthy and assertoor
+# can still report even if nimbus/grandine misbehave.
+#
+# Same VC -> buildoor DIRECT path as gloas-epbs-matrix.yaml (no commit-boost).
+# NO seconds_per_slot override: on the mainnet preset a custom slot time desyncs
+# buildoor (it reads the legacy SECONDS_PER_SLOT while the CLs honor SLOT_DURATION_MS
+# -- see gloas-epbs-2cl.yaml). Native 12s keeps chain + spec + buildoor consistent.
+#
+# NOTE: at 12s, buildoor activation is finalization-gated (~epoch 4+), so the
+# builder-lifecycle playbook runs much longer than on minimal. If it times out on
+# the activation wait, that is itself the finding (nimbus/grandine boot + follow vs
+# full-lifecycle pass).
+participants_matrix:
+  el:
+    - el_type: geth
+      el_image: ethpandaops/geth:glamsterdam-devnet-8
+  cl:
+    - cl_type: lodestar
+      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8
+    - cl_type: nimbus
+      cl_image: ethpandaops/nimbus-eth2:glamsterdam-devnet-8
+    - cl_type: grandine
+      cl_image: ethpandaops/grandine:glamsterdam-devnet-8
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: mainnet
+  gloas_fork_epoch: 1
+  withdrawal_type: "0x01"
+  deploy_eip8282_contracts: true
+additional_services:
+  - assertoor
+  - dora
+assertoor_params:
+  run_stability_check: false
+  run_block_proposal_check: false
+  tests:
+    - { file: "https://raw.githubusercontent.com/ethpandaops/assertoor/89366be6cb211522249a6d9424adb47631864432/playbooks/gloas-dev/builder-lifecycle.yaml" }
+    - { file: "https://raw.githubusercontent.com/ethpandaops/assertoor/89366be6cb211522249a6d9424adb47631864432/playbooks/gloas-dev/builder-deposit.yaml" }
+global_log_level: debug

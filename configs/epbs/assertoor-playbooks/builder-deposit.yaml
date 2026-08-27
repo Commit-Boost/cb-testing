@@ -1,0 +1,49 @@
+id: builder-deposit
+name: "GLOAS: Builder Deposit (EIP-8282)"
+description: |
+  Minimal deposit test for the GLOAS builder role. Generates a fresh
+  wallet + mnemonic and submits a single builder deposit to the builder
+  deposit system contract (EIP-8282).
+
+  Builder deposits are submitted as raw calldata (no deposit() selector):
+  `pubkey || withdrawal_credentials || amount || signature`, signed under
+  DOMAIN_BUILDER_DEPOSIT. The withdrawal credentials default to 0xB0 +
+  the funding wallet address, so the same wallet can later exit the
+  builder. Awaits both EL receipt and CL inclusion as a builder deposit
+  request.
+version: 1.0.0
+tags: [gloas, builder, deposit, eip-8282]
+timeout: 30m
+config:
+  walletPrivkey: ''
+  # Builder deposit system contract (EIP-8282).
+  builderDepositContract: '0x0000bFF46984e3725691FA540a8C7589300D8282'
+tasks:
+  - name: check_clients_are_healthy
+    title: Check if at least one client is ready
+    timeout: 5m
+    config:
+      minClientCount: 1
+  - name: generate_child_wallet
+    id: test_wallet
+    title: Generate wallet for builder deposit operations
+    config:
+      walletSeed: builder-deposit-test
+      prefundMinBalance: 10000000000000000000
+    configVars:
+      privateKey: walletPrivkey
+  - name: get_random_mnemonic
+    id: test_mnemonic
+    title: Generate random mnemonic for test builder
+  - name: generate_builder_deposits
+    title: Generate builder deposit (EIP-8282)
+    config:
+      limitTotal: 1
+      indexCount: 1
+      depositAmount: 5
+      awaitReceipt: true
+      awaitInclusion: true
+    configVars:
+      walletPrivkey: tasks.test_wallet.outputs.childWallet.privkey
+      mnemonic: tasks.test_mnemonic.outputs.mnemonic
+      builderDepositContract: builderDepositContract
