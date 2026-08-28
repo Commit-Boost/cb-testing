@@ -200,6 +200,26 @@ sweep-gate jobs="2": generate-configs pull-images
 epbs-test cl_image preset="":
     CL_IMAGE={{cl_image}} PRESET={{preset}} ./scripts/run-epbs-sim.sh
 
+# Run the ePBS sim against a single client SCENARIO FILE. Use this for a client that
+# needs more than one image or extra flags (e.g. prysm = a beacon-chain image + a
+# validator image + --enable-builder), which the single-image CL_IMAGE cannot express.
+#   just epbs-test-config configs/epbs/gloas-epbs-prysm.yaml
+#   just epbs-test-config configs/epbs/gloas-epbs-prysm-mainnet.yaml block-submission
+epbs-test-config config mode="":
+    ARGS_FILE={{config}} ./scripts/run-epbs-sim.sh {{ if mode == "" { "" } else { "--assert " + mode } }}
+
+# Run the CB-in-loop ePBS builder-built sim across a MATRIX of consensus clients, one
+# PASS/FAIL row each (the full VC -> commit-boost -> buildoor path). This complements
+# `epbs-matrix` below, which is the assertoor cross-client sweep with NO commit-boost.
+# A client = a scenario file under configs/epbs/ (clients differ in image count +
+# flags, so each carries its own file). A client whose local/* image is not built is
+# SKIPPED, so a fresh clone still runs the ones it has (e.g. lodestar from Docker Hub)
+# and only skips the local-build ones (e.g. prysm).
+#   just epbs-cb-matrix                                # every configs/epbs/gloas-epbs-<client>.yaml
+#   just epbs-cb-matrix "configs/epbs/gloas-epbs-lodestar.yaml configs/epbs/gloas-epbs-prysm.yaml"
+epbs-cb-matrix configs="":
+    ./scripts/run-epbs-cb-matrix.sh {{configs}}
+
 # ePBS (gloas) + commit-boost + keymanager loop (default: local/lodestar:km).
 # Stands up a gloas devnet with buildoor, adds commit-boost as a first-class
 # kurtosis enclave service (the PBS sidecar), runs `cb-km apply`, and asserts

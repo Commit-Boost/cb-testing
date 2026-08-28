@@ -1,0 +1,38 @@
+# ePBS (gloas) devnet against a RELEASED lodestar (turnkey Docker Hub image), for the
+# CB-in-loop matrix (scripts/run-epbs-cb-matrix.sh). Same loop as gloas-epbs.yaml
+# (VC -> keymanager builder_config -> commit-boost -> buildoor) but pinned to a
+# published lodestar so a fresh clone needs no local build - it is pulled, not built.
+# VERIFIED green 2026-08-27 with v1.47.0-rc.0 (17/16 builder-built via CB, minimal).
+# Bump the tag to test a newer lodestar release.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    cl_type: lodestar
+    cl_image: chainsafe/lodestar:v1.47.0-rc.0
+    vc_image: chainsafe/lodestar:v1.47.0-rc.0
+    cl_log_level: debug
+    vc_log_level: debug
+    vc_extra_params:
+      - --graffiti=builder-dev
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

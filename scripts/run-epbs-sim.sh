@@ -250,51 +250,61 @@ print("self="+",".join(map(str,selfb)))
 PY
 }
 
-# --- assert block-submission: CB's POST /eth/v1/builder/beacon_blocks decodes ----
+# --- assert block-submission: CB SSZ-decodes the CL's gloas SignedBeaconBlock ------
 # The proposer reveals every builder-built (CB-won) block by POSTing the gloas
-# SignedBeaconBlock to its builder URL (CB), which decodes it (SSZ) and fans it out
-# to buildoor. The load-bearing signal is CB's per-request access log, which emits
-# exactly one line per reveal:
-#   "Responded with <code> ... method=/eth/v1/builder/beacon_blocks"
-# (this CB image does NOT log a 'signed beacon block submitted' body line, so the
-# access-log status IS the signal - the old grep for that string always read 0).
-# Class meaning on a gloas reveal:
-#   2xx -> decoded + accepted.
-#   4xx -> CB rejected the body: an SSZ over-read (OffsetOutOfBounds/DecodeError)
-#          or a non-gloas body (NotGloasBlock). This is the exact failure the
-#          preset mismatch caused: CB is compiled MainnetEthSpec, so a
-#          minimal-preset block (100-byte SyncAggregate vs mainnet 160) over-reads
-#          and 400s every reveal. On the mainnet preset the sizes match and it
-#          decodes. The decode over-read surfaces by name in the proposer's
-#          submit-to-builder error body ("... status=400 ... OffsetOutOfBounds"),
-#          which we read from the lodestar (BN) log.
-#   5xx -> CB fault (no builder accepted / NoBuilderResponse).
-# PASS: >=1 2xx AND zero 5xx AND zero 4xx AND zero OffsetOutOfBounds in the BN log.
-# (On a healthy mainnet-preset run every /beacon_blocks reveal is a CB-won gloas
-# block, so a non-2xx here is a real regression, not benign.)
+# SignedBeaconBlock to its builder URL (CB) at POST /eth/v1/builder/beacon_blocks.
+# block-submission mode enables strict_block_decode, so CB parses the SSZ body ITSELF
+# (default OFF = blind pipe, forwards the bytes unparsed) before fanning it out.
+#
+# Decode runs BEFORE the fan-out, and the two stages map onto CB's status cleanly:
+#   4xx -> decode/request REJECT: an SSZ over-read (OffsetOutOfBounds/DecodeError) or
+#          a non-gloas body (NotGloasBlock -> 400). This is the preset-mismatch
+#          failure: CB is compiled MainnetEthSpec, so a minimal-preset block
+#          over-reads and 400s every reveal; on the mainnet preset the sizes match
+#          and it decodes (hence block-submission defaults PRESET=mainnet).
+#   5xx -> decode SUCCEEDED, then no builder accepted the HTTP forward
+#          (NoBuilderResponse -> 500). EXPECTED with buildoor, which reveals over p2p
+#          and does not implement the /beacon_blocks forward; the decode still ran.
+#   2xx -> decoded AND a builder accepted the forward (a relay that implements it).
+# So "CB decoded" == it reached the fan-out == a 2xx or a 5xx, corroborated by CB's
+# post-decode access line ("new request ... strict=true slot=Some(N)"), logged only
+# once the SSZ body parsed. A blind-pipe run also reaches the fan-out WITHOUT
+# decoding, so the PASS additionally requires strict_block_decode = true in the
+# rendered config - otherwise a forward would not prove a decode.
+# PASS: strict on AND >=1 block reached the fan-out AND zero 4xx AND zero
+# OffsetOutOfBounds. Forward 5xx are reported, not failed (buildoor never HTTP-ACKs).
 assert_block_submission() {
-  log "assert block-submission: CB decodes lodestar's gloas SignedBeaconBlock at /beacon_blocks"
-  local CB_LOG BN_LOG bb accepted client_err server_err decode_fail
+  log "assert block-submission: CB SSZ-decodes the CL's gloas SignedBeaconBlock at /beacon_blocks (strict_block_decode)"
+  local CB_LOG BN_LOG bb fwd_2xx decode_fail no_builder offset decoded_log reached strict_on
+  strict_on=$(grep -c '^strict_block_decode = true$' "$RUN_DIR/cb-config.toml" || true)
   CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"   # strip ANSI so the status parses
   BN_LOG="$(bn_logs)"
   bb="$(grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | grep -oE 'Responded with [0-9]{3}')"
-  accepted=$(grep -c 'Responded with 2' <<<"$bb" || true)
-  client_err=$(grep -c 'Responded with 4' <<<"$bb" || true)
-  server_err=$(grep -c 'Responded with 5' <<<"$bb" || true)
-  decode_fail=$(grep -c 'OffsetOutOfBounds' <<<"$BN_LOG" || true)
-  echo "  /beacon_blocks 2xx (decoded + accepted):       $accepted"
-  echo "  /beacon_blocks 4xx (decode/other reject):      $client_err"
-  echo "  /beacon_blocks 5xx (CB fault):                 $server_err"
-  echo "  lodestar OffsetOutOfBounds decode failures:    $decode_fail"
-  if (( accepted >= 1 && server_err == 0 && client_err == 0 && decode_fail == 0 )); then
-    printf '\033[1;32mPASS: /beacon_blocks decoded (%s accepted 2xx, 0 4xx, 0 5xx, 0 OffsetOutOfBounds)\033[0m\n' "$accepted"
+  fwd_2xx=$(grep -c 'Responded with 2' <<<"$bb" || true)
+  decode_fail=$(grep -c 'Responded with 4' <<<"$bb" || true)
+  no_builder=$(grep -c 'Responded with 5' <<<"$bb" || true)
+  # decode is BEFORE the fan-out, so a forward (2xx or 5xx NoBuilderResponse) proves
+  # the SSZ body parsed - PROVIDED strict is on (a blind pipe forwards unparsed).
+  reached=$(( fwd_2xx + no_builder ))
+  # corroboration: the post-decode access line, emitted only after the body parsed
+  decoded_log=$(grep 'new request' <<<"$CB_LOG" | grep -c 'slot=Some(' || true)
+  offset=$(grep -cE 'OffsetOutOfBounds' <<<"$CB_LOG"$'\n'"$BN_LOG" || true)
+  echo "  strict_block_decode enabled:                    $strict_on (need 1)"
+  echo "  reached fan-out = decoded (2xx+5xx):            $reached"
+  echo "  corroborating 'slot=Some' decode log lines:     $decoded_log"
+  echo "  /beacon_blocks 2xx (decoded + forwarded):       $fwd_2xx"
+  echo "  /beacon_blocks 5xx (decoded, buildoor p2p - ok):$no_builder"
+  echo "  /beacon_blocks 4xx (decode/request REJECT):     $decode_fail"
+  echo "  OffsetOutOfBounds decode failures (CB+CL):      $offset"
+  if (( strict_on >= 1 && reached >= 1 && decode_fail == 0 && offset == 0 )); then
+    printf '\033[1;32mPASS: CB decoded %s gloas SignedBeaconBlock(s) (0 4xx, 0 OffsetOutOfBounds; %s forward 5xx = buildoor p2p, expected)\033[0m\n' "$reached" "$no_builder"
     return 0
   fi
   echo "  --- CB /beacon_blocks access lines (tail) ---"
   grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | tail -10 | sed 's/^/    /'
-  echo "  --- lodestar submit-to-builder failures (tail) ---"
-  grep -iE 'submit signed block to builder|OffsetOutOfBounds' <<<"$BN_LOG" | tail -6 | sed 's/^/    /'
-  die "block-submission failed (accepted=$accepted need>=1, 4xx=$client_err need=0, 5xx=$server_err need=0, OffsetOutOfBounds=$decode_fail need=0)"
+  echo "  --- CL submit-to-builder failures (tail) ---"
+  grep -iE 'submit signed block to builder|OffsetOutOfBounds|status=4' <<<"$BN_LOG" | tail -6 | sed 's/^/    /'
+  die "block-submission failed (strict=$strict_on need1, decoded=$reached need>=1, 4xx=$decode_fail need0, OffsetOutOfBounds=$offset need0)"
 }
 
 # --- assert request-auth: builder loop survives verify_builder_request_auth ------
@@ -552,6 +562,19 @@ if [[ "$ASSERT_MODE" == "request-auth" ]]; then
   grep -q '^verify_builder_request_auth = true$' "$RUN_DIR/cb-config.toml" \
     || die "request-auth: failed to enable verify_builder_request_auth in cb-config.toml"
   echo "request-auth: verify_builder_request_auth = true"
+fi
+
+# block-submission mode: turn ON strict_block_decode so CB SSZ-decodes the revealed
+# gloas SignedBeaconBlock ITSELF (default OFF = blind pipe: it forwards the body
+# unparsed and block validity is the builder's job). This is the code path under
+# test; without it the decode never runs. The decode happens BEFORE the fan-out to
+# builders, so it is exercised even though buildoor rejects the HTTP forward (it
+# reveals the payload over p2p, not via /beacon_blocks).
+if [[ "$ASSERT_MODE" == "block-submission" ]]; then
+  sed -i 's|^skip_sigverify = true$|skip_sigverify = true\nstrict_block_decode = true|' "$RUN_DIR/cb-config.toml"
+  grep -q '^strict_block_decode = true$' "$RUN_DIR/cb-config.toml" \
+    || die "block-submission: failed to enable strict_block_decode in cb-config.toml"
+  echo "block-submission: strict_block_decode = true"
 fi
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------

@@ -31,8 +31,30 @@ commit), then stands up the devnet. Needs `just` + Rust + Docker + Kurtosis.
 **Expected PASS:** `PASS: N/16 observed slots builder-built via commit-boost (buildoor)`,
 exit 0. On chain, each builder-built block carries `signed_execution_payload_bid.message.value != 0`.
 
-**Confirmed working:** `chainsafe/lodestar:v1.47.0-rc.0` (2026-08) - full VC → CB → buildoor
-flow, payloads revealed and canonical on chain.
+**Confirmed working (2026-08):**
+- `chainsafe/lodestar:v1.47.0-rc.0` - full VC → CB → buildoor flow, canonical on chain.
+- prysm (OffchainLabs/prysm#17397, `builder-rest-vc`) - 17/16 builder-built; also the
+  first client to pass `--assert block-submission` on the LIVE sim (see below).
+
+**A client that is not a single image** (prysm ships a separate beacon-chain image and
+validator image, and needs `--enable-builder`) cannot go through `just epbs-test`'s single
+`CL_IMAGE`. Give it a scenario file under `configs/epbs/` and run that:
+
+```bash
+just epbs-test-config configs/epbs/gloas-epbs-prysm.yaml         # one client, one file
+```
+
+**Run the whole matrix** — the CB-in-loop sim across every single-client scenario, one
+PASS/FAIL/SKIP row each. A client whose image is a local build that is not present is
+SKIPPED (not failed), so a fresh clone still runs the ones it can pull (lodestar) and only
+skips the ones needing a local build (prysm):
+
+```bash
+just epbs-cb-matrix                                              # all configs/epbs/gloas-epbs-<client>.yaml
+```
+
+(This is distinct from `just epbs-matrix`, the assertoor cross-client sweep with NO
+commit-boost in the loop.)
 
 ### Gotchas when a CL "doesn't work"
 
@@ -44,10 +66,12 @@ flow, payloads revealed and canonical on chain.
 - **`--builder.selection` defaults to `executiononly`** (always self-build) on lodestar and likely
   others. The keymanager builder_config sets `maxprofit` per key, so the sim is fine, but a bare CL run
   with a builder configured self-builds until selection is set.
-- **CB `/eth/v1/builder/beacon_blocks` reveal 500s are EXPECTED with buildoor.** buildoor reveals the
-  execution payload over P2P (native gloas transport) and does not implement CB's reveal endpoint; the
-  block is still canonical and the default assertion counts it. Only `--assert block-submission`
-  exercises the CB reveal path, and it needs a builder that speaks that endpoint.
+- **CB `/eth/v1/builder/beacon_blocks` reveal 500s are EXPECTED with buildoor.** The proposer POSTs its
+  signed gloas block to CB, which fans it out to the builders; buildoor reveals the execution payload
+  over P2P (native gloas transport) and does not HTTP-accept the forward, so CB returns 500
+  (`NoBuilderResponse`). The block is still canonical and the default assertion counts it. This 500 is a
+  *forward* outcome, not a decode failure - see `--assert block-submission` below, which turns on CB's
+  `strict_block_decode` and asserts the SSZ decode (which runs *before* the forward) succeeded.
 - **`min_bid` / `builder_boost_factor` are NOT the CB-vs-local levers.** A bid rejected for a stale-cb-km
   pubkey mismatch looks identical to "lost on value" - check bid *acceptance* in the beacon-node log
   first. Per-entry `min_bid` empty means accept-any; the top-level `min_bid` is the p2p floor only.
@@ -180,8 +204,8 @@ request out to buildoor.
 ## Assertion modes
 
 The default run asserts the builder loop end to end (builder-built blocks via CB).
-Two opt-in modes (`--assert <mode>`, or `just epbs-sim-assert <mode>`) turn a
-merged keymanager feature into a live regression check:
+Opt-in modes (`--assert <mode>`, or `just epbs-sim-assert <mode>`) turn a merged
+feature into a live regression check:
 
 - **`p2p`**: the `min_bid` p2p floor. cb-km projects `min_bid_p2p_eth = "0.2"`
   into a key-level `min_bid` of 200000000 Gwei, above buildoor's p2p bid, while
@@ -201,6 +225,22 @@ merged keymanager feature into a live regression check:
 - **`preserve`**: `cb-km apply --preserve-entries` keeps a third-party
   `builder_config` entry that a plain apply drops. Keymanager-API only; skips the
   builder loop.
+- **`block-submission`**: CB SSZ-decodes the revealed gloas `SignedBeaconBlock` at
+  `POST /eth/v1/builder/beacon_blocks`. The mode turns on CB's `strict_block_decode`
+  (default OFF = blind pipe, forwards the body unparsed), so CB parses the SSZ body
+  itself. Decode runs *before* the fan-out, so the status codes split cleanly:
+  **4xx = decode failed** (an SSZ over-read / `OffsetOutOfBounds`, or `NotGloasBlock`);
+  **5xx = decoded, then no builder HTTP-accepted the forward** (`NoBuilderResponse`,
+  EXPECTED with buildoor, which reveals over p2p); **2xx = decoded + forwarded**. PASS
+  requires `strict_block_decode` on, ≥1 block past the decode, and zero decode-4xx /
+  `OffsetOutOfBounds` (forward 5xx are reported, not failed). Defaults `PRESET=mainnet`
+  because CB is compiled `MainnetEthSpec` - a minimal-preset block over-reads and 400s.
+  **The block must also come from a client that finalizes on mainnet** so buildoor
+  activates and the proposer reaches builder-built (reveal-worthy) slots: prysm does
+  (verified, 17 blocks decoded, 0 4xx); the lodestar harness image does not
+  (`gloas-epbs.yaml` comment), so for lodestar the decode is verified out-of-band.
+- Also: **`builder-down`** (buildoor stop never stalls the proposer) and
+  **`request-auth`** (`verify_builder_request_auth` ON, zero `AuthSigVerify`).
 
 ## Known caveats
 
