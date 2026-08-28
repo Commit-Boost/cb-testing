@@ -204,8 +204,8 @@ This is the same defect class the harness keeps finding in itself: a check that 
 **A stale `cb-km` binary (or `km-e2e` image) silently projects the WRONG config.** `cb-km` builds the
 keymanager `builder_config` docs; a binary from before a km-tool fix keeps the old projection - e.g.
 populating `builder_pubkeys` from the relay URL, which a spec-conformant CL then rejects as un-allowlisted, so
-every builder bid is dropped and the proposer self-builds. It presents as "the CL is broken", not "my tool is
-stale", and cost a full session to trace. Both ePBS CB artifacts are now sha-tagged to the pinned
+every builder bid is dropped and the proposer self-builds. It presents as a broken CL, not a stale tool, which
+is exactly what makes it hard to diagnose. Both ePBS CB artifacts are now sha-tagged to the pinned
 `commit-boost-client` submodule (`scripts/ensure-cb-artifacts.sh`), so `just epbs-test` cannot run a stale one.
 If you ever build `cb-km` by hand, rebuild it from the CURRENT submodule and confirm its `--dry-run` emits
 `"builder_pubkeys":[]` - not a pubkey lifted from a relay URL.
