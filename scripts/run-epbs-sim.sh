@@ -156,7 +156,7 @@ cb_logs() {
 # for the same reason as cb_logs: the rejection line lives in the full history,
 # not the 200-line tail (the tail hiding it was the sole cause of the earlier
 # "floor unexercised" flake).
-bn_logs() { kurtosis service logs -a "$ENCLAVE" cl-1-lodestar-geth 2>&1 || true; }
+bn_logs() { kurtosis service logs -a "$ENCLAVE" "$BN_SVC" 2>&1 || true; }
 
 # ---- keymanager helpers (used out-of-enclave, exactly like cb-km) -----------
 # Authenticated GET/POST of a validator's builder_config, against the same
@@ -494,9 +494,14 @@ log "launching gloas devnet ($ARGS_FILE)"
 kurtosis run "$EP_PACKAGE" --enclave "$ENCLAVE" --args-file "$ARGS_FILE" --image-download always
 
 NET="kt-${ENCLAVE}"
-BN="$(kurtosis port print "$ENCLAVE" cl-1-lodestar-geth http)"
-VC_KM="$(kurtosis port print "$ENCLAVE" vc-1-geth-lodestar http-validator)"
-[[ -n "$BN" && -n "$VC_KM" ]] || die "could not discover BN / VC keymanager ports"
+# Discover the CL/VC service names (client-agnostic: cl-1-<cl>-<el>, vc-1-<el>-<cl>),
+# so the loop works for lodestar, prysm, etc. without hardcoding the client.
+BN_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'cl-1-[a-z0-9-]+' | head -1)"
+VC_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'vc-1-[a-z0-9-]+' | head -1)"
+[[ -n "$BN_SVC" && -n "$VC_SVC" ]] || die "could not discover cl-1-* / vc-1-* services in $ENCLAVE"
+BN="$(kurtosis port print "$ENCLAVE" "$BN_SVC" http)"
+VC_KM="$(kurtosis port print "$ENCLAVE" "$VC_SVC" http-validator)"
+[[ -n "$BN" && -n "$VC_KM" ]] || die "could not discover BN / VC keymanager ports ($BN_SVC / $VC_SVC)"
 echo "BN=$BN  VC-km=$VC_KM  net=$NET"
 
 # ---- 2. wait for the beacon node + gloas activation -------------------------
