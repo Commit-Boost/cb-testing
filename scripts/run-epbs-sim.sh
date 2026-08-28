@@ -76,7 +76,13 @@ ARGS_FILE="${ARGS_FILE:-configs/epbs/gloas-epbs.yaml}"
 # MainnetEthSpec; a minimal-preset block over-reads its decoder and 400s), at the
 # cost of 32-slot epochs (buildoor activates ~slot 128) and a ~30-45 min run.
 PRESET="${PRESET:-}"
-CB_IMAGE="${CB_IMAGE:-commit-boost/commit-boost:km-e2e}"
+# Empty = provision from the pinned commit-boost-client submodule (sha-tagged,
+# never stale; see scripts/ensure-cb-artifacts.sh). Set explicitly to pin a
+# different CB image.
+CB_IMAGE="${CB_IMAGE:-}"
+# Swap the CL/VC image to test a specific consensus client build against the sim
+# (e.g. CL_IMAGE=chainsafe/lodestar:v1.47.0-rc.0). Empty = use the args file's.
+CL_IMAGE="${CL_IMAGE:-}"
 CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the templates
 # How commit-boost joins the devnet:
 #   service (default) = a first-class kurtosis enclave service (proper enclave DNS,
@@ -421,6 +427,17 @@ case "$EP_PACKAGE" in
   github.com/*|http*) : ;;                                  # remote ref: kurtosis fetches it
   *) [[ -d "$EP_PACKAGE" ]] || die "ethereum-package path $EP_PACKAGE missing" ;;
 esac
+# Provision the ePBS CB artifacts (image + cb-km) from the pinned submodule,
+# sha-tagged so a stale build can never be silently used. Skipped when the caller
+# pins CB_IMAGE explicitly (advanced path; CB_KM_BIN then falls back to discovery).
+if [[ -z "$CB_IMAGE" ]]; then
+  # Capture stdout (the two eval-able lines); the script streams build output to
+  # stderr live. Hard-fail on a build error rather than silently continuing with
+  # an empty CB_IMAGE (the "silence == success" trap).
+  cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh")" \
+    || die "provisioning CB artifacts from the submodule failed (see build output above)"
+  eval "$cb_art"   # sets CB_IMAGE + CB_KM_BIN
+fi
 docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not present locally"
 
 if [[ -z "$CB_KM_BIN" ]]; then
@@ -454,6 +471,17 @@ if [[ -n "$PRESET" ]]; then
     || die "PRESET render failed: no 'preset:' line to override in $ARGS_FILE"
   ARGS_FILE="$RENDERED_ARGS"
   echo "preset:  $PRESET (rendered -> $ARGS_FILE, activation timeout ${BUILDOOR_ACTIVATION_TIMEOUT}s)"
+fi
+
+# CL_IMAGE override: swap cl_image + vc_image to test a specific CL build. Same
+# render-a-copy pattern as PRESET, so the committed args file stays untouched.
+if [[ -n "$CL_IMAGE" ]]; then
+  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+  sed -E "s#^([[:space:]]*(cl_image|vc_image):[[:space:]]*).*#\1$CL_IMAGE#" "$ARGS_FILE" > "$RENDERED_ARGS"
+  grep -qE "^[[:space:]]*cl_image:[[:space:]]*$(printf '%s' "$CL_IMAGE" | sed 's/[.[\*^$]/\\&/g')[[:space:]]*$" "$RENDERED_ARGS" \
+    || die "CL_IMAGE render failed: no 'cl_image:' line to override in $ARGS_FILE"
+  ARGS_FILE="$RENDERED_ARGS"
+  echo "cl/vc:   $CL_IMAGE (rendered -> $ARGS_FILE)"
 fi
 
 # clean any stale run (docker-path container is a separate object; the enclave rm

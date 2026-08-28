@@ -24,6 +24,10 @@ Rust workspace (one lib, three bins):
 - **docs/DEVELOPING.md** - the dev loop + how to add a check / a scenario.
 - **docs/fork-delta.md** - what our `ethereum-package` fork changes vs upstream, file by file.
 - **docs/local-kurtosis-e2e.md** - the operational runbook + the paid-for incidents behind half the design.
+- **docs/EPBS.md** - the **ePBS (gloas) sim**: `just epbs-test <cl-image>` stands up a gloas devnet with
+  buildoor + commit-boost and asserts builder-built blocks flow VC -> CB -> buildoor end to end. Read this to
+  test a CL's gloas builder API (see its "Testing a CL" section), or before touching `scripts/run-epbs-sim.sh`
+  or `configs/epbs/`. The CB artifacts (image + `cb-km`) auto-build from the pinned submodule, sha-tagged.
 - **README.md** - user-facing quick start (user-facing quick start).
 
 Internal back-room (agent working material, not part of the public docs surface):
@@ -196,6 +200,15 @@ cargo fmt --check >/dev/null 2>&1; echo "FMT_EXIT=$?"
 ```
 This is the same defect class the harness keeps finding in itself: a check that cannot distinguish
 "no signal" from "bad signal". Apply it to devnet runs too - an empty log tail is not a passing run.
+
+**A stale `cb-km` binary (or `km-e2e` image) silently projects the WRONG config.** `cb-km` builds the
+keymanager `builder_config` docs; a binary from before a km-tool fix keeps the old projection - e.g.
+populating `builder_pubkeys` from the relay URL, which a spec-conformant CL then rejects as un-allowlisted, so
+every builder bid is dropped and the proposer self-builds. It presents as "the CL is broken", not "my tool is
+stale", and cost a full session to trace. Both ePBS CB artifacts are now sha-tagged to the pinned
+`commit-boost-client` submodule (`scripts/ensure-cb-artifacts.sh`), so `just epbs-test` cannot run a stale one.
+If you ever build `cb-km` by hand, rebuild it from the CURRENT submodule and confirm its `--dry-run` emits
+`"builder_pubkeys":[]` - not a pubkey lifted from a relay URL.
 
 - **CB's synthetic status codes 555 and 556 are NOT relay-served.** 555 = `TIMEOUT_ERROR_CODE`, CB's own
   client-side deadline cancellation; 556 = WS transport error. They bucket separately (`timeout`,

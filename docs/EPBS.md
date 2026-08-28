@@ -6,11 +6,51 @@ bid loop end to end. This is the regression fixture for the gloas + commit-boost
 keymanager work.
 
 ```
-just epbs-sim          # or: ./scripts/run-epbs-sim.sh
+just epbs-test <cl-image>   # test a CL build (see "Testing a CL")
+just epbs-sim               # default local/lodestar:km run
 ```
 
 Prints a clear `PASS: N/N observed slots builder-built via commit-boost (buildoor)`
 and exits non-zero on failure. One devnet at a time (~15G RAM).
+
+## Testing a CL against the sim
+
+Test a consensus client's gloas builder API end to end, no manual commit-boost build:
+
+```bash
+git clone --recurse-submodules https://github.com/Commit-Boost/cb-testing
+cd cb-testing && git submodule update --init --recursive
+just epbs-test chainsafe/lodestar:v1.47.0-rc.0        # or your own cl image
+just epbs-test chainsafe/lodestar:v1.47.0-rc.0 mainnet  # mainnet preset
+```
+
+First run builds the CB sidecar image + `cb-km` from the pinned `commit-boost-client`
+submodule (sha-tagged, `scripts/ensure-cb-artifacts.sh`; ~a few min, once per submodule
+commit), then stands up the devnet. Needs `just` + Rust + Docker + Kurtosis.
+
+**Expected PASS:** `PASS: N/16 observed slots builder-built via commit-boost (buildoor)`,
+exit 0. On chain, each builder-built block carries `signed_execution_payload_bid.message.value != 0`.
+
+**Confirmed working:** `chainsafe/lodestar:v1.47.0-rc.0` (2026-08) - full VC → CB → buildoor
+flow, payloads revealed and canonical on chain.
+
+### Gotchas when a CL "doesn't work"
+
+- **Stale `cb-km` is THE trap** (also in AGENTS.md Known traps). An old `cb-km` populates
+  `builder_pubkeys` from the relay URL; a conformant CL rejects the bid as un-allowlisted, so every
+  builder bid drops and the proposer silently self-builds - it looks like the CL is broken. `just
+  epbs-test` sha-pins the binary so this cannot happen; a hand-built `cb-km` must emit
+  `"builder_pubkeys":[]` on `--dry-run`.
+- **`--builder.selection` defaults to `executiononly`** (always self-build) on lodestar and likely
+  others. The keymanager builder_config sets `maxprofit` per key, so the sim is fine, but a bare CL run
+  with a builder configured self-builds until selection is set.
+- **CB `/eth/v1/builder/beacon_blocks` reveal 500s are EXPECTED with buildoor.** buildoor reveals the
+  execution payload over P2P (native gloas transport) and does not implement CB's reveal endpoint; the
+  block is still canonical and the default assertion counts it. Only `--assert block-submission`
+  exercises the CB reveal path, and it needs a builder that speaks that endpoint.
+- **`min_bid` / `builder_boost_factor` are NOT the CB-vs-local levers.** A bid rejected for a stale-cb-km
+  pubkey mismatch looks identical to "lost on value" - check bid *acceptance* in the beacon-node log
+  first. Per-entry `min_bid` empty means accept-any; the top-level `min_bid` is the p2p floor only.
 
 ## What it runs
 
@@ -68,13 +108,14 @@ and exits non-zero on failure. One devnet at a time (~15G RAM).
 | `CB_KM_BIN` | auto | path to the `cb-km` binary |
 | `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package` | ethereum-package to launch |
 
-### Prerequisites (local images / binary)
+### Prerequisites (auto-provisioned)
 
-- `local/lodestar:km` - ChainSafe nflaig builder-api gloas image (gloas builder
-  API + keymanager `builder_config`).
-- `commit-boost/commit-boost:km-e2e` - CB with the ePBS bid pipe + km-tool (branch `epbs`).
-- `cb-km` - the mux → keymanager projector (`cargo build -p cb-km-tool --release`;
-  the script auto-discovers it on `PATH` or a known worktree, else set `CB_KM_BIN`).
+- **CB sidecar image + `cb-km`** - built from the pinned `commit-boost-client` submodule on first run and
+  sha-tagged (`commit-boost/commit-boost:km-e2e-<sha>`) by `scripts/ensure-cb-artifacts.sh`. `just epbs-test`
+  / `just epbs-sim` do this automatically; nothing to build by hand. Pin a different build with `CB_IMAGE`
+  (and then `CB_KM_BIN`) if you need to. Sha-tagging is the guard against the stale-`cb-km` trap.
+- **CL image** - `local/lodestar:km` by default (ChainSafe nflaig builder-api gloas image); pass your own via
+  `just epbs-test <cl-image>` or `CL_IMAGE=`. A released lodestar works: `chainsafe/lodestar:v1.47.0-rc.0`.
 
 ## How the keymanager calls happen (it's not kurtosis)
 

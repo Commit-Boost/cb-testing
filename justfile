@@ -190,13 +190,23 @@ sweep-gate jobs="2": generate-configs pull-images
         configs/generated/cb-config-surface.yml \
         configs/generated/cb-min-bid.yml
 
-# ePBS (gloas) + commit-boost + keymanager loop.
+# Test a consensus-client build against the ePBS (gloas) sim, end to end.
+# The commit-boost artifacts (km-e2e image + cb-km) are built from the pinned
+# commit-boost-client submodule on first run (~a few min once per submodule
+# commit; see scripts/ensure-cb-artifacts.sh), so this needs no prebuilt CB image.
+#   just epbs-test chainsafe/lodestar:v1.47.0-rc.0            # minimal preset (fast)
+#   just epbs-test chainsafe/lodestar:v1.47.0-rc.0 mainnet    # mainnet preset
+# PASS = builder-built blocks on chain via CB (see docs/EPBS.md "Testing a CL").
+epbs-test cl_image preset="":
+    CL_IMAGE={{cl_image}} PRESET={{preset}} ./scripts/run-epbs-sim.sh
+
+# ePBS (gloas) + commit-boost + keymanager loop (default: local/lodestar:km).
 # Stands up a gloas devnet with buildoor, adds commit-boost as a first-class
 # kurtosis enclave service (the PBS sidecar), runs `cb-km apply`, and asserts
 # builder-built blocks flow VC -> CB -> buildoor. One devnet at a time (~15G).
 # See docs/EPBS.md (incl. the native-mev_type / submodule-upgrade blockers). Env
-# knobs: CB_LAUNCH (service|docker), OBSERVE_SLOTS, KEEP=1, CB_KM_BIN, CB_IMAGE.
-# PREREQ: local/lodestar:km + the CB km-e2e image + cb-km binary.
+# knobs: CB_LAUNCH (service|docker), OBSERVE_SLOTS, KEEP=1, CB_KM_BIN, CB_IMAGE, CL_IMAGE.
+# CB image + cb-km are auto-provisioned from the pinned submodule; PREREQ: local/lodestar:km.
 epbs-sim:
     ./scripts/run-epbs-sim.sh
 
