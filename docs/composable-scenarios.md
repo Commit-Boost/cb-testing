@@ -140,7 +140,7 @@ echo 'HELIX_RELAY_IMAGE=local/helix-relay:kurtosis' >> .env
 just e2e configs/generated/cb-ws-stream.yml     # or any composed ws scenario
 ```
 
-The ws curated point (`cb-ws-prysm`) and the named `cb-ws-stream` / `cb-ws-stream-nokey` scenarios are only
+The ws curated point (`cb-ws-prysm`) and the named `cb-ws-stream` / `cb-ws-stream-nokey` / `cb-ws-stream-filekey` scenarios are only
 reproducible against a submodule-built helix; against the current public `:main` they degrade to HTTP fallback.
 This is a mutable-tag skew trap: pinning `:main` while also vendoring the source meant an upstream rebuild could
 silently disable a feature under test. The durable fix is to build helix from the submodule for ws (above); a

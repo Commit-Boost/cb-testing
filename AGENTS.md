@@ -91,7 +91,7 @@ Against an already-running enclave (no observation window): `just verify-now <en
 `cb-min-bid`, `cb-signer`, `cb-skip-sigverify`, `cb-sigverify-diff` + `cb-sigverify-diff-control` (a real
 ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-config-surface` (several `[pbs]`
 config knobs at once — registration batch/timeout/retry, relay-check), `cb-ws-stream` +
-`cb-ws-stream-nokey` (the ws stream + its negative control), `cb-mux` (256 validators split across two
+`cb-ws-stream-nokey` (the ws stream + its negative control), `cb-ws-stream-filekey` (the ws api key delivered as a secret file via `commit_boost_extra_files`, read by CB with `{ file = ... }`), `cb-mux` (256 validators split across two
 relays). The MEV-delivery gate is `just sweep-gate` (the green subset; `--target-epoch 1
 --skip-finalization` for a fast window — a `--min-epochs 0` window collapses to one slot and measures
 delivery over a single slot, which passes/fails by luck).

@@ -141,6 +141,9 @@ pub enum Scenario {
     /// criteria discriminate. Expected to FAIL under --require-feature-proof; not
     /// part of the green sweep.
     WsStreamNoKey,
+    /// The ws api key delivered as a secret file (`{ file = ... }`) instead of
+    /// inline in the CB config; see the scenario comment.
+    WsStreamFileKey,
     Mux,
     /// Config-surface coverage: sets several `[pbs]` knobs at once (registration
     /// batching, register timeout/retry, relay health-check) that no other
@@ -163,7 +166,7 @@ const CONFIG_SURFACE_PBS: [&str; 4] = [
 impl Scenario {
     /// All six scenarios, in the Python emission order (the `scenarios` dict at
     /// `generate_kurtosis_configs.py:562`: timing-games precedes extra-validation).
-    pub const ALL: [Scenario; 14] = [
+    pub const ALL: [Scenario; 15] = [
         Scenario::Basic,
         Scenario::BasicAltClients,
         Scenario::MultipleRelays,
@@ -176,6 +179,7 @@ impl Scenario {
         Scenario::ExtraValidation,
         Scenario::WsStream,
         Scenario::WsStreamNoKey,
+        Scenario::WsStreamFileKey,
         Scenario::Mux,
         Scenario::ConfigSurface,
     ];
@@ -195,6 +199,7 @@ impl Scenario {
             Scenario::TimingGames => "cb-timing-games",
             Scenario::WsStream => "cb-ws-stream",
             Scenario::WsStreamNoKey => "cb-ws-stream-nokey",
+            Scenario::WsStreamFileKey => "cb-ws-stream-filekey",
             Scenario::Mux => "cb-mux",
             Scenario::ConfigSurface => "cb-config-surface",
         }
@@ -281,6 +286,12 @@ impl Scenario {
                 },
                 ..base
             },
+            Scenario::WsStreamFileKey => ScenarioSpec {
+                get_header: HeaderTransport::Stream {
+                    api_key: KeyPresence::File,
+                },
+                ..base
+            },
             Scenario::ConfigSurface => ScenarioSpec {
                 extra_pbs: CONFIG_SURFACE_PBS.iter().map(|s| s.to_string()).collect(),
                 ..base
@@ -317,6 +328,19 @@ impl Scenario {
                  # every MEV check green when the stream is broken, so\n\
                  # feature.ws_header_stream (proof markers) is the real assertion - run\n\
                  # under --require-feature-proof."
+            }
+            Scenario::WsStreamFileKey => {
+                "# cb-ws-stream-filekey: the ws api key delivered as a SECRET FILE.\n\
+                 #\n\
+                 # Same stream as cb-ws-stream, but the CB config carries no key: it\n\
+                 # reads `X-Api-Key` from /config/relay-api-key, a file the\n\
+                 # ethereum-package renders into the config artifact from\n\
+                 # `commit_boost_extra_files`. Proof is two-sided: CB logs\n\
+                 # `relay headers loaded from secret sources` (feature.relay_header_file)\n\
+                 # and, only with a helix built to log the received key, the relay's\n\
+                 # `accepting header stream` line carries the file's value\n\
+                 # (feature.relay_saw_api_key, tier 2: inconclusive on the public image).\n\
+                 # Run under --require-feature-proof."
             }
             Scenario::WsStreamNoKey => {
                 "# cb-ws-stream-nokey: NEGATIVE CONTROL for the ws criteria.\n\
@@ -437,6 +461,7 @@ impl Scenario {
             | Scenario::ExtraValidation
             | Scenario::WsStream
             | Scenario::WsStreamNoKey
+            | Scenario::WsStreamFileKey
             | Scenario::ConfigSurface => &["helix"],
             Scenario::MultipleRelays | Scenario::TimingGames | Scenario::Mux => &["helix", "helix"],
         }
@@ -501,6 +526,13 @@ impl Scenario {
                 per_relay_lines: vec![r#"get_header = "stream""#.to_string()],
                 ..CbParams::basic()
             }),
+            Scenario::WsStreamFileKey => cb_toml(&CbParams {
+                per_relay_lines: vec![
+                    r#"get_header = "stream""#.to_string(),
+                    r#"headers = { X-Api-Key = { file = "/config/relay-api-key" } }"#.to_string(),
+                ],
+                ..CbParams::basic()
+            }),
             Scenario::Mux => {
                 let node0 = load_pubkeys(keys_dir, 0)?;
                 let node1 = load_pubkeys(keys_dir, 1)?;
@@ -543,7 +575,7 @@ impl Scenario {
     /// `lower_reproduces_every_scenario` contract test proves the two agree.
     fn header_stream_admit_all(&self) -> Option<bool> {
         match self {
-            Scenario::WsStream => Some(true),
+            Scenario::WsStream | Scenario::WsStreamFileKey => Some(true),
             Scenario::WsStreamNoKey => Some(false),
             _ => None,
         }
@@ -560,6 +592,7 @@ impl Scenario {
             self.builder_subsidy(),
             matches!(self, Scenario::Signer),
             self.header_stream_admit_all(),
+            &self.to_spec().extra_files(),
         );
         Ok([
             self.comment(),
@@ -602,6 +635,7 @@ pub(super) fn build_mev_params(
     subsidy: &str,
     signer: bool,
     header_stream_admit_all: Option<bool>,
+    extra_files: &[(&str, String)],
 ) -> String {
     let mut lines: Vec<String> = vec!["mev_params:".to_string()];
 
@@ -635,6 +669,14 @@ pub(super) fn build_mev_params(
         // container beside the PBS sidecar, reusing this participant's
         // validator keystores.
         lines.push("  commit_boost_signer: true".to_string());
+    }
+    if !extra_files.is_empty() {
+        // Rendered by the fork's commit-boost launcher into /config beside
+        // cb-config.toml; double-quoted so a trailing newline survives YAML.
+        lines.push("  commit_boost_extra_files:".to_string());
+        for (name, content) in extra_files {
+            lines.push(format!("    {name}: {content:?}"));
+        }
     }
     lines.push(String::new());
 

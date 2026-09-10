@@ -17,7 +17,7 @@
 //! check. The verdict logic is a pure seam (`classify_*`) for unit testing.
 
 use crate::checks::CheckResult;
-use crate::checks::mux_routing::fetch_filtered_logs;
+use crate::checks::mux_routing::{fetch_filtered_logs, strip_ansi_codes};
 use tracing::warn;
 
 /// A CB feature whose activation we try to confirm fired at runtime.
@@ -36,6 +36,12 @@ pub enum Feature {
     /// FALLBACK (merged with the feature) means a broken stream still passes
     /// every MEV check silently - this marker check is the only discriminator.
     WsHeaderStream,
+    /// A relay header sourced from a secret file (`headers = { X-Api-Key = {
+    /// file = ... } }`, per-relay). CB logs `"relay headers loaded from secret
+    /// sources"` when it builds the relay client on no other codepath, so the
+    /// marker proves the file was read (a missing/empty file fails CB startup
+    /// outright).
+    RelayHeaderFile,
     /// `skip_sigverify = true` (`[pbs]`). A negative codepath: signature
     /// verification is simply not called, with NO success log or metric. On the
     /// happy path (valid mock-relay signatures) ON is indistinguishable from OFF
@@ -45,10 +51,11 @@ pub enum Feature {
 }
 
 /// Every feature we know how to check, in report order.
-pub const ALL_FEATURES: [Feature; 4] = [
+pub const ALL_FEATURES: [Feature; 5] = [
     Feature::TimingGames,
     Feature::ExtraValidation,
     Feature::WsHeaderStream,
+    Feature::RelayHeaderFile,
     Feature::SkipSigverify,
 ];
 
@@ -59,7 +66,18 @@ impl Feature {
             Feature::TimingGames => "feature.timing_games",
             Feature::ExtraValidation => "feature.extra_validation",
             Feature::WsHeaderStream => "feature.ws_header_stream",
+            Feature::RelayHeaderFile => "feature.relay_header_file",
             Feature::SkipSigverify => "feature.skip_sigverify",
+        }
+    }
+
+    /// Whether `template` enables this feature. Most are a `key = value` line
+    /// (`config_key`/`config_value`); a file-sourced header is detected from the
+    /// `headers = { ... { file = ... } ... }` shape instead.
+    fn enabled_in(self, template: &str) -> bool {
+        match self {
+            Feature::RelayHeaderFile => detect_api_key_file(template).is_some(),
+            _ => config_enables(template, self.config_key(), self.config_value()),
         }
     }
 
@@ -69,6 +87,7 @@ impl Feature {
             Feature::TimingGames => "enable_timing_games",
             Feature::ExtraValidation => "extra_validation_enabled",
             Feature::WsHeaderStream => "get_header",
+            Feature::RelayHeaderFile => "headers",
             Feature::SkipSigverify => "skip_sigverify",
         }
     }
@@ -78,6 +97,7 @@ impl Feature {
     pub fn config_value(self) -> &'static str {
         match self {
             Feature::WsHeaderStream => "stream",
+            Feature::RelayHeaderFile => "{ X-Api-Key = { file = ... } }",
             _ => "true",
         }
     }
@@ -89,6 +109,7 @@ impl Feature {
             Feature::TimingGames => &["TG:"],
             Feature::ExtraValidation => &["fetched parent block", "fetching parent block"],
             Feature::WsHeaderStream => &[WS_STREAM_MARKER],
+            Feature::RelayHeaderFile => &[RELAY_HEADER_FILE_MARKER],
             Feature::SkipSigverify => &[],
         }
     }
@@ -99,6 +120,7 @@ impl Feature {
             Feature::TimingGames => "timing games",
             Feature::ExtraValidation => "extra validation",
             Feature::WsHeaderStream => "ws header stream",
+            Feature::RelayHeaderFile => "relay header from secret file",
             Feature::SkipSigverify => "skip sigverify",
         }
     }
@@ -109,7 +131,7 @@ impl Feature {
 pub fn detect_enabled_features(template: &str) -> Vec<Feature> {
     ALL_FEATURES
         .into_iter()
-        .filter(|f| config_enables(template, f.config_key(), f.config_value()))
+        .filter(|f| f.enabled_in(template))
         .collect()
 }
 
@@ -133,6 +155,144 @@ fn config_enables(template: &str, key: &str, value: &str) -> bool {
 pub const WS_STREAM_MARKER: &str = "received new header from ws stream";
 /// CB's warn line when a stream attempt degrades to HTTP.
 pub const WS_FALLBACK_MARKER: &str = "falling back to http get_header";
+/// CB's info line, emitted once per relay client build, naming the headers
+/// that came from a file or env source (never their values).
+pub const RELAY_HEADER_FILE_MARKER: &str = "relay headers loaded from secret sources";
+/// The helix relay's stream-admission line; a locally built helix logs the
+/// received api key on it as `x_api_key="..."` (upstream does not).
+pub const RELAY_ACCEPTING_STREAM_MARKER: &str = "accepting header stream";
+
+/// The file a file-sourced `X-Api-Key` header reads, from the CB template
+/// (pure). Only that header: the relay-side check compares the file's bytes
+/// against the `x-api-key` helix received, so a file behind any other header
+/// must not arm it.
+pub fn detect_api_key_file(template: &str) -> Option<String> {
+    template.lines().find_map(|line| {
+        let t = line.trim();
+        if t.starts_with('#') || !t.starts_with("headers") {
+            return None;
+        }
+        let key_at = t.to_ascii_lowercase().find("x-api-key")?;
+        let (_, rest) = t[key_at..].split_once("file =")?;
+        let quoted = rest.trim().strip_prefix('"')?;
+        Some(quoted.split('"').next()?.to_string())
+    })
+}
+
+/// The expected value of a `commit_boost_extra_files` entry from the Kurtosis
+/// args file, keyed by the basename of `path` (the file the CB config reads).
+pub fn expected_api_key_from_args(args_yaml: &str, path: &str) -> Option<String> {
+    let name = path.rsplit('/').next()?;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(args_yaml).ok()?;
+    let content = parsed
+        .get("mev_params")?
+        .get("commit_boost_extra_files")?
+        .get(name)?
+        .as_str()?;
+    Some(content.trim_end().to_string())
+}
+
+/// Pure verdict for the relay-side proof of a file-sourced api key (Law 4
+/// seam). `lines` are the relay's raw `accepting header stream` log lines
+/// (tracing colors the field name and `=` separately, so ANSI is stripped
+/// here before matching).
+///
+/// Tier 2, annotative: an upstream helix does not log the received key, so on
+/// the public image this check can only be inconclusive and must never gate a
+/// run; the tier-1 proof that the file was used is `feature.relay_header_file`.
+///
+/// - a line carries `x_api_key="<expected>"`           -> PASS
+/// - lines carry `x_api_key=` but never the expected   -> FAIL (no admitted
+///   stream carried the file's key)
+/// - no line carries `x_api_key=` at all              -> WARN, inconclusive
+///   (the relay image does not log the key)
+/// - no expected value                                -> WARN, inconclusive
+pub fn classify_relay_saw_api_key(expected: Option<&str>, lines: &[&str]) -> CheckResult {
+    let id = "feature.relay_saw_api_key";
+    let Some(expected) = expected else {
+        return CheckResult::warn(
+            id,
+            2,
+            "no commit_boost_extra_files entry matches the file the CB config reads; cannot \
+             know what key the relay should see",
+        )
+        .mark_inconclusive();
+    };
+    let lines: Vec<String> = lines.iter().map(|l| strip_ansi_codes(l)).collect();
+    let needle = format!("x_api_key=\"{expected}\"");
+    let seen_expected = lines.iter().filter(|l| l.contains(&needle)).count();
+    let seen_any = lines.iter().filter(|l| l.contains("x_api_key=")).count();
+    let data = serde_json::json!({
+        "expected_key_file_bytes": expected.len(),
+        "accepting_lines": lines.len(),
+        "lines_with_api_key": seen_any,
+        "lines_with_expected_key": seen_expected,
+    });
+    if seen_expected > 0 {
+        CheckResult::pass(
+            id,
+            2,
+            format!(
+                "the relay admitted {seen_expected} stream(s) carrying exactly the api key from \
+                 the secret file ✓"
+            ),
+        )
+        .with_data(data)
+    } else if seen_any > 0 {
+        CheckResult::fail(
+            id,
+            2,
+            format!(
+                "the relay logged an api key on {seen_any} admitted stream(s) and none carried \
+                 the secret file's value (streams are admitted for any client, so this says no \
+                 admitted stream used the file's key)"
+            ),
+        )
+        .with_data(data)
+    } else {
+        CheckResult::warn(
+            id,
+            2,
+            format!(
+                "{} `{RELAY_ACCEPTING_STREAM_MARKER}` relay log line(s), none logging \
+                 x_api_key: this helix image does not log the received key, so only the CB-side \
+                 marker (feature.relay_header_file) can prove the file was used",
+                lines.len()
+            ),
+        )
+        .with_data(data)
+        .mark_inconclusive()
+    }
+}
+
+/// The relay-side half of the file-sourced api key proof: read the expected key
+/// from the Kurtosis args file the run was launched with, then look for it on
+/// the relay's stream-admission lines. `None` when the CB config sources no
+/// `X-Api-Key` from a file, or when `config_path` is a bare CB TOML (no args
+/// file carries the expected value, so there is nothing to compare).
+pub fn run_relay_saw_api_key_check(
+    enclave: &str,
+    relay_service_names: &[String],
+    template: &str,
+    config_path: &str,
+) -> Option<CheckResult> {
+    let key_file = detect_api_key_file(template)?;
+    if !(config_path.ends_with(".yml") || config_path.ends_with(".yaml")) {
+        return None;
+    }
+    let expected = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|yaml| expected_api_key_from_args(&yaml, &key_file));
+    let mut lines = Vec::new();
+    for service in relay_service_names {
+        match fetch_filtered_logs(enclave, service, &[RELAY_ACCEPTING_STREAM_MARKER]) {
+            Ok(logs) => lines.extend(logs.lines().map(str::to_string)),
+            Err(e) => warn!("Could not fetch {service} logs for the api key check: {e}"),
+        }
+    }
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    Some(classify_relay_saw_api_key(expected.as_deref(), &refs))
+}
 
 /// Pure verdict for the stream-vs-fallback balance (Law 4 seam).
 ///
@@ -791,5 +951,82 @@ mod tests {
         let r = classify_min_bid(0.5, 0, &[0.1]);
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(!r.inconclusive);
+    }
+    // ── file-sourced api key (relay-side proof) ────────────────────────────
+
+    const FILEKEY_TEMPLATE: &str = r#"
+[[relays]]
+url = "http://0x@helix-relay-2:4040"
+get_header = "stream"
+headers = { X-Api-Key = { file = "/config/relay-api-key" } }
+"#;
+
+    #[test]
+    fn detect_api_key_file_reads_the_path_from_the_headers_line() {
+        assert_eq!(
+            detect_api_key_file(FILEKEY_TEMPLATE).as_deref(),
+            Some("/config/relay-api-key")
+        );
+        // literal key, commented-out file line, no headers: nothing to read
+        assert_eq!(
+            detect_api_key_file(r#"headers = { X-Api-Key = "k" }"#),
+            None
+        );
+        assert_eq!(
+            detect_api_key_file("# headers = { X = { file = \"/x\" } }"),
+            None
+        );
+        assert_eq!(detect_api_key_file("get_header = \"stream\""), None);
+        // a file behind another header is not this check's business
+        assert_eq!(
+            detect_api_key_file(r#"headers = { Authorization = { file = "/config/token" } }"#),
+            None
+        );
+        assert!(detect_enabled_features(FILEKEY_TEMPLATE).contains(&Feature::RelayHeaderFile));
+        assert!(
+            !detect_enabled_features(r#"headers = { X-Api-Key = "k" }"#)
+                .contains(&Feature::RelayHeaderFile)
+        );
+    }
+
+    #[test]
+    fn expected_api_key_comes_from_the_args_file_by_basename() {
+        let args = "mev_params:\n  commit_boost_extra_files:\n    relay-api-key: \"abc-123\\n\"\n";
+        assert_eq!(
+            expected_api_key_from_args(args, "/config/relay-api-key").as_deref(),
+            Some("abc-123"),
+            "trailing newline is not part of the key"
+        );
+        assert_eq!(expected_api_key_from_args(args, "/config/other"), None);
+        assert_eq!(
+            expected_api_key_from_args("mev_params: {}", "/config/relay-api-key"),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_saw_api_key_verdicts() {
+        let good = r#"INFO accepting header stream ms_into_slot=2 x_api_key="abc-123""#;
+        let other = r#"INFO accepting header stream ms_into_slot=2 x_api_key="zzz""#;
+        let unlogged = "INFO accepting header stream ms_into_slot=2";
+
+        assert_eq!(
+            classify_relay_saw_api_key(Some("abc-123"), &[good, other]).status,
+            CheckStatus::Pass
+        );
+        let wrong = classify_relay_saw_api_key(Some("abc-123"), &[other]);
+        assert_eq!(wrong.status, CheckStatus::Fail);
+        // an upstream helix (no x_api_key field) cannot prove or refute: inconclusive
+        let unproven = classify_relay_saw_api_key(Some("abc-123"), &[unlogged]);
+        assert_eq!(unproven.status, CheckStatus::Warn);
+        assert!(unproven.inconclusive);
+        assert!(classify_relay_saw_api_key(None, &[good]).inconclusive);
+        // tracing colors the field name and `=` separately: the raw line must
+        // still match
+        let colored = "\x1b[3mx_api_key\x1b[0m\x1b[2m=\x1b[0m\"abc-123\"";
+        assert_eq!(
+            classify_relay_saw_api_key(Some("abc-123"), &[colored]).status,
+            CheckStatus::Pass
+        );
     }
 }

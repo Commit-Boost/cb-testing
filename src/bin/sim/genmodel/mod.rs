@@ -106,6 +106,10 @@ pub fn golden(scenario: &str) -> &'static str {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-ws-stream-nokey.yml"
         )),
+        "cb-ws-stream-filekey" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/golden-configs/cb-ws-stream-filekey.yml"
+        )),
         "cb-mux" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/golden-configs/cb-mux.yml"

@@ -35,6 +35,8 @@ pub fn relay_identity(service_name: &str) -> Option<String> {
 pub struct EnclaveServices {
     pub beacon_urls: Vec<String>,
     pub relay_urls: Vec<String>,
+    /// Relay API service names, parallel to `relay_urls` (log fetches).
+    pub relay_service_names: Vec<String>,
     pub cb_pbs_urls: Vec<String>,
     pub cb_metrics_urls: Vec<String>,
     pub cb_service_names: Vec<String>,
@@ -357,6 +359,7 @@ pub fn classify_services(
                         relay_identity(&svc.name).unwrap_or_else(|| "unknown".to_string());
                     info!("Relay API: {} -> {url} (identity={identity})", svc.name);
                     result.relay_urls.push(url);
+                    result.relay_service_names.push(svc.name.clone());
                 }
                 None => warn!("Relay '{}': no http/endpoint port", svc.name),
             }

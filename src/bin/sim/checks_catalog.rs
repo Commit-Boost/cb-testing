@@ -23,6 +23,9 @@ pub enum DataSource {
     /// Commit-boost PBS container logs (survive a relay crash).
     #[serde(rename = "cb-logs")]
     CbLogs,
+    /// Relay container logs (die with the relay, like its data API).
+    #[serde(rename = "relay-logs")]
+    RelayLogs,
     /// Relay data API (`/relay/v1/data/...`) — fragile; dies with the relay.
     #[serde(rename = "relay-data-api")]
     RelayDataApi,
@@ -42,6 +45,7 @@ impl DataSource {
     pub fn as_str(self) -> &'static str {
         match self {
             DataSource::CbLogs => "cb-logs",
+            DataSource::RelayLogs => "relay-logs",
             DataSource::RelayDataApi => "relay-data-api",
             DataSource::BeaconApi => "beacon-api",
             DataSource::CbPrometheus => "cb-prometheus",
@@ -192,6 +196,22 @@ pub fn catalog() -> Vec<CatalogEntry> {
             data_source: CbLogs,
             feature_asserted: true,
             severity_note: "emitted only when min_bid_eth > 0; FAIL if any auction winner is BELOW the floor (proof the key was silently ignored - [pbs] has no deny_unknown_fields); PASS on >=1 rejection; WARN if nothing was rejected (cannot tell 'ignored' from 'all bids cleared it')",
+        },
+        CatalogEntry {
+            id: "feature.relay_header_file",
+            tier: 1,
+            title: "a file-sourced relay header was read (CB 'loaded from secret sources' log seen)",
+            data_source: CbLogs,
+            feature_asserted: true,
+            severity_note: "emitted only when a [[relays]] X-Api-Key header is { file = ... }; PASS on the CB startup marker (CB logs it for file and env sources alike), WARN (inconclusive) if none seen",
+        },
+        CatalogEntry {
+            id: "feature.relay_saw_api_key",
+            tier: 2,
+            title: "the relay admitted the ws stream with exactly the api key from the secret file",
+            data_source: RelayLogs,
+            feature_asserted: true,
+            severity_note: "annotative (tier 2, never gates): emitted with feature.relay_header_file when the run config is a Kurtosis args file; needs a helix that logs x_api_key on 'accepting header stream' (upstream does not -> WARN inconclusive); FAIL if admitted streams carried only other keys",
         },
         CatalogEntry {
             id: "feature.skip_sigverify",
@@ -382,6 +402,8 @@ mod tests {
                 "feature.timing_games",
                 "feature.extra_validation",
                 "feature.min_bid",
+                "feature.relay_header_file",
+                "feature.relay_saw_api_key",
                 "feature.skip_sigverify",
                 "signer.pubkeys",
             ]

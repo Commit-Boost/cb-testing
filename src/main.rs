@@ -548,6 +548,12 @@ async fn run_verification(cli: &Cli) -> i32 {
                     )
                     .await,
                 );
+                all_checks.extend(checks::feature_fired::run_relay_saw_api_key_check(
+                    &enclave_name,
+                    &services.relay_service_names,
+                    &template,
+                    cb_path,
+                ));
             }
             Err(e) => {
                 warn!("Could not read CB config for feature-fired checks: {e}");

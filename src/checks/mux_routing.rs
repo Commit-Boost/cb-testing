@@ -307,7 +307,7 @@ fn normalize_pubkey(pk: &str) -> String {
 ///
 /// ANSI codes look like `\x1b[32m` (color) or `\x1b[0m` (reset).
 /// This removes them so we can parse the actual text content.
-fn strip_ansi_codes(s: &str) -> String {
+pub(crate) fn strip_ansi_codes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {

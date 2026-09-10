@@ -33,7 +33,7 @@ just ci
 ```
 
 For the default scenarios you do **not** build helix — its relay image is pulled public. **The websocket
-header-stream scenarios (`cb-ws-stream`, `cb-ws-stream-nokey`, any `get_header=stream` compose) are the
+header-stream scenarios (`cb-ws-stream`, `cb-ws-stream-nokey`, `cb-ws-stream-filekey`, any `get_header=stream` compose) are the
 exception**: the public `:main` image stubs the stream admission, so those need a helix built from the
 bundled submodule — see [Testing the websocket header stream](#testing-the-websocket-header-stream). The
 submodule is also there for building a custom relay branch (see
@@ -125,6 +125,24 @@ devnet; the check confirms registration via delivery instead). Remove the `.env`
 scenarios to the pulled `:main` image.
 
 ---
+
+### Proving the relay saw a file-sourced api key (`cb-ws-stream-filekey`)
+
+`cb-ws-stream-filekey` delivers the ws api key as a secret file and proves CB
+read it (`feature.relay_header_file`, tier 1). The relay-side half,
+`feature.relay_saw_api_key`, is tier 2 and stays inconclusive on any stock
+helix: upstream never logs the key it receives. To make it conclusive, build
+the helix image with one extra field on the stream-admission line and point
+`HELIX_RELAY_IMAGE` at it:
+
+```rust
+// helix/crates/relay/src/api/proposer/header_stream.rs, the `accepting header stream` info!
+x_api_key = headers.get(HEADER_API_KEY).and_then(|v| v.to_str().ok()).unwrap_or(""),
+```
+(`HEADER_API_KEY` is `helix_common::api::HEADER_API_KEY`.) Then
+`just build-helix-image apikey-log` and `HELIX_RELAY_IMAGE=local/helix-relay:apikey-log`.
+The check compares that value byte-for-byte with the file the ethereum-package
+rendered from `commit_boost_extra_files`.
 
 ## Testing a specific CB or helix branch
 

@@ -108,6 +108,8 @@ dies mid-run:
 | `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
 | `feature.min_bid` | 1 | CB logs | the `min_bid_eth` floor dropped bids; FAIL if a winner is under it; config-gated |
 | `feature.skip_sigverify` | 1 | CB logs | skip-sigverify fired (differential: wrong-pubkey relay + auction winners); WARN in plain scenarios |
+| `feature.relay_header_file` | 1 | CB logs | a file-sourced `X-Api-Key` relay header was read (CB `relay headers loaded from secret sources` line); config-gated |
+| `feature.relay_saw_api_key` | 2 | relay logs | the relay admitted the ws stream with exactly the secret file's key; needs a helix that logs `x_api_key` (public image: inconclusive, never gates) |
 | `signer.pubkeys` | 1 | CB signer API | the signer loaded the devnet's validator keys (JWT-authed count); config-gated |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |

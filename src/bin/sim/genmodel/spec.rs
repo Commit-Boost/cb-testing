@@ -27,7 +27,7 @@ use cb_testnet_verifier::checks::feature_fired::Feature;
 
 /// The api key the ws stream authenticates with — a fixed devnet UUID that rides
 /// validator registration so helix TOFU-binds it (see the `cb-ws-stream` comment).
-const WS_API_KEY: &str = "9d5c2f4e-1b7a-4c3d-8e6f-0a1b2c3d4e5f";
+pub(super) const WS_API_KEY: &str = "9d5c2f4e-1b7a-4c3d-8e6f-0a1b2c3d4e5f";
 
 /// The EL/CL client pair (Law 7: coverage is a matrix, not a point). The CL is
 /// the axis that matters for CB behavior (the blinded-block / get_header flow),
@@ -60,13 +60,22 @@ pub enum Topology {
 
 /// Whether the ws stream carries its api key. `Absent` is the negative control:
 /// helix refuses the handshake, every slot falls back to HTTP, and the ws proof
-/// is expected inconclusive (this is `cb-ws-stream-nokey`).
+/// is expected inconclusive (this is `cb-ws-stream-nokey`). `File` delivers the
+/// same key as a secret file in the CB config artifact and references it with
+/// `{ file = ... }`, so the config carries no key (`cb-ws-stream-filekey`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeyPresence {
     Present,
     Absent,
+    File,
 }
+
+/// Where the `File` key lands inside the CB container: the ethereum-package
+/// renders `commit_boost_extra_files` into the `/config` artifact beside
+/// cb-config.toml.
+pub const WS_API_KEY_FILE: &str = "relay-api-key";
+pub const WS_API_KEY_PATH: &str = "/config/relay-api-key";
 
 /// getHeader transport. `Stream` sets `get_header = "stream"` per relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -88,7 +97,7 @@ impl HeaderTransport {
     pub fn admit_all(&self) -> Option<bool> {
         match self {
             HeaderTransport::Http => None,
-            HeaderTransport::Stream { api_key } => Some(matches!(api_key, KeyPresence::Present)),
+            HeaderTransport::Stream { api_key } => Some(!matches!(api_key, KeyPresence::Absent)),
         }
     }
 }
@@ -328,8 +337,14 @@ impl ScenarioSpec {
         }
         if let HeaderTransport::Stream { api_key } = self.get_header {
             per_relay.push(r#"get_header = "stream""#.to_string());
-            if matches!(api_key, KeyPresence::Present) {
-                per_relay.push(format!(r#"headers = {{ X-Api-Key = "{WS_API_KEY}" }}"#));
+            match api_key {
+                KeyPresence::Present => {
+                    per_relay.push(format!(r#"headers = {{ X-Api-Key = "{WS_API_KEY}" }}"#))
+                }
+                KeyPresence::File => per_relay.push(format!(
+                    r#"headers = {{ X-Api-Key = {{ file = "{WS_API_KEY_PATH}" }} }}"#
+                )),
+                KeyPresence::Absent => {}
             }
         }
         p.per_relay_lines = per_relay;
@@ -369,6 +384,14 @@ impl ScenarioSpec {
         if matches!(self.get_header, HeaderTransport::Stream { .. }) {
             f.push(Feature::WsHeaderStream);
         }
+        if matches!(
+            self.get_header,
+            HeaderTransport::Stream {
+                api_key: KeyPresence::File
+            }
+        ) {
+            f.push(Feature::RelayHeaderFile);
+        }
         f
     }
 
@@ -385,6 +408,17 @@ impl ScenarioSpec {
             self.sigverify,
             Sigverify::SkipPoisoned | Sigverify::PoisonedControl
         )
+    }
+
+    /// Files the ethereum-package renders into the CB `/config` artifact: the
+    /// ws api key when it is delivered as a secret file rather than inline.
+    pub fn extra_files(&self) -> Vec<(&'static str, String)> {
+        match self.get_header {
+            HeaderTransport::Stream {
+                api_key: KeyPresence::File,
+            } => vec![(WS_API_KEY_FILE, format!("{WS_API_KEY}\n"))],
+            _ => vec![],
+        }
     }
 
     /// Render the full Kurtosis args-file, with `comment` as the leading block.
@@ -425,6 +459,7 @@ impl ScenarioSpec {
             self.builder_subsidy(),
             self.signer,
             self.get_header.admit_all(),
+            &self.extra_files(),
         );
 
         Ok([
@@ -461,6 +496,9 @@ impl ScenarioSpec {
             HeaderTransport::Stream {
                 api_key: KeyPresence::Absent,
             } => knobs.push("ws-stream-nokey".to_string()),
+            HeaderTransport::Stream {
+                api_key: KeyPresence::File,
+            } => knobs.push("ws-stream-filekey".to_string()),
         }
         if self.timing_games {
             knobs.push("timing-games".to_string());
