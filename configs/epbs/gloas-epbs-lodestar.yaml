@@ -6,7 +6,7 @@
 # Bump the tag to test a newer lodestar release.
 participants:
   - el_type: geth
-    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lodestar
     cl_image: chainsafe/lodestar:v1.47.0-rc.0
     vc_image: chainsafe/lodestar:v1.47.0-rc.0

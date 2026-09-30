@@ -15,14 +15,14 @@
 participants_matrix:
   el:
     - el_type: geth
-      el_image: ethpandaops/geth:glamsterdam-devnet-8
+      el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
   cl:
     - cl_type: lodestar
-      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8
+      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8-f1b14bc
     - cl_type: nimbus
-      cl_image: ethpandaops/nimbus-eth2:glamsterdam-devnet-8
+      cl_image: ethpandaops/nimbus-eth2:glamsterdam-devnet-8-2a489eb
     - cl_type: grandine
-      cl_image: ethpandaops/grandine:glamsterdam-devnet-8
+      cl_image: ethpandaops/grandine:glamsterdam-devnet-8-d6281c3
 mev_type: buildoor
 buildoor_params:
   image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991

@@ -26,7 +26,10 @@
 # SLOTS_PER_EPOCH=32, so buildoor activates ~slot 128 and the run is ~30-45 min.
 participants:
   - el_type: geth
-    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    # <tag>-<sha> is the immutable variant of a glamsterdam-devnet-8 build. The
+    # bare glamsterdam-devnet-8 tag is rebuilt in place, so pinning to it makes
+    # every rerun a different devnet.
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lodestar
     # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
     cl_image: local/lodestar:km

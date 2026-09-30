@@ -8,11 +8,13 @@
 # never activates, so the live --assert block-submission path cannot reach
 # builder-built slots on the one preset whose block layout CB actually decodes.
 #
-# This config adds a second participant (lighthouse) purely to CARRY FINALIZATION:
-# it attests, and its proposer slots pack full aggregates, so the chain justifies
-# and finalizes. lighthouse has NOT implemented the gloas builder API, so its own
-# proposer slots build locally and never route through CB -- that is fine, we only
-# need it to finalize. buildoor still bids through lodestar's slots via CB.
+# This config adds a second participant (lighthouse) to CARRY FINALIZATION: it
+# attests, and its proposer slots pack full aggregates, so the chain justifies and
+# finalizes. buildoor bids through lodestar's slots via CB; lighthouse's own
+# proposer slots build locally, because the image pinned below predates the gloas
+# builder API landing in lighthouse (sigp/lighthouse#9807 for the VC flow and
+# #9864 for the keymanager builder_config endpoint, both merged to unstable).
+# An unstable image makes this a second CB-in-loop client rather than a carrier.
 #
 # Multi-CL coverage is also a standing ePBS regression goal, so this doubles as
 # the first cross-client harness.
@@ -25,7 +27,7 @@
 participants:
   # --- participant #1: lodestar, the CB / buildoor path (keymanager builder_config) ---
   - el_type: geth
-    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lodestar
     # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
     cl_image: local/lodestar:km
@@ -41,10 +43,10 @@ participants:
   # lighthouse blocks build locally and never reach CB, so the image only needs to
   # attest and pack full aggregates on this devnet; the clean devnet-8 tag does.
   - el_type: geth
-    el_image: ethpandaops/geth:glamsterdam-devnet-8
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lighthouse
-    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
-    vc_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8-fa18cdb
+    vc_image: ethpandaops/lighthouse:glamsterdam-devnet-8-fa18cdb
     cl_log_level: debug
     vc_extra_params:
       - --graffiti=finalizer

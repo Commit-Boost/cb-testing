@@ -278,6 +278,14 @@ epbs-sim-builder-down:
 epbs-sim-request-auth:
     ./scripts/run-epbs-sim.sh --assert request-auth
 
+# Upstream ethereum-package, pinned to a COMMIT. A bare
+# github.com/ethpandaops/ethereum-package resolves to upstream HEAD at launch
+# time, so the same recipe can stand up a different devnet on every run and a
+# result is neither reproducible nor bisectable. Keep this in step with
+# EP_PACKAGE in scripts/run-epbs-sim.sh. Override from the environment to test a
+# newer upstream.
+EP_PACKAGE := env_var_or_default("EP_PACKAGE", "github.com/ethpandaops/ethereum-package@6dd3f2613d1f9d1a9274864083c692726146c9db")
+
 # Cross-client gloas builder-flow coverage via assertoor (geth x lodestar/lighthouse/
 # teku/nimbus/grandine, minimal preset). This is the VC -> buildoor DIRECT path with
 # NO commit-boost in the loop: it answers "which CLs correctly implement the devnet-8
@@ -285,7 +293,7 @@ epbs-sim-request-auth:
 # reports per-playbook pass/fail (UI + HTTP API + process exit code); dora gives a
 # block explorer. See configs/epbs/gloas-epbs-matrix.yaml.
 epbs-matrix:
-    kurtosis run github.com/ethpandaops/ethereum-package \
+    kurtosis run {{EP_PACKAGE}} \
       --enclave epbs-matrix \
       --args-file configs/epbs/gloas-epbs-matrix.yaml \
       --image-download always

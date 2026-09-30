@@ -65,9 +65,14 @@ cd "$REPO_ROOT"
 ENCLAVE="${ENCLAVE:-epbs-sim}"
 # Upstream ethereum-package (kurtosis fetches + caches it). The repo's pinned
 # submodule predates gloas-genesis compatibility with the local/lodestar:km image
-# (see docs/EPBS.md), so this harness uses upstream. Pin with EP_PACKAGE=...@<ref>
-# or point at a local checkout ($REPO_ROOT/ethereum-package) once it is upgraded.
-EP_PACKAGE="${EP_PACKAGE:-github.com/ethpandaops/ethereum-package}"
+# (see docs/EPBS.md), so this harness uses upstream.
+# The default is pinned to a COMMIT: a bare github.com/... reference resolves to
+# upstream HEAD at launch time, so the same harness can stand up a different
+# devnet on every run and neither a PASS nor a regression can be reproduced or
+# bisected. Override to try a newer upstream
+# (EP_PACKAGE=github.com/ethpandaops/ethereum-package@<ref>) or to point at a
+# local checkout ($REPO_ROOT/ethereum-package) once the submodule is upgraded.
+EP_PACKAGE="${EP_PACKAGE:-github.com/ethpandaops/ethereum-package@6dd3f2613d1f9d1a9274864083c692726146c9db}"
 ARGS_FILE="${ARGS_FILE:-configs/epbs/gloas-epbs.yaml}"
 # PRESET override for network_params.preset in the args file (minimal|mainnet).
 # Empty = use the file's value as-is. minimal = fast (8-slot epochs, buildoor
@@ -91,6 +96,13 @@ CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the tem
 CB_LAUNCH="${CB_LAUNCH:-service}"
 CB_ARTIFACT="${CB_ARTIFACT:-cb-epbs-config}"  # kurtosis files-artifact name (service path)
 CB_KM_BIN="${CB_KM_BIN:-}"
+# The relay CB bids into, rendered into BOTH __BUILDOOR_RELAY_URL__ sites in
+# cb-config.toml.tmpl: the top-level [[relays]] entry and the [[mux.relays]]
+# entry the listed validator pubkeys route to. Substituting only one leaves the
+# validators bidding to the other relay while the file reads as if retargeted.
+# The URL embeds the relay's BLS pubkey, so pointing at a different relay means
+# supplying its pubkey too. Default = the devnet's buildoor.
+BUILDOOR_RELAY_URL="${BUILDOOR_RELAY_URL:-http://0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416@buildoor:8080}"
 BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-1200}"  # s to wait for the builder deposit to activate (queue delay varies run to run, seen out to ~slot 100)
 OBSERVE_SLOTS="${OBSERVE_SLOTS:-16}"     # slots to watch once buildoor is active
 MIN_BUILDER_SLOTS="${MIN_BUILDER_SLOTS:-8}"  # PASS threshold (builder-built via CB; allows some missed slots)
@@ -231,11 +243,19 @@ bn_head_slot() {
 # Classify each block in [s0,s1]: prints two lines, "builder=<slots>" and
 # "self=<slots>" (comma-separated). A gloas block is builder-built when its
 # signed_execution_payload_bid.message.value != 0, self-built when value == 0.
+#
+# Only a 404 means "no block in that slot". Every other failure (connection
+# refused, a timeout, a body whose shape does not match) is REPORTED on stderr
+# with its slot and cause and counted in a summary line: an unclassifiable slot
+# silently dropped into neither list reads downstream as a legitimate zero, so a
+# BN that is unreachable or serving an unexpected shape looks exactly like a
+# client that never builds. stdout stays the two lines the asserts parse.
 classify_blocks() { # $1=s0 $2=s1
   python3 - "$BN" "$1" "$2" <<'PY'
-import sys,json,urllib.request
+import sys,json,urllib.request,urllib.error
 bn,s0,s1=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
-builder,selfb=[],[]
+builder,selfb,errs=[],[],[]
+missed=0
 for slot in range(s0,s1+1):
     try:
         with urllib.request.urlopen(f"{bn}/eth/v2/beacon/blocks/{slot}",timeout=5) as r:
@@ -243,8 +263,20 @@ for slot in range(s0,s1+1):
         bid=body.get('signed_execution_payload_bid',{}).get('message',{})
         v=bid.get('value','0')
         (builder if v not in ('0','',None) else selfb).append(slot)
-    except Exception:
-        pass  # missed slot / 404
+    except urllib.error.HTTPError as e:
+        if e.code==404: missed+=1          # no block proposed in this slot
+        else: errs.append((slot,"HTTP {0} {1}".format(e.code,e.reason)))
+    except Exception as e:
+        errs.append((slot,"{0}: {1}".format(type(e).__name__,e)))
+if errs:
+    w=sys.stderr
+    print("classify_blocks: {0} of {1} slots in [{2},{3}] could NOT be classified "
+          "and are counted in NEITHER list; empty-slot 404s: {4}"
+          .format(len(errs),s1-s0+1,s0,s1,missed),file=w)
+    for slot,why in errs[:10]:
+        print("  slot {0}: {1}".format(slot,why),file=w)
+    if len(errs)>10:
+        print("  ... and {0} more".format(len(errs)-10),file=w)
 print("builder="+",".join(map(str,builder)))
 print("self="+",".join(map(str,selfb)))
 PY
@@ -544,6 +576,7 @@ rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"
 sed -e "s|__GENESIS_TIME__|$GEN_TIME|" \
     -e "s|__GENESIS_VALIDATORS_ROOT__|$GVR|" \
+    -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
     configs/epbs/cb-config.toml.tmpl > "$RUN_DIR/cb-config.toml"
 sed -e "s|__VC_KM_URL__|$VC_KM|" \
     -e "s|__TOKEN_PATH__|$(pwd)/$RUN_DIR/km-token.txt|" \
@@ -558,7 +591,7 @@ grep -q '__' "$RUN_DIR/cb-config.toml" && die "unrendered placeholder in cb-conf
 # devnet's progressive-SSZ hashing still blocks); the request-auth message is a
 # plain container, so its root agrees across clients.
 if [[ "$ASSERT_MODE" == "request-auth" ]]; then
-  sed -i 's|^skip_sigverify = true$|skip_sigverify = true\nverify_builder_request_auth = true|' "$RUN_DIR/cb-config.toml"
+  sed -i 's|^skip_sigverify = .*$|&\nverify_builder_request_auth = true|' "$RUN_DIR/cb-config.toml"
   grep -q '^verify_builder_request_auth = true$' "$RUN_DIR/cb-config.toml" \
     || die "request-auth: failed to enable verify_builder_request_auth in cb-config.toml"
   echo "request-auth: verify_builder_request_auth = true"
@@ -571,7 +604,7 @@ fi
 # builders, so it is exercised even though buildoor rejects the HTTP forward (it
 # reveals the payload over p2p, not via /beacon_blocks).
 if [[ "$ASSERT_MODE" == "block-submission" ]]; then
-  sed -i 's|^skip_sigverify = true$|skip_sigverify = true\nstrict_block_decode = true|' "$RUN_DIR/cb-config.toml"
+  sed -i 's|^skip_sigverify = .*$|&\nstrict_block_decode = true|' "$RUN_DIR/cb-config.toml"
   grep -q '^strict_block_decode = true$' "$RUN_DIR/cb-config.toml" \
     || die "block-submission: failed to enable strict_block_decode in cb-config.toml"
   echo "block-submission: strict_block_decode = true"

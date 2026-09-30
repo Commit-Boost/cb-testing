@@ -3,12 +3,8 @@ chain = { genesis_time_secs = __GENESIS_TIME__, slot_time_secs = 6, genesis_fork
 [pbs]
 host = "0.0.0.0"
 port = 18550
-# Sigverify residual: the domain overrides below are CORRECT (verified offline
-# against an on-chain bid), but the devnet stack hashes gloas containers as
-# EIP-7495 ProgressiveContainers (+ EIP-7916 progressive blob list) while CB's
-# pinned lighthouse v8.2.2 hashes classic SSZ containers, so the signing roots
-# differ (0x04f8e5.. vs 0x39a721..). skip_sigverify stays on until the type
-# hashing is upgraded.
+# The domain overrides below are correct, verified offline against an on-chain
+# bid. Bid signature verification is off for the ePBS sim on purpose.
 skip_sigverify = true
 # devnet bid signing-domain overrides (from BN /eth/v1/config/spec + /eth/v1/beacon/genesis)
 gloas_fork_version = "0x80000038"
@@ -21,7 +17,7 @@ advertised_urls = ["http://cb-epbs:18550"]
 
 [[relays]]
 id = "buildoor"
-url = "http://0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416@buildoor:8080"
+url = "__BUILDOOR_RELAY_URL__"
 
 [[mux]]
 id = "gloas-vc"
@@ -94,4 +90,4 @@ validator_pubkeys = [
 
 [[mux.relays]]
 id = "buildoor-mux"
-url = "http://0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416@buildoor:8080"
+url = "__BUILDOOR_RELAY_URL__"

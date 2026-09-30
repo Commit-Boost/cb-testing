@@ -13,6 +13,13 @@ just epbs-sim               # default local/lodestar:km run
 Prints a clear `PASS: N/N observed slots builder-built via commit-boost (buildoor)`
 and exits non-zero on failure. One devnet at a time (~15G RAM).
 
+## This is the only harness that runs gloas
+
+`cb-verify` and the `sim` scenarios (`configs/generated/`, `docs/CHECKS.md`) run **classic PBS on
+fulu**: none of them sets `gloas_fork_epoch`, so it stays at the ethereum-package default
+`FAR_FUTURE_EPOCH` (`u64::MAX`). A green `sim` run says nothing about the gloas builder API. Only the configs under
+`configs/epbs/`, which set `gloas_fork_epoch` to `0` or `1`, activate the fork.
+
 ## Testing a CL against the sim
 
 Test a consensus client's gloas builder API end to end, no manual commit-boost build:
@@ -31,14 +38,28 @@ commit), then stands up the devnet. Needs `just` + Rust + Docker + Kurtosis.
 **Expected PASS:** `PASS: N/16 observed slots builder-built via commit-boost (buildoor)`,
 exit 0. On chain, each builder-built block carries `signed_execution_payload_bid.message.value != 0`.
 
-**Confirmed working (2026-08):**
+**Banked in this harness:**
 - `chainsafe/lodestar:v1.47.0-rc.0` - full VC → CB → buildoor flow, canonical on chain.
-- prysm (OffchainLabs/prysm#17397, `builder-rest-vc`) - 17/16 builder-built; also the
-  first client to pass `--assert block-submission` on the LIVE sim (see below).
+- prysm (OffchainLabs/prysm#17397) - 17/16 builder-built; also the first client to pass
+  `--assert block-submission` on the LIVE sim (see below). #17397 has since merged to
+  `develop` and ships in v7.2.0, so the mainnet-preset scenario can pull a public image;
+  the minimal-preset one uses the `-minimal-` sibling tag, since prysm's preset is compile-time.
 
-**A client that is not a single image** (prysm ships a separate beacon-chain image and
-validator image, and needs `--enable-builder`) cannot go through `just epbs-test`'s single
-`CL_IMAGE`. Give it a scenario file under `configs/epbs/` and run that:
+**Blocked on nimbus:** nimbus-eth2 has the keymanager `builder_config` endpoints
+(status-im/nimbus-eth2#8994), but cannot run this loop yet. With gloas active at genesis,
+its `produceBlockV4` fails every proposal with `500 Proposal parent payload is missing`, so
+the chain never leaves slot 0. Forking gloas at epoch 1 instead is not an option:
+ethereum-package only launches a builder when `gloas_fork_epoch` is 0. Observed on
+`ethpandaops/nimbus-eth2:unstable-minimal-15cb25b`.
+
+**Upstream since, not scenario-covered here:** lighthouse (sigp/lighthouse#9807, #9864)
+merged the gloas VC builder flow and the per-key `builder_config` keymanager endpoint.
+teku has the beacon-node side but not that endpoint (Consensys-Incorporated/teku#11046,
+open). grandine has neither, and ethereum-package cannot launch a grandine VC at all.
+
+**A client that is not a single image** (prysm ships a separate beacon-chain image and a
+validator image; nimbus needs `use_separate_vc`) cannot go through `just epbs-test`'s
+single `CL_IMAGE`. Give it a scenario file under `configs/epbs/` and run that:
 
 ```bash
 just epbs-test-config configs/epbs/gloas-epbs-prysm.yaml         # one client, one file
@@ -125,12 +146,13 @@ commit-boost in the loop.)
 | `ENCLAVE` | `epbs-sim` | kurtosis enclave name |
 | `OBSERVE_SLOTS` | `16` | slots to watch once buildoor is active |
 | `MIN_BUILDER_SLOTS` | `8` | PASS threshold (allows some missed slots) |
-| `BUILDOOR_ACTIVATION_TIMEOUT` | `600` | seconds to wait for the builder deposit to activate |
+| `BUILDOOR_ACTIVATION_TIMEOUT` | `1200` | seconds to wait for the builder deposit to activate (`2400` on the mainnet preset) |
 | `KEEP` | `0` | `1` leaves the enclave + `cb-epbs` running for inspection |
 | `CB_LAUNCH` | `service` | `service` = CB as a first-class enclave service; `docker` = legacy raw `docker run` |
 | `CB_IMAGE` | `commit-boost/commit-boost:km-e2e` | the CB sidecar image |
 | `CB_KM_BIN` | auto | path to the `cb-km` binary |
-| `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package` | ethereum-package to launch |
+| `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package@<pinned sha>` | ethereum-package to launch; pinned to a commit so a rerun is the same devnet |
+| `BUILDOOR_RELAY_URL` | the devnet buildoor (pubkey@host:port) | relay CB bids into, substituted into both relay entries of the CB config |
 
 ### Prerequisites (auto-provisioned)
 
@@ -261,12 +283,16 @@ reachable without an **upstream ethereum-package change** is the first-class-ser
 harness above, not a native mev_type.
 
 **The submodule is the `Commit-Boost/ethereum-package` FORK, on purpose.** The
-repo's ~10 non-epbs scenarios (`cb-basic`, `cb-mux`, …) depend on the fork's
-decomposed MEV resolver (`src/package_io/mev_resolver.star`) and its
-`commit-boost` **sidecar launcher** - a fork-only feature. Upstream
-`ethpandaops/ethereum-package` has **no** `mev_resolver.star` and no commit-boost
-sidecar at all. So the submodule cannot simply be pointed at upstream: that would
-delete the sidecar wiring the rest of the suite runs on.
+classic scenarios (`cb-basic`, `cb-mux`, ...) depend on the fork's decomposed MEV
+resolver (`src/package_io/mev_resolver.star`), which upstream does not have and
+rejects by name: `input_parser.star` fails on an unsupported `mev_type`.
+
+Upstream DOES ship a commit-boost sidecar launcher (`main.star`, the
+`COMMIT_BOOST_MEV_TYPE` branch), a helix relay launcher, and an arbitrary-URL
+external-builder hook (`input_parser.star apply_external_builder_flags`). What it
+cannot express is the COMBINATION: `mev_type` picks a relay and a sidecar as a
+fixed pair, and every classic scenario needs helix paired with commit-boost. That
+one missing axis is what the fork exists for.
 
 **The fork is ~110 upstream PRs behind on gloas.** Pinned submodule
 `1b255a4` (branch `cb-testing`) sits on upstream base `8a11379` (ethpandaops

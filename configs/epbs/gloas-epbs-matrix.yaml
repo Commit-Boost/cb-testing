@@ -12,8 +12,17 @@
 # assertoor reports per-playbook pass/fail, so this answers "which CLs correctly
 # implement the devnet-8 gloas builder flow" without any bespoke assertion code.
 #
-# All images are the stable glamsterdam-devnet-8 tags (prysm has no devnet-8 gloas
-# build yet, so it is omitted). lodestar here is the CLEAN devnet-8 image, NOT
+# Every image is pinned to the <tag>-<sha> immutable variant of its
+# glamsterdam-devnet-8 build. The bare glamsterdam-devnet-8 tag MOVES -- the
+# lodestar one was rebuilt on 2026-09-25 -- so a matrix pinned to the bare tag
+# runs a different set of clients on every rerun and no result can be reproduced
+# or bisected. Bump a pin by reading the current <tag>-<sha> from the registry.
+# Separately: several of these builds predate their own client's gloas builder
+# API merge, so a client failing here may only mean its pinned build predates its
+# own support. Check the build date against the merge before reading a result as
+# a client verdict.
+# prysm is omitted from this list, not because it lacks a build.
+# lodestar here is the CLEAN devnet-8 image, NOT
 # local/lodestar:km -- the builder-config/keymanager branch is only needed for the
 # CB path, and this path talks to buildoor directly.
 #
@@ -25,7 +34,7 @@
 participants_matrix:
   el:
     - el_type: geth
-      el_image: ethpandaops/geth:glamsterdam-devnet-8
+      el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
   cl:
     # Minimal-preset capable CLs. nimbus + grandine are OMITTED here: their
     # glamsterdam-devnet-8 images are compiled MAINNET-preset only and hard-fail
@@ -34,11 +43,11 @@ participants_matrix:
     # executable"). Cover nimbus + grandine with a separate mainnet-preset matrix
     # (slower; assertoor timeouts must be widened for 12s slots).
     - cl_type: lodestar
-      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8
+      cl_image: ethpandaops/lodestar:glamsterdam-devnet-8-f1b14bc
     - cl_type: lighthouse
-      cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8
+      cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8-fa18cdb
     - cl_type: teku
-      cl_image: ethpandaops/teku:glamsterdam-devnet-8
+      cl_image: ethpandaops/teku:glamsterdam-devnet-8-c190221
 mev_type: buildoor
 buildoor_params:
   image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
