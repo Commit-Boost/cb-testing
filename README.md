@@ -32,7 +32,7 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HELIX_RELAY_IMAGE` | `ghcr.io/gattaca-com/helix-relay:main` | Helix relay image |
+| `HELIX_RELAY_IMAGE` | `ghcr.io/gattaca-com/helix-relay@sha256:...` (develop, digest-pinned) | Helix relay image. `develop` because `main` has no `header_stream` route and cannot serve the ws bid stream; by digest because a moving tag is not reproducible. The exact pin is `HELIX_RELAY_IMAGE` in `src/bin/sim/genmodel/scenario.rs` |
 | `MEV_RELAY_IMAGE` | `ethpandaops/mev-boost-relay:main` | flashbots mev-boost-relay — **no longer used** (multi-relay now runs two helix instances); still emitted into configs but inert |
 | `MEV_BOOST_IMAGE` | `commit-boost/commit-boost:kurtosis` | Commit-Boost sidecar image |
 | `BUILDER_CL_IMAGE` | `sigp/lighthouse:latest` | Builder consensus client |
@@ -77,7 +77,9 @@ just generate-configs
 | `cb-timing-games.yml` | Aggressive per-relay timing overrides for late bidding |
 | `cb-extra-validation.yml` | Extra get_header validation via local EL RPC |
 | `cb-config-surface.yml` | Exercises several `[pbs]` config knobs at once (registration batch/timeout/retry, relay-check) |
-| `cb-ws-stream.yml` | getHeader over the websocket bid stream (needs a submodule-built helix) |
+| `cb-ws-stream.yml` | getHeader over the websocket bid stream |
+| `cb-ws-stream-filekey.yml` | the ws api key delivered as a secret file, read by CB with `{ file = ... }` |
+| `cb-ws-stream-nokey.yml` | negative control: the stream is configured and the relay refuses every handshake |
 
 For any combination outside the frozen named set (a feature on a specific client, another CL, ...), compose
 one with `sim scenario` — see [Composable scenarios](#composable-scenarios-sim-scenario) below.

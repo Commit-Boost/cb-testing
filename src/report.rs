@@ -17,7 +17,7 @@ pub struct ObservationWindow {
 pub struct ImageRef {
     /// Role of the image in the pipeline (helix_relay, mev_boost, ...).
     pub role: String,
-    /// Image name/tag as configured (e.g. `ghcr.io/gattaca-com/helix-relay:main`).
+    /// Image name/tag as configured (e.g. `ethpandaops/reth-rbuilder:develop`).
     pub name: String,
     /// Resolved Docker image ID (`sha256:...`), or `null` when the image was
     /// not present locally / could not be inspected. Deliberately serialized as
@@ -219,7 +219,7 @@ pub fn exit_code_with_policy(report: &VerificationReport, require_feature_proof:
 // Baked image defaults — mirror `sim`'s `Images::default()` (that map lives in
 // the `sim` binary crate, which this binary can't import). Used when a config
 // does not pin the image, or when no config was supplied.
-const DEFAULT_HELIX_RELAY_IMAGE: &str = "ghcr.io/gattaca-com/helix-relay:main";
+const DEFAULT_HELIX_RELAY_IMAGE: &str = "ghcr.io/gattaca-com/helix-relay@sha256:9e5ea856d51afbb0639ebf42adb54092bbbf582acbf6553e997b82170a4cd57e";
 const DEFAULT_MEV_BOOST_IMAGE: &str = "commit-boost/commit-boost:kurtosis";
 const DEFAULT_MEV_BUILDER_IMAGE: &str = "ethpandaops/reth-rbuilder:develop";
 const DEFAULT_MEV_BUILDER_CL_IMAGE: &str = "sigp/lighthouse:latest";

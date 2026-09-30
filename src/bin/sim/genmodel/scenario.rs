@@ -89,6 +89,21 @@ pub(super) const MUX_NETWORK_PARAMS: &str = r#"network_params:
 
 // --- Images (the ONE image map) ---------------------------------------------
 
+/// The helix relay every scenario runs, pinned by digest.
+///
+/// `develop`, not `main`: `main` carries no `header_stream` route at all, so the
+/// websocket bid-stream scenarios cannot be served by it in any configuration.
+/// `develop` carries the public stream admission (helix #511 gates it on
+/// `header_stream.admit_all`), and its config schema is a superset of `main`'s,
+/// so the non-stream scenarios render unchanged.
+///
+/// The digest is what makes a result reproducible: `:develop` is a moving tag,
+/// and pinning a moving tag while also vendoring the source is how an upstream
+/// rebuild silently disabled a feature under test. Bump it deliberately, and
+/// re-run the ws scenarios when you do. Resolve the current one with
+/// `docker buildx imagetools inspect ghcr.io/gattaca-com/helix-relay:develop`.
+pub const HELIX_RELAY_IMAGE: &str = "ghcr.io/gattaca-com/helix-relay@sha256:9e5ea856d51afbb0639ebf42adb54092bbbf582acbf6553e997b82170a4cd57e";
+
 /// The unified Docker-image map. Defaults are the baked, proven-good values —
 /// note `mev_boost` = `commit-boost/commit-boost:kurtosis` (the Python's
 /// `commit-boost/pbs:kurtosis` default was the bug this consolidation fixes).
@@ -105,7 +120,7 @@ pub struct Images {
 impl Default for Images {
     fn default() -> Self {
         Self {
-            helix_relay: "ghcr.io/gattaca-com/helix-relay:main".to_string(),
+            helix_relay: HELIX_RELAY_IMAGE.to_string(),
             mev_relay: "ethpandaops/mev-boost-relay:main".to_string(),
             mev_boost: "commit-boost/commit-boost:kurtosis".to_string(),
             builder_el: "ethpandaops/reth-rbuilder:develop".to_string(),
@@ -336,7 +351,7 @@ impl Scenario {
                  # reads `X-Api-Key` from /config/relay-api-key, a file the\n\
                  # ethereum-package renders into the config artifact from\n\
                  # `commit_boost_extra_files`. Proof is two-sided: CB logs\n\
-                 # `relay headers loaded from secret sources` (feature.relay_header_file)\n\
+                 # `relay header loaded from a secret source` (feature.relay_header_file)\n\
                  # and, only with a helix built to log the received key, the relay's\n\
                  # `accepting header stream` line carries the file's value\n\
                  # (feature.relay_saw_api_key, tier 2: inconclusive on the public image).\n\

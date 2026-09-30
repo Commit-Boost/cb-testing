@@ -115,7 +115,7 @@ skip_sigverify and min_bid are CB-internal (the CL never participates; the `comm
 byte-identical across CLs), so a client pairing adds no Law-7 coverage that `cb-sigverify-diff` / `cb-min-bid`
 don't already have.
 
-### The ws header stream requires a helix built from the `./helix` submodule (not the public `:main` image)
+### The ws header stream needs helix `develop`, which is now the default relay image everywhere
 
 An initial ws×CL sweep appeared to show the stream failing on teku/nimbus/lodestar while working on
 lighthouse/prysm — but that was **not** CL-dependent. Root cause: the devnet pulls the public helix image
@@ -132,19 +132,20 @@ one `admit_header_stream` — the stub, no override). The vendored `./helix` sub
 the **working** public admission (`header_stream.rs` calls `check_api_key`, and `get_preferences` reads the
 `x-api-key` header), which is why helix is vendored.
 
-**To run any ws scenario: build helix from the submodule and point the devnet at it.**
+**Resolution: `Images::default()` runs the published `helix-relay` DEVELOP image, pinned by digest, for
+every scenario.** Nothing needs a local helix build, and `just build-helix-image` is now only the escape
+hatch for an unpublished branch or a local patch.
 
 ```bash
-just build-helix-image                          # -> local/helix-relay:kurtosis (from ./helix)
-echo 'HELIX_RELAY_IMAGE=local/helix-relay:kurtosis' >> .env
 just e2e configs/generated/cb-ws-stream.yml     # or any composed ws scenario
 ```
 
-The ws curated point (`cb-ws-prysm`) and the named `cb-ws-stream` / `cb-ws-stream-nokey` / `cb-ws-stream-filekey` scenarios are only
-reproducible against a submodule-built helix; against the current public `:main` they degrade to HTTP fallback.
-This is a mutable-tag skew trap: pinning `:main` while also vendoring the source meant an upstream rebuild could
-silently disable a feature under test. The durable fix is to build helix from the submodule for ws (above); a
-`develop`-tracking pin or a specific working digest are alternatives.
+Both halves of that default are load-bearing. `develop`, because current helix `main` carries no
+`header_stream` route at all, so it cannot serve the stream in any configuration; there is no relay
+config that makes `:main` a ws scenario. By DIGEST, because this section is the record of the
+mutable-tag skew trap: the same tag silently changed the feature under test between two runs, and the
+lesson is not "use a different tag" but "a result is only reproducible against an immutable
+reference". Bumping the digest is a deliberate act, and the ws scenarios get re-run when it happens.
 
 **Confirmed** (2026-08-13): `sim scenario --set clients=geth-teku,get_header=stream` — the exact CL that
 "failed" against `:main` — streams cleanly against the submodule build: `feature.ws_header_stream` PASS

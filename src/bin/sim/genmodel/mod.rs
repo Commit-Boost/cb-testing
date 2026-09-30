@@ -197,6 +197,13 @@ mod tests {
             !basic.contains("commit-boost/pbs:kurtosis"),
             "the pbs bug must be gone"
         );
-        assert!(basic.contains("helix_relay_image: ghcr.io/gattaca-com/helix-relay:main"));
+        // The relay is pinned by digest, not by a moving tag: a mutable tag is
+        // what lets an upstream rebuild change the feature under test.
+        let helix = crate::genmodel::scenario::HELIX_RELAY_IMAGE;
+        assert!(
+            helix.contains("@sha256:"),
+            "helix pin is not a digest: {helix}"
+        );
+        assert!(basic.contains(&format!("helix_relay_image: {helix}")));
     }
 }

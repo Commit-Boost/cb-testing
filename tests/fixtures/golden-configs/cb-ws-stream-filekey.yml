@@ -4,7 +4,7 @@
 # reads `X-Api-Key` from /config/relay-api-key, a file the
 # ethereum-package renders into the config artifact from
 # `commit_boost_extra_files`. Proof is two-sided: CB logs
-# `relay headers loaded from secret sources` (feature.relay_header_file)
+# `relay header loaded from a secret source` (feature.relay_header_file)
 # and, only with a helix built to log the received key, the relay's
 # `accepting header stream` line carries the file's value
 # (feature.relay_saw_api_key, tier 2: inconclusive on the public image).
@@ -26,7 +26,7 @@ mev_params:
   mev_sidecar: commit-boost
   mev_builder: flashbots
 
-  helix_relay_image: ghcr.io/gattaca-com/helix-relay:main
+  helix_relay_image: ghcr.io/gattaca-com/helix-relay@sha256:9e5ea856d51afbb0639ebf42adb54092bbbf582acbf6553e997b82170a4cd57e
   mev_boost_image: commit-boost/commit-boost:kurtosis
   mev_builder_image: ethpandaops/reth-rbuilder:develop
   mev_builder_cl_image: sigp/lighthouse:latest

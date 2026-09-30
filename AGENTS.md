@@ -92,9 +92,12 @@ Against an already-running enclave (no observation window): `just verify-now <en
 ON/OFF differential), `cb-timing-games`, `cb-extra-validation`, `cb-config-surface` (several `[pbs]`
 config knobs at once — registration batch/timeout/retry, relay-check), `cb-ws-stream` +
 `cb-ws-stream-nokey` (the ws stream + its negative control), `cb-ws-stream-filekey` (the ws api key delivered as a secret file via `commit_boost_extra_files`, read by CB with `{ file = ... }`), `cb-mux` (256 validators split across two
-relays). The MEV-delivery gate is `just sweep-gate` (the green subset; `--target-epoch 1
---skip-finalization` for a fast window — a `--min-epochs 0` window collapses to one slot and measures
-delivery over a single slot, which passes/fails by luck).
+relays). The MEV-delivery gate is `just sweep-gate` (the green subset plus the four ws bid-stream
+scenarios, `cb-ws-stream-nokey` included because a negative control that never runs proves nothing;
+`--target-epoch 1 --skip-finalization` for a fast window; a `--min-epochs 0` window collapses to one
+slot and measures delivery over a single slot, which passes/fails by luck). A ws scenario is real
+coverage only because `feature.ws_stream_served` is tier 1: the HTTP fallback keeps every other check
+green on a stream that served nothing.
 
 **Composable scenarios** (`src/bin/sim/genmodel/spec.rs`, [`docs/composable-scenarios.md`](docs/composable-scenarios.md)):
 `ScenarioSpec` is a flat closed-enum surface that composes features freely and renders through the SAME seams

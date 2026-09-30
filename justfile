@@ -85,8 +85,11 @@ test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
 
 # Generate Kurtosis YAML configs into configs/generated/ (the typed `sim`
 # generator). Loads optional .env for Docker image overrides (see .env.example).
+# `--curated` also emits the composable coverage points (the extra CL clients,
+# cb-ws-prysm, cb-timing-extra-validation) so the gate and `just e2e` can reach
+# them by path like any other scenario.
 generate-configs:
-    cargo run --quiet --bin sim -- generate
+    cargo run --quiet --bin sim -- generate --curated
 
 # Build the Commit-Boost image the devnet runs, from the bundled commit-boost submodule
 # (default ./commit-boost-client submodule). Produces commit-boost/commit-boost:{{tag}};
@@ -94,22 +97,26 @@ generate-configs:
 build-cb-image tag="kurtosis" cb_dir="./commit-boost-client":
     cd {{cb_dir}} && just build-all {{tag}}
 
-# Build the helix relay image from the bundled ./helix submodule. REQUIRED for the
-# ws header-stream scenarios: the public ghcr.io/gattaca-com/helix-relay:main image
-# STUBS the header-stream admission (admit_header_stream returns "header stream not
-# available"; the real logic is in gattaca's private ApiProvider), so the stream is
-# refused for every proposer. The `develop` submodule still carries the working public
-# admission. Point HELIX_RELAY_IMAGE at this tag in .env to run a ws scenario.
-# Produces local/helix-relay:{{tag}}.
+# Build the helix relay image from the bundled ./helix submodule. NOT a
+# prerequisite for anything: every scenario, ws included, runs the published
+# helix develop image pinned by digest in `Images::default()`. This is the escape
+# hatch for testing an unpublished helix branch or a local patch: build it, then
+# point HELIX_RELAY_IMAGE at the tag in .env. Produces local/helix-relay:{{tag}}.
 build-helix-image tag="kurtosis":
     docker build -t local/helix-relay:{{tag}} -f helix/relay.Dockerfile helix/
 
 # Pre-pull the public images the devnet needs so `kurtosis run` doesn't stall.
+# Reads them out of a generated config instead of repeating them here: a second
+# hand-maintained copy of the helix digest is exactly how a pin stops pinning.
 # (The CB sidecar image is built locally — see build-cb-image.)
-pull-images:
-    docker pull ghcr.io/gattaca-com/helix-relay:main
-    docker pull ethpandaops/reth-rbuilder:develop
-    docker pull sigp/lighthouse:latest
+pull-images: generate-configs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for key in helix_relay_image mev_builder_image mev_builder_cl_image; do
+        image="$(awk -v k="$key:" '$1 == k {print $2; exit}' configs/generated/cb-basic.yml)"
+        echo "pulling $image"
+        docker pull "$image"
+    done
 
 # One-command e2e: (re)generate configs, pull public images, launch + verify.
 # PREREQ (once): `just build-cb-image` — the CB image must exist locally.
@@ -149,6 +156,9 @@ testnet-verbose config:
 # Each config gets its own enclave. While one is observing, others can launch.
 # For N configs with --jobs=4, expect roughly 4× throughput vs sequential.
 #
+# Covers every file in configs/generated/, which since `generate-configs --curated`
+# includes the composable coverage points: 20 configs, not the gate's 14.
+#
 # Usage:
 #   just test-all                    # default: 2 jobs, no results dir
 #   just test-all 4 /tmp/results    # 4 jobs, save results to /tmp/results
@@ -168,14 +178,22 @@ test-one config jobs="1":
 # window (wait 1 epoch, observe 1 epoch, skip finalization) — all must pass (exit 0).
 # This is the manual gate (a full devnet OOMs free GitHub runners, so there is no
 # nightly CI for it). Excludes: cb-sigverify-diff-control (poison negative control,
-# fails by design), cb-ws-stream* (need a submodule-built helix — see
-# build-helix-image + docs/composable-scenarios.md), cb-signer.
+# fails by design) and cb-signer.
+# The ws bid stream is v0.11's headline feature, so the four stream scenarios are in
+# the gate, cb-ws-stream-nokey included: it configures the relay to REFUSE the
+# handshake, and a control that never runs discriminates nothing. feature.ws_stream_served
+# is what makes them real coverage: the HTTP fallback keeps every MEV check green on a
+# stream that served nothing, and that check is tier 1 and FAILs on it. The gate runs
+# without --require-feature-proof, which would red the nokey control and cb-skip-sigverify
+# for reporting exactly what they are built to report.
 # NOTE run `just build-cb-image` once first (the CB image must exist).
 # RESOURCE NOTE: cb-mux is the heaviest scenario (2 relays + 256 validators). On a
 # constrained/shared box, --jobs 2 can CPU-starve it — register_validator deadline
 # timeouts (555) + get_header 4xx + zero delivery is the starvation signature, NOT a
 # defect. Re-run the offender solo (`just e2e configs/generated/cb-mux.yml`) or run
 # the whole gate at `just sweep-gate 1` for a definitive (slower) result.
+# COST: each config takes about 14 minutes, so 14 configs are about 3h15m at --jobs 1
+# and roughly half that at --jobs 2 on a box with room for two devnets.
 sweep-gate jobs="2": generate-configs pull-images
     cargo run --release --bin cb-orchestrator -- \
         --jobs {{jobs}} --target-epoch 1 --min-epochs 1 --skip-finalization \
@@ -188,7 +206,11 @@ sweep-gate jobs="2": generate-configs pull-images
         configs/generated/cb-timing-games.yml \
         configs/generated/cb-extra-validation.yml \
         configs/generated/cb-config-surface.yml \
-        configs/generated/cb-min-bid.yml
+        configs/generated/cb-min-bid.yml \
+        configs/generated/cb-ws-stream.yml \
+        configs/generated/cb-ws-stream-filekey.yml \
+        configs/generated/cb-ws-prysm.yml \
+        configs/generated/cb-ws-stream-nokey.yml
 
 # Test a consensus-client build against the ePBS (gloas) sim, end to end.
 # The commit-boost artifacts (km-e2e image + cb-km) are built from the pinned

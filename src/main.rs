@@ -554,6 +554,17 @@ async fn run_verification(cli: &Cli) -> i32 {
                     &template,
                     cb_path,
                 ));
+                // The tier-1 ws gate. Reads the stream's own status counter out
+                // of the metrics verdict already in `all_checks`, so it must run
+                // after run_metrics_checks.
+                let stream_bids = checks::cb_metrics::stream_bids_served(&all_checks);
+                all_checks.extend(checks::feature_fired::run_ws_stream_served_check(
+                    &enclave_name,
+                    &services.cb_service_names,
+                    &template,
+                    cb_path,
+                    stream_bids,
+                ));
             }
             Err(e) => {
                 warn!("Could not read CB config for feature-fired checks: {e}");

@@ -37,10 +37,10 @@ pub enum Feature {
     /// every MEV check silently - this marker check is the only discriminator.
     WsHeaderStream,
     /// A relay header sourced from a secret file (`headers = { X-Api-Key = {
-    /// file = ... } }`, per-relay). CB logs `"relay headers loaded from secret
-    /// sources"` when it builds the relay client on no other codepath, so the
-    /// marker proves the file was read (a missing/empty file fails CB startup
-    /// outright).
+    /// file = ... } }`, per-relay). CB logs `"relay header loaded from a
+    /// secret source"` when it builds the relay client on no other codepath,
+    /// so the marker proves the file was read (a missing/empty file fails CB
+    /// startup outright).
     RelayHeaderFile,
     /// `skip_sigverify = true` (`[pbs]`). A negative codepath: signature
     /// verification is simply not called, with NO success log or metric. On the
@@ -155,9 +155,10 @@ fn config_enables(template: &str, key: &str, value: &str) -> bool {
 pub const WS_STREAM_MARKER: &str = "received new header from ws stream";
 /// CB's warn line when a stream attempt degrades to HTTP.
 pub const WS_FALLBACK_MARKER: &str = "falling back to http get_header";
-/// CB's info line, emitted once per relay client build, naming the headers
-/// that came from a file or env source (never their values).
-pub const RELAY_HEADER_FILE_MARKER: &str = "relay headers loaded from secret sources";
+/// CB's info line, emitted once per header that came from a file or env
+/// source when the relay client is built, naming the source and a fingerprint
+/// of the value (never the value).
+pub const RELAY_HEADER_FILE_MARKER: &str = "relay header loaded from a secret source";
 /// The helix relay's stream-admission line; a locally built helix logs the
 /// received api key on it as `x_api_key="..."` (upstream does not).
 pub const RELAY_ACCEPTING_STREAM_MARKER: &str = "accepting header stream";
@@ -338,6 +339,178 @@ pub fn classify_ws_fallback(streamed: usize, fallbacks: usize) -> CheckResult {
                 "stream NEVER served: all getHeader traffic degraded to HTTP ({f} fallback                  warn(s)). The feature.ws_header_stream check carries the inconclusive flag                  for this run"
             ),
         ),
+    }
+    .with_data(data)
+}
+
+/// What the scenario configured the relay to do with a stream handshake.
+///
+/// The two are not symmetric. `Admitted` is a claim the run has to EARN (a bid
+/// crossed the stream); `Refused` is the negative control asserting the
+/// opposite, and its correct outcome is the HTTP fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamAdmission {
+    Admitted,
+    Refused,
+}
+
+/// Read `header_stream.admit_all` out of the helix relay config embedded in a
+/// Kurtosis args file (pure).
+///
+/// `Refused` ONLY on an explicit `admit_all: false`. A block that is absent, a
+/// relay that is not helix, an args file that will not parse: all read as
+/// `Admitted`, so a scenario has to DECLARE itself a negative control to be
+/// excused from proving the stream worked. The default has to be the strict
+/// one: the whole failure this gate closes is a stream that quietly served
+/// nothing while every other check stayed green.
+pub fn detect_stream_admission(args_yaml: &str) -> StreamAdmission {
+    let admit_all = serde_yaml::from_str::<serde_yaml::Value>(args_yaml)
+        .ok()
+        .and_then(|args| {
+            let relay_config = args
+                .get("mev_params")?
+                .get("helix_relay_config")?
+                .as_str()?;
+            let relay: serde_yaml::Value = serde_yaml::from_str(relay_config).ok()?;
+            relay.get("header_stream")?.get("admit_all")?.as_bool()
+        });
+    match admit_all {
+        Some(false) => StreamAdmission::Refused,
+        _ => StreamAdmission::Admitted,
+    }
+}
+
+/// Evidence that a bid crossed the ws stream, from the two independent sources.
+///
+/// `None` on either field means that source could not be read at all, which is
+/// NOT the same as reading it and finding nothing:
+///
+/// - `log_markers`: `None` when every CB service's log fetch failed.
+/// - `metric_bids`: `None` when commit-boost exposes no `get_header_stream`
+///   series. It only counts the stream separately from v0.11.0-rc2, and an
+///   older sidecar folds those responses into `get_header`, where a fallback
+///   200 is indistinguishable from a streamed one. Also `None` when the metrics
+///   endpoint could not be scraped.
+///
+/// The two are read as a UNION. Either one alone proves the stream served, so
+/// an older commit-boost is carried by the log marker and a run with debug
+/// logging off is carried by the counter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamEvidence {
+    pub log_markers: Option<usize>,
+    pub metric_bids: Option<u64>,
+}
+
+impl StreamEvidence {
+    /// A bid demonstrably crossed the stream.
+    fn served(&self) -> bool {
+        self.log_markers.unwrap_or(0) > 0 || self.metric_bids.unwrap_or(0) > 0
+    }
+
+    /// At least one source answered, so "no bid" is an observation rather than
+    /// a blind spot.
+    fn measured(&self) -> bool {
+        self.log_markers.is_some() || self.metric_bids.is_some()
+    }
+
+    fn describe(&self) -> String {
+        let markers = match self.log_markers {
+            Some(n) => format!("{n} CB `{WS_STREAM_MARKER}` log line(s)"),
+            None => "CB logs unreadable".to_string(),
+        };
+        let bids = match self.metric_bids {
+            Some(n) => format!("{n} bid(s) counted on cb_pbs_relay_status_code_total{{endpoint=\"get_header_stream\"}}"),
+            None => "no get_header_stream counter exposed (commit-boost older than v0.11.0-rc2, or metrics unreachable)".to_string(),
+        };
+        format!("{markers}; {bids}")
+    }
+}
+
+/// The GATING verdict on the ws bid stream (Law 4 seam), tier 1.
+///
+/// Every other ws check is annotative by design, and commit-boost falls back to
+/// HTTP on a failed handshake while keeping the slot green, so a stream
+/// scenario pointed at a stream-incapable relay passes its MEV checks while
+/// proving nothing. This is the check that refuses that outcome.
+///
+/// - `Admitted`, a bid crossed        -> PASS
+/// - `Admitted`, none crossed         -> FAIL, whether that was observed or
+///   simply unmeasurable: the scenario exists to exercise the stream and did not
+/// - `Refused`, none crossed          -> PASS, the negative control held
+/// - `Refused`, a bid crossed         -> FAIL, the admission toggle did not
+///   hold, so the control controls nothing and the ws suite loses its
+///   discriminator
+/// - `Refused`, nothing readable      -> WARN, inconclusive: the control
+///   asserts a negative, which silence cannot confirm, and it is not the run's
+///   capability claim
+pub fn classify_ws_stream_served(
+    admission: StreamAdmission,
+    evidence: StreamEvidence,
+) -> CheckResult {
+    let id = "feature.ws_stream_served";
+    let data = serde_json::json!({
+        "feature": "ws bid stream",
+        "config_key": "get_header",
+        "relay_admission": match admission {
+            StreamAdmission::Admitted => "admit_all",
+            StreamAdmission::Refused => "refuse_all",
+        },
+        "streamed_log_markers": evidence.log_markers,
+        "streamed_bids_metric": evidence.metric_bids,
+        "evidence_readable": evidence.measured(),
+    });
+    let sources = evidence.describe();
+
+    match (admission, evidence.served(), evidence.measured()) {
+        (StreamAdmission::Admitted, true, _) => CheckResult::pass(
+            id,
+            1,
+            format!("the ws bid stream served the proposer ✓ ({sources})"),
+        ),
+        (StreamAdmission::Admitted, false, true) => CheckResult::fail(
+            id,
+            1,
+            format!(
+                "the relay admits the stream and NOT ONE bid crossed it ({sources}): every slot \
+                 took the HTTP fallback, which keeps the MEV checks green while the transport \
+                 under test did nothing"
+            ),
+        ),
+        (StreamAdmission::Admitted, false, false) => CheckResult::fail(
+            id,
+            1,
+            format!(
+                "the relay admits the stream and neither evidence source could be read \
+                 ({sources}); this scenario exists to exercise the stream and measured nothing"
+            ),
+        ),
+        (StreamAdmission::Refused, false, true) => CheckResult::pass(
+            id,
+            1,
+            format!(
+                "negative control held ✓ the relay refused every handshake \
+                 (header_stream.admit_all: false) and no bid crossed the stream ({sources})"
+            ),
+        ),
+        (StreamAdmission::Refused, true, _) => CheckResult::fail(
+            id,
+            1,
+            format!(
+                "the relay was configured to refuse every handshake \
+                 (header_stream.admit_all: false) and bids crossed the stream anyway \
+                 ({sources}): the admission toggle did not hold, so this negative control \
+                 discriminates nothing"
+            ),
+        ),
+        (StreamAdmission::Refused, false, false) => CheckResult::warn(
+            id,
+            1,
+            format!(
+                "negative control unproven: neither evidence source could be read \
+                 ({sources}), and silence cannot confirm a refusal"
+            ),
+        )
+        .mark_inconclusive(),
     }
     .with_data(data)
 }
@@ -590,6 +763,40 @@ pub async fn run_feature_checks(
     out
 }
 
+/// Run the tier-1 ws bid-stream gate for a scenario that selects the stream
+/// transport. `None` when the CB config does not, so every other scenario is
+/// untouched.
+///
+/// `config_path` is the run's Kurtosis args file, which carries the relay's
+/// `header_stream.admit_all`; a bare CB TOML has no relay config to read, so it
+/// falls to the strict default (see [`detect_stream_admission`]).
+/// `metric_bids` comes from [`crate::checks::cb_metrics::stream_bids_served`].
+pub fn run_ws_stream_served_check(
+    enclave: &str,
+    cb_service_names: &[String],
+    template: &str,
+    config_path: &str,
+    metric_bids: Option<u64>,
+) -> Option<CheckResult> {
+    if !detect_enabled_features(template).contains(&Feature::WsHeaderStream) {
+        return None;
+    }
+    let admission = match std::fs::read_to_string(config_path) {
+        Ok(yaml) => detect_stream_admission(&yaml),
+        Err(e) => {
+            warn!("could not read {config_path} for the ws stream gate: {e}");
+            StreamAdmission::Admitted
+        }
+    };
+    Some(classify_ws_stream_served(
+        admission,
+        StreamEvidence {
+            log_markers: count_log_lines_seen(enclave, cb_service_names, &[WS_STREAM_MARKER]),
+            metric_bids,
+        },
+    ))
+}
+
 /// Collect the `value_eth` of every `auction winner` CB logged, as f64 ETH.
 /// Lines whose value will not parse are skipped rather than failing the check.
 fn auction_winner_values_eth(enclave: &str, cb_service_names: &[String]) -> Vec<f64> {
@@ -634,6 +841,29 @@ async fn check_one(
 
     let proof_count = count_log_lines(enclave, cb_service_names, feature.proof_markers());
     classify_marker_feature(feature, proof_count)
+}
+
+/// [`count_log_lines`], but `None` when NO service's logs could be read: no
+/// CB service was discovered, or every fetch errored. A gating check has to
+/// tell "the marker is not in the logs" from "the logs were never read"; the
+/// annotative callers do not, and keep the swallow-and-count version.
+fn count_log_lines_seen(
+    enclave: &str,
+    cb_service_names: &[String],
+    keywords: &[&str],
+) -> Option<usize> {
+    let mut count = 0usize;
+    let mut read_any = false;
+    for service in cb_service_names {
+        match fetch_filtered_logs(enclave, service, keywords) {
+            Ok(logs) => {
+                read_any = true;
+                count += logs.lines().filter(|l| !l.trim().is_empty()).count();
+            }
+            Err(e) => warn!("ws stream gate: failed to fetch logs from '{service}': {e}"),
+        }
+    }
+    read_any.then_some(count)
 }
 
 /// Count non-empty CB log lines matching any of `keywords` across services.
@@ -877,6 +1107,209 @@ mod tests {
         );
     }
 
+    // --- the tier-1 ws gate ---------------------------------------------
+    //
+    // Everything above is annotative. These are the verdicts that decide the
+    // exit code, so each one is pinned to the shape of run that produces it.
+
+    /// A ws scenario's args file, with the relay's admission toggle set.
+    fn ws_args_file(admit_all: &str) -> String {
+        format!(
+            "mev_params:\n  \
+               mev_relay: helix\n  \
+               helix_relay_config: |\n    \
+                 instance_id: \"helix-kurtosis-test\"\n    \
+                 gossip_payload_on_header: false\n    \
+                 header_stream:\n      \
+                   admit_all: {admit_all}\n    \
+                 is_local_dev: false\n"
+        )
+    }
+
+    // Contract: intent is read from the relay config the run launched with, and
+    // ONLY an explicit refusal excuses a scenario from proving the stream.
+    #[test]
+    fn stream_admission_is_read_from_the_args_file() {
+        assert_eq!(
+            detect_stream_admission(&ws_args_file("false")),
+            StreamAdmission::Refused
+        );
+        assert_eq!(
+            detect_stream_admission(&ws_args_file("true")),
+            StreamAdmission::Admitted
+        );
+        // No header_stream block (an http scenario, or a relay that is not
+        // helix), unparseable input, and an empty file all default to strict.
+        for yaml in [
+            "mev_params:\n  helix_relay_config: |\n    instance_id: \"x\"\n",
+            "mev_params: {}\n",
+            "\t not: [yaml",
+            "",
+        ] {
+            assert_eq!(
+                detect_stream_admission(yaml),
+                StreamAdmission::Admitted,
+                "{yaml:?} must not excuse a scenario"
+            );
+        }
+    }
+
+    // Contract: the failing input this gate exists for. The relay admits the
+    // stream, every window fell back to HTTP, and nothing crossed the wire.
+    // Tier 1 FAIL, so `exit_code` is 1 and the sweep counts it as a loss.
+    #[test]
+    fn stream_that_never_served_is_fatal() {
+        let observed = classify_ws_stream_served(
+            StreamAdmission::Admitted,
+            StreamEvidence {
+                log_markers: Some(0),
+                metric_bids: Some(0),
+            },
+        );
+        assert_eq!(observed.status, CheckStatus::Fail, "{}", observed.detail);
+        assert_eq!(observed.tier, 1);
+        assert!(
+            observed.detail.contains("NOT ONE bid"),
+            "{}",
+            observed.detail
+        );
+
+        // The same verdict when the stream histograms are absent entirely and
+        // no marker was logged: a scenario that measured nothing is not green.
+        let unmeasured = classify_ws_stream_served(
+            StreamAdmission::Admitted,
+            StreamEvidence {
+                log_markers: None,
+                metric_bids: None,
+            },
+        );
+        assert_eq!(
+            unmeasured.status,
+            CheckStatus::Fail,
+            "{}",
+            unmeasured.detail
+        );
+        assert!(
+            unmeasured.detail.contains("measured nothing"),
+            "{}",
+            unmeasured.detail
+        );
+        assert_eq!(unmeasured.data["evidence_readable"], false);
+    }
+
+    // Contract: either source alone carries a working stream. The log marker
+    // is what a commit-boost older than v0.11.0-rc2 leaves (no
+    // get_header_stream series at all), the counter is what a run with debug
+    // logging off leaves.
+    #[test]
+    fn either_evidence_source_alone_proves_the_stream() {
+        for evidence in [
+            StreamEvidence {
+                log_markers: Some(37),
+                metric_bids: None,
+            },
+            StreamEvidence {
+                log_markers: None,
+                metric_bids: Some(60),
+            },
+            StreamEvidence {
+                log_markers: Some(0),
+                metric_bids: Some(60),
+            },
+            StreamEvidence {
+                log_markers: Some(37),
+                metric_bids: Some(0),
+            },
+        ] {
+            let r = classify_ws_stream_served(StreamAdmission::Admitted, evidence);
+            assert_eq!(r.status, CheckStatus::Pass, "{evidence:?}: {}", r.detail);
+        }
+    }
+
+    // Contract: cb-ws-stream-nokey. It configures a stream and EXPECTS the
+    // relay to refuse it, so the fatal path above must not fire on it - it is
+    // the only reason the ws criteria are known to discriminate at all.
+    #[test]
+    fn the_nokey_negative_control_still_passes() {
+        let r = classify_ws_stream_served(
+            detect_stream_admission(&ws_args_file("false")),
+            StreamEvidence {
+                log_markers: Some(0),
+                metric_bids: Some(0),
+            },
+        );
+        assert_eq!(r.status, CheckStatus::Pass, "{}", r.detail);
+        assert!(r.detail.contains("negative control held"), "{}", r.detail);
+        assert!(!r.inconclusive);
+
+        // A control that stopped controlling is itself a failure: with the
+        // admission refused, a bid on the stream means the toggle went dead and
+        // every ws verdict that leans on it is worthless.
+        let leaked = classify_ws_stream_served(
+            StreamAdmission::Refused,
+            StreamEvidence {
+                log_markers: Some(12),
+                metric_bids: None,
+            },
+        );
+        assert_eq!(leaked.status, CheckStatus::Fail, "{}", leaked.detail);
+        assert!(leaked.detail.contains("did not hold"), "{}", leaked.detail);
+
+        // Unreadable evidence cannot confirm a negative, but the control makes
+        // no capability claim, so it is an inconclusive WARN (non-fatal by
+        // default, fatal under --require-feature-proof) rather than a FAIL.
+        let blind = classify_ws_stream_served(
+            StreamAdmission::Refused,
+            StreamEvidence {
+                log_markers: None,
+                metric_bids: None,
+            },
+        );
+        assert_eq!(blind.status, CheckStatus::Warn, "{}", blind.detail);
+        assert!(blind.inconclusive);
+    }
+
+    // Contract: the gate is emitted for stream scenarios only. An http
+    // scenario must not grow a tier-1 check it can never satisfy.
+    #[test]
+    fn the_gate_is_emitted_for_stream_scenarios_only() {
+        let http = "[pbs]\nport = 1\n[[relays]]\nget_header = \"http\"\n";
+        assert!(
+            run_ws_stream_served_check("enclave", &[], http, "/no/such/config.yml", None).is_none()
+        );
+        // With the stream selected it is emitted even when nothing else can be
+        // read - that is the whole point.
+        let stream = "[pbs]\nport = 1\n[[relays]]\nget_header = \"stream\"\n";
+        let r = run_ws_stream_served_check("enclave", &[], stream, "/no/such/config.yml", None)
+            .expect("stream scenarios are gated");
+        assert_eq!(r.id, "feature.ws_stream_served");
+        assert_eq!(r.tier, 1);
+        assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    // Contract: the gate fails a run through the SAME predicate the exit code
+    // uses, so a never-streaming ws run exits 1 rather than warning.
+    #[test]
+    fn a_dead_stream_fails_the_tier1_predicate() {
+        let dead = classify_ws_stream_served(
+            StreamAdmission::Admitted,
+            StreamEvidence {
+                log_markers: Some(0),
+                metric_bids: Some(0),
+            },
+        );
+        assert!(crate::report::tier1_failed(&[dead]));
+
+        let control = classify_ws_stream_served(
+            StreamAdmission::Refused,
+            StreamEvidence {
+                log_markers: Some(0),
+                metric_bids: Some(0),
+            },
+        );
+        assert!(!crate::report::tier1_failed(&[control]));
+    }
+
     // Contract: the marker strings match CB main's actual log lines (pinned
     // from a live run; if CB rewords them, this is the place that
     // must fail).
@@ -884,6 +1317,10 @@ mod tests {
     fn ws_marker_strings_pinned() {
         assert_eq!(WS_STREAM_MARKER, "received new header from ws stream");
         assert_eq!(WS_FALLBACK_MARKER, "falling back to http get_header");
+        assert_eq!(
+            RELAY_HEADER_FILE_MARKER,
+            "relay header loaded from a secret source"
+        );
     }
 
     #[test]
@@ -1027,6 +1464,108 @@ headers = { X-Api-Key = { file = "/config/relay-api-key" } }
         assert_eq!(
             classify_relay_saw_api_key(Some("abc-123"), &[colored]).status,
             CheckStatus::Pass
+        );
+    }
+}
+
+#[cfg(test)]
+mod golden_config_tests {
+    use super::*;
+
+    /// The ws gate reads intent out of the REAL args files the scenarios run,
+    /// which still carry the ethereum-package's `{{ .POSTGRES_PORT }}` template
+    /// holes at check time. Parse those, not a hand-written sample: a parser
+    /// that chokes on them would read every scenario as "admits" and fail the
+    /// negative control.
+    #[test]
+    fn admission_is_read_out_of_the_real_scenario_configs() {
+        for (config, want) in [
+            (
+                include_str!("../../tests/fixtures/golden-configs/cb-ws-stream.yml"),
+                StreamAdmission::Admitted,
+            ),
+            (
+                include_str!("../../tests/fixtures/golden-configs/cb-ws-stream-filekey.yml"),
+                StreamAdmission::Admitted,
+            ),
+            (
+                include_str!("../../tests/fixtures/curated-configs/cb-ws-prysm.yml"),
+                StreamAdmission::Admitted,
+            ),
+            (
+                include_str!("../../tests/fixtures/golden-configs/cb-ws-stream-nokey.yml"),
+                StreamAdmission::Refused,
+            ),
+            // An http scenario has no header_stream block at all.
+            (
+                include_str!("../../tests/fixtures/golden-configs/cb-basic.yml"),
+                StreamAdmission::Admitted,
+            ),
+        ] {
+            assert_eq!(detect_stream_admission(config), want);
+        }
+    }
+
+    /// Every scenario that arms the ws gate is IN the release gate. A stream
+    /// scenario the sweep never runs asserts nothing, which is the hole this
+    /// gate exists to close; catching that by review is how it stayed open.
+    #[test]
+    fn every_ws_scenario_is_in_the_release_gate() {
+        let justfile = std::fs::read_to_string("justfile").unwrap();
+        // The recipe body is the indented block after the signature line.
+        let body: String = justfile
+            .split_once("\nsweep-gate ")
+            .expect("justfile has a sweep-gate recipe")
+            .1
+            .lines()
+            .skip(1)
+            .take_while(|l| l.starts_with(char::is_whitespace))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("cb-orchestrator"),
+            "sweep-gate recipe body not found; the justfile shape changed"
+        );
+        for name in ws_armed_scenarios() {
+            let path = format!("configs/generated/{name}.yml");
+            assert!(
+                body.contains(&path),
+                "{name} arms the ws gate but sweep-gate does not run it"
+            );
+        }
+    }
+
+    /// The gate is armed by exactly the four ws scenarios in `sweep-gate`, and
+    /// by nothing else. A scenario that grew a stream without anyone noticing
+    /// would show up here.
+    /// Every goldened scenario whose CB config selects the stream transport.
+    fn ws_armed_scenarios() -> Vec<String> {
+        use crate::checks::mux_routing::read_cb_config_template;
+        let mut armed: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir("tests/fixtures/golden-configs")
+            .unwrap()
+            .chain(std::fs::read_dir("tests/fixtures/curated-configs").unwrap())
+        {
+            let path = entry.unwrap().path();
+            let template = read_cb_config_template(path.to_str().unwrap()).unwrap();
+            if detect_enabled_features(&template).contains(&Feature::WsHeaderStream) {
+                armed.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+            }
+        }
+        armed.sort_unstable();
+        armed
+    }
+
+    #[test]
+    fn the_gate_arms_on_exactly_the_ws_scenarios() {
+        assert_eq!(
+            ws_armed_scenarios(),
+            vec![
+                "cb-ws-prysm",
+                "cb-ws-stream",
+                "cb-ws-stream-filekey",
+                "cb-ws-stream-nokey",
+            ]
         );
     }
 }

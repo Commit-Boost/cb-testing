@@ -12,6 +12,10 @@
 //! |------------------------|---------------|---------------------------------------------------|
 //! | `get_header`           | 200           | Relay delivered a bid                             |
 //! |                        | 204           | Valid request, no bid this slot (NORMAL)          |
+//! | `get_header_stream`    | 200/204       | Same, over the ws bid stream. A handshake that    |
+//! |                        |               | fails with time left falls back to HTTP and       |
+//! |                        |               | counts under `get_header`, so the two series      |
+//! |                        |               | split stream-served from fallback-served          |
 //! | `register_validator`   | 200           | Registrations accepted                            |
 //! | `submit_blinded_block` | 200           | v1 path: CB returned payload, CL publishes block  |
 //! |                        | 202           | v2 path: relay publishes unblinded block itself   |
@@ -164,6 +168,55 @@ fn bucket_code(code: &str) -> String {
     }
 }
 
+/// The value of a counter, gauge or untyped sample.
+fn sample_value(s: &prometheus_parse::Sample) -> Option<f64> {
+    match &s.value {
+        prometheus_parse::Value::Counter(v)
+        | prometheus_parse::Value::Gauge(v)
+        | prometheus_parse::Value::Untyped(v) => Some(*v),
+        _ => None,
+    }
+}
+
+/// The cumulative buckets of a histogram family as `(le, count)`, summed over
+/// label sets and sorted ascending with `+Inf` last; `None` when the family is
+/// absent.
+///
+/// `prometheus-parse` collapses a histogram family into one
+/// `Value::Histogram(Vec<HistogramCount>)` sample under the bare metric name,
+/// not the `_bucket` suffix: matching on the suffix finds nothing.
+fn histogram_buckets(scrape: &Scrape, metric: &str) -> Option<Vec<(f64, f64)>> {
+    let mut buckets: Vec<(f64, f64)> = Vec::new();
+    let mut seen = false;
+    for s in scrape.samples.iter().filter(|s| s.metric == metric) {
+        let prometheus_parse::Value::Histogram(counts) = &s.value else {
+            continue;
+        };
+        seen = true;
+        for hc in counts {
+            match buckets.iter_mut().find(|(le, _)| *le == hc.less_than) {
+                Some((_, count)) => *count += hc.count,
+                None => buckets.push((hc.less_than, hc.count)),
+            }
+        }
+    }
+    buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
+    seen.then_some(buckets)
+}
+
+/// Total of a counter family, summed over label sets. Absent reads as zero: a
+/// counter with no observed label values is simply not exposed.
+fn counter_total(scrape: &Scrape, metric: &str) -> f64 {
+    scrape
+        .samples
+        .iter()
+        .filter(|s| s.metric == metric)
+        .filter_map(sample_value)
+        // `Sum for f64` folds from -0.0, which an absent counter would then
+        // render as "-0 invalid frames" in a check's message
+        .fold(0.0, |acc, v| acc + v)
+}
+
 /// Collect status-code counts for a given endpoint from a scrape.
 ///
 /// Populates both sides of the CB metric model independently (see
@@ -184,11 +237,8 @@ pub fn collect_endpoint_stats(scrape: &Scrape, endpoint: &str) -> EndpointStats 
             Some(c) => c.to_string(),
             None => continue,
         };
-        let count = match &s.value {
-            prometheus_parse::Value::Counter(v)
-            | prometheus_parse::Value::Gauge(v)
-            | prometheus_parse::Value::Untyped(v) => *v,
-            _ => continue,
+        let Some(count) = sample_value(s) else {
+            continue;
         };
         if is_relay_side {
             let relay_id = s
@@ -276,7 +326,9 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
         return classify_submit_blinded_block_beacon_side(id, tier, stats, data);
     }
 
-    if r5xx > 0.0 {
+    // A 5xx to the ws upgrade falls back to HTTP, where a real relay outage
+    // still shows; the stream series itself never FAILs on it
+    if r5xx > 0.0 && endpoint != "get_header_stream" {
         // Timeouts (555) are deliberately EXCLUDED from this denominator: the
         // 5xx rate is "fraction of COMPLETED relay responses that were errors",
         // so a real 5xx storm still FAILs even amid heavy timeout polling.
@@ -340,6 +392,31 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     }
 
     match endpoint {
+        // The ws bid stream (commit-boost v0.11.0-rc2+). A refused or empty
+        // stream is DEGRADED, not broken: the HTTP fallback under `get_header`
+        // still serves the slot, and stream health proper is owned by
+        // feature.ws_header_stream / feature.ws_stream_fallback. Never FAILs.
+        "get_header_stream" => {
+            if r200 > 0.0 {
+                CheckResult::pass(
+                    id,
+                    tier,
+                    format!(
+                        "get_header_stream: {r200:.0} bids over the stream, {r204:.0} no-bid (204), {r4xx:.0} refused (4xx), {r5xx:.0} relay error (5xx), {rtransport:.0} transport error (556)"
+                    ),
+                )
+                .with_data(data)
+            } else {
+                CheckResult::warn(
+                    id,
+                    tier,
+                    format!(
+                        "get_header_stream: no bid served over the stream ({r204:.0} no-bid, {r4xx:.0} refused, {r5xx:.0} relay error, {rtransport:.0} transport error); see feature.ws_header_stream"
+                    ),
+                )
+                .with_data(data)
+            }
+        }
         "get_header" => {
             if r200 > 0.0 {
                 let mut timeout_note = if rtimeout > 0.0 {
@@ -368,6 +445,42 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
                 } else {
                     CheckResult::warn(id, tier, msg).with_data(data)
                 }
+            } else if stats.relay_totals.is_empty() {
+                // Every header went over the stream, so the beacon side is the
+                // only record here; cb_get_header_stream_matrix owns the stream
+                let served = stats.beacon_get("200");
+                if served > 0.0 {
+                    CheckResult::pass(
+                        id,
+                        tier,
+                        format!(
+                            "get_header: no http traffic; the beacon node was served {served:.0} header(s) over the stream (see cb_get_header_stream_matrix)"
+                        ),
+                    )
+                    .with_data(data)
+                } else {
+                    CheckResult::warn(
+                        id,
+                        tier,
+                        "get_header: no http traffic and no header reached the beacon node; see cb_get_header_stream_matrix",
+                    )
+                    .with_data(data)
+                }
+            } else if r4xx > 0.0 && r4xx <= stats.beacon_get("200") {
+                // The relay side carries only incidental traffic here - a ws
+                // stream that fell back, or the startup registration race -
+                // while the beacon node was served at least as often. Judge on
+                // the side that says whether the proposer got its header, as
+                // submit_blinded_block already does.
+                CheckResult::warn(
+                    id,
+                    tier,
+                    format!(
+                        "get_header: {r4xx:.0} 4xx and no 2xx from the relay, but the beacon node was served {:.0} header(s) - incidental HTTP traffic (ws fallback / startup registration race)",
+                        stats.beacon_get("200")
+                    ),
+                )
+                .with_data(data)
             } else {
                 CheckResult::fail(
                     id,
@@ -587,12 +700,7 @@ pub fn check_v2_unsupported(scrape: &Scrape) -> CheckResult {
             .get("relay_id")
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        let v = match &s.value {
-            prometheus_parse::Value::Counter(v)
-            | prometheus_parse::Value::Gauge(v)
-            | prometheus_parse::Value::Untyped(v) => *v,
-            _ => continue,
-        };
+        let Some(v) = sample_value(s) else { continue };
         *by_relay.entry(relay).or_default() += v;
     }
 
@@ -699,55 +807,14 @@ pub fn histogram_quantile(q: f64, buckets: &[(f64, f64)]) -> Option<f64> {
 /// `cb_pbs_relay_latency` histogram into a single global distribution.
 /// We do this because a p95 per relay is rarely useful for our purposes;
 /// what matters is "did at least one relay answer fast enough often".
-///
-/// # Histogram parsing
-///
-/// `prometheus-parse` collapses histogram families into a single
-/// `Value::Histogram(Vec<HistogramCount>)` sample under the bare metric
-/// name (NOT `_bucket` suffix). Earlier versions of this code grepped for
-/// `cb_pbs_relay_latency_bucket` and always found nothing -- that's why
-/// the p95 check used to SKIP even when histogram data was present.
 pub fn check_relay_latency(scrape: &Scrape, threshold_ms: f64) -> CheckResult {
-    let mut by_le: BTreeMap<String, f64> = BTreeMap::new();
-    let mut any_bucket = false;
-    for s in &scrape.samples {
-        if s.metric != "cb_pbs_relay_latency" {
-            continue;
-        }
-        if let prometheus_parse::Value::Histogram(buckets) = &s.value {
-            any_bucket = true;
-            for hc in buckets {
-                // `hc.less_than` is the le bound; f64::INFINITY for +Inf.
-                let key = if hc.less_than.is_infinite() {
-                    "+Inf".to_string()
-                } else {
-                    format!("{}", hc.less_than)
-                };
-                *by_le.entry(key).or_insert(0.0) += hc.count;
-            }
-        }
-    }
-
-    if !any_bucket {
+    let Some(buckets) = histogram_buckets(scrape, "cb_pbs_relay_latency") else {
         return CheckResult::skip(
             "cb_relay_latency",
             2,
             "cb_pbs_relay_latency histogram not exposed",
         );
-    }
-
-    let mut buckets: Vec<(f64, f64)> = by_le
-        .into_iter()
-        .filter_map(|(k, v)| {
-            let le = if k == "+Inf" {
-                f64::INFINITY
-            } else {
-                k.parse::<f64>().ok()?
-            };
-            Some((le, v))
-        })
-        .collect();
-    buckets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    };
 
     let total = buckets.last().map(|(_, c)| *c).unwrap_or(0.0);
     if total <= 0.0 {
@@ -799,6 +866,98 @@ pub fn check_relay_latency(scrape: &Scrape, threshold_ms: f64) -> CheckResult {
     }
 }
 
+/// What the ws bid stream did inside its windows, from the metrics that have
+/// no HTTP analogue: `relay_stream_connect_latency`, `relay_stream_updates`,
+/// `relay_stream_invalid_frames_total` and `relay_stream_fallback_total`.
+///
+/// The status matrix says whether the stream served a bid; this says whether it
+/// STREAMED. A stream that connects and delivers one update per window is a
+/// poll wearing a websocket, and reads as healthy everywhere else.
+///
+/// Annotative: WARNs, never FAILs. The HTTP fallback still serves the slot.
+pub fn check_stream_window(scrape: &Scrape) -> CheckResult {
+    let id = "cb_stream_window";
+    let Some(connects) = histogram_buckets(scrape, "cb_pbs_relay_stream_connect_latency") else {
+        return CheckResult::skip(
+            id,
+            2,
+            "cb_pbs_relay_stream_connect_latency not exposed (no ws relay, or commit-boost older than v0.11.0-rc2)",
+        );
+    };
+    let updates = histogram_buckets(scrape, "cb_pbs_relay_stream_updates").unwrap_or_default();
+    // The detector rests on the `le=1` bucket, the windows that carried at
+    // most one update; without it a polled stream is indistinguishable
+    let Some(&(_, at_most_one)) = updates.iter().find(|(le, _)| *le == 1.0) else {
+        return CheckResult::skip(
+            id,
+            2,
+            "cb_pbs_relay_stream_updates exposes no le=1 bucket (no completed window yet, or a changed bucket layout)",
+        );
+    };
+    let total = |buckets: &[(f64, f64)]| buckets.last().map_or(0.0, |(_, count)| *count);
+    let connects = total(&connects);
+    let windows = total(&updates);
+    let invalid = counter_total(scrape, "cb_pbs_relay_stream_invalid_frames_total");
+    let fallbacks = counter_total(scrape, "cb_pbs_relay_stream_fallback_total");
+
+    let data = serde_json::json!({
+        "connects": connects as u64,
+        "windows": windows as u64,
+        "windows_with_at_most_one_update": at_most_one as u64,
+        "invalid_frames": invalid as u64,
+        "http_fallbacks": fallbacks as u64,
+    });
+    // A handshake is counted when the stream opens, a window when it closes,
+    // so a live scrape reads one more handshake per window still in flight
+    let summary = format!(
+        "{connects:.0} handshakes, {windows:.0} windows ({at_most_one:.0} carrying <=1 update), {invalid:.0} invalid frames, {fallbacks:.0} http fallbacks"
+    );
+
+    if invalid > 0.0 {
+        return CheckResult::warn(
+            id,
+            2,
+            format!("{summary} - the relay sent frames that could not be parsed as a bid"),
+        )
+        .with_data(data);
+    }
+    if windows > 0.0 && at_most_one == windows {
+        return CheckResult::warn(
+            id,
+            2,
+            format!("{summary} - every window carried at most one update; the stream connects but does not stream"),
+        )
+        .with_data(data);
+    }
+
+    CheckResult::pass(id, 2, summary).with_data(data)
+}
+
+/// The check id whose verdict carries the ws bid-stream status codes.
+pub const GET_HEADER_STREAM_MATRIX_ID: &str = "cb_get_header_stream_matrix";
+
+/// Bids the ws stream served, read back out of the
+/// [`GET_HEADER_STREAM_MATRIX_ID`] verdict's own `data`.
+///
+/// `None` when that check did not run or found no samples for the endpoint:
+/// commit-boost only counts `get_header_stream` separately from v0.11.0-rc2, so
+/// against an older sidecar a streamed response is indistinguishable from a
+/// fallback one in this series and the counter says nothing either way. The ws
+/// gate treats that as "unreadable", not as zero.
+pub fn stream_bids_served(checks: &[CheckResult]) -> Option<u64> {
+    let matrix = checks
+        .iter()
+        .find(|c| c.id == GET_HEADER_STREAM_MATRIX_ID)?;
+    if matrix.status == CheckStatus::Skip {
+        return None;
+    }
+    Some(
+        matrix.data["relay_side"]["totals"]["200"]
+            .as_u64()
+            .unwrap_or(0),
+    )
+}
+
 /// Run all CB metrics checks.
 ///
 /// Tries HTTP fetch first, falls back to kurtosis exec if needed.
@@ -815,6 +974,8 @@ pub async fn run_metrics_checks(
     let skip_all = |reason: &str| -> Vec<CheckResult> {
         [
             "cb_get_header_matrix",
+            "cb_get_header_stream_matrix",
+            "cb_stream_window",
             "cb_register_validator_matrix",
             "cb_submit_blinded_block_matrix",
             "cb_status_matrix",
@@ -853,6 +1014,7 @@ pub async fn run_metrics_checks(
 fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
     let endpoints = [
         "get_header",
+        "get_header_stream",
         "register_validator",
         "submit_blinded_block",
         "status",
@@ -865,6 +1027,7 @@ fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
         })
         .collect();
 
+    out.push(check_stream_window(scrape));
     out.push(check_v2_fallback(scrape));
     out.push(check_v2_unsupported(scrape));
     out.push(check_relay_latency(scrape, 500.0));
@@ -899,6 +1062,94 @@ mod tests {
         Scrape::parse(lines).expect("valid prometheus text")
     }
 
+    /// A live ws devnet scrape, trimmed to the buckets the check reads: 29
+    /// handshakes, 29 windows carrying 198 bid updates between them, 2 of
+    /// those windows carrying none, and a 30th handshake that was refused and
+    /// fell back to HTTP.
+    const STREAM_SCRAPE: &str = r#"# TYPE cb_pbs_relay_stream_connect_latency histogram
+cb_pbs_relay_stream_connect_latency_bucket{relay_id="mev_relay_0",le="0.005"} 20
+cb_pbs_relay_stream_connect_latency_bucket{relay_id="mev_relay_0",le="+Inf"} 29
+cb_pbs_relay_stream_connect_latency_sum{relay_id="mev_relay_0"} 0.275
+cb_pbs_relay_stream_connect_latency_count{relay_id="mev_relay_0"} 29
+# TYPE cb_pbs_relay_stream_fallback_total counter
+cb_pbs_relay_stream_fallback_total{relay_id="mev_relay_0"} 1
+# TYPE cb_pbs_relay_stream_updates histogram
+cb_pbs_relay_stream_updates_bucket{relay_id="mev_relay_0",le="0"} 2
+cb_pbs_relay_stream_updates_bucket{relay_id="mev_relay_0",le="1"} 2
+cb_pbs_relay_stream_updates_bucket{relay_id="mev_relay_0",le="5"} 4
+cb_pbs_relay_stream_updates_bucket{relay_id="mev_relay_0",le="+Inf"} 29
+cb_pbs_relay_stream_updates_sum{relay_id="mev_relay_0"} 198
+cb_pbs_relay_stream_updates_count{relay_id="mev_relay_0"} 29
+"#;
+
+    #[test]
+    fn stream_window_passes_on_a_real_streaming_run() {
+        let res = check_stream_window(&parse(STREAM_SCRAPE));
+        assert_eq!(res.status, CheckStatus::Pass, "{}", res.detail);
+        assert!(res.detail.contains("29 handshakes"), "{}", res.detail);
+        assert!(
+            res.detail.contains("2 carrying <=1 update"),
+            "{}",
+            res.detail
+        );
+        assert!(res.detail.contains("1 http fallbacks"), "{}", res.detail);
+        // An absent counter reads as a plain zero, not the -0.0 that
+        // `Sum for f64` folds from
+        assert!(res.detail.contains("0 invalid frames"), "{}", res.detail);
+        assert!(!res.detail.contains("-0"), "{}", res.detail);
+
+        // A scrape taken while a window is open is one handshake ahead
+        let in_flight = STREAM_SCRAPE.replace(
+            r#"cb_pbs_relay_stream_connect_latency_bucket{relay_id="mev_relay_0",le="+Inf"} 29"#,
+            r#"cb_pbs_relay_stream_connect_latency_bucket{relay_id="mev_relay_0",le="+Inf"} 30"#,
+        );
+        assert_eq!(
+            check_stream_window(&parse(&in_flight)).status,
+            CheckStatus::Pass
+        );
+    }
+
+    /// Absent stream histograms are the normal state for an HTTP-only relay and
+    /// for any commit-boost older than v0.11.0-rc2, so the check must SKIP
+    /// rather than report a stream that was never attempted.
+    #[test]
+    fn stream_window_skips_without_the_buckets_it_reads() {
+        let res = check_stream_window(&parse(
+            "# TYPE cb_pbs_relay_status_code_total counter\ncb_pbs_relay_status_code_total{endpoint=\"get_header\",http_status_code=\"200\",relay_id=\"r\"} 3\n",
+        ));
+        assert_eq!(res.status, CheckStatus::Skip, "{}", res.detail);
+
+        // The streaming detector reads the le=1 bucket; a CB that dropped it
+        // must not read as streaming
+        let stripped: String = STREAM_SCRAPE
+            .lines()
+            .filter(|l| !l.contains(r#"le="1""#))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let res = check_stream_window(&parse(&stripped));
+        assert_eq!(res.status, CheckStatus::Skip, "{}", res.detail);
+        assert!(res.detail.contains("le=1"), "{}", res.detail);
+    }
+
+    #[test]
+    fn stream_window_warns_on_the_degraded_shapes() {
+        // Every window carried at most one update: a poll wearing a websocket
+        let polling = STREAM_SCRAPE
+            .replace(r#"le="1"} 2"#, r#"le="1"} 29"#)
+            .replace(r#"le="5"} 4"#, r#"le="5"} 29"#);
+        let res = check_stream_window(&parse(&polling));
+        assert_eq!(res.status, CheckStatus::Warn, "{}", res.detail);
+        assert!(res.detail.contains("does not stream"), "{}", res.detail);
+
+        // Unparseable frames: the stream is up, its payloads are not usable
+        let invalid = format!(
+            "{STREAM_SCRAPE}# TYPE cb_pbs_relay_stream_invalid_frames_total counter\ncb_pbs_relay_stream_invalid_frames_total{{relay_id=\"mev_relay_0\"}} 4\n"
+        );
+        let res = check_stream_window(&parse(&invalid));
+        assert_eq!(res.status, CheckStatus::Warn, "{}", res.detail);
+        assert!(res.detail.contains("could not be parsed"), "{}", res.detail);
+    }
+
     /// Every commit-boost metric name these checks depend on, and how it is
     /// derived. Audited end-to-end on 2026-08-04 after TWO checks were found
     /// reading names that could never exist.
@@ -923,11 +1174,16 @@ mod tests {
             V2_UNSUPPORTED_METRIC, "cb_pbs_pbs_submit_block_v2_unsupported_total",
             "the doubled pbs_ is CORRECT: prefix cb_pbs + registered name pbs_submit_block_..."
         );
-        // The three read by collect_endpoint_stats / check_relay_latency.
+        // Every family read by collect_endpoint_stats, check_relay_latency
+        // and check_stream_window.
         for name in [
             "cb_pbs_relay_status_code_total",
             "cb_pbs_beacon_node_status_code_total",
             "cb_pbs_relay_latency",
+            "cb_pbs_relay_stream_connect_latency",
+            "cb_pbs_relay_stream_updates",
+            "cb_pbs_relay_stream_invalid_frames_total",
+            "cb_pbs_relay_stream_fallback_total",
         ] {
             assert!(
                 name.starts_with("cb_pbs_"),
@@ -982,6 +1238,138 @@ mod tests {
             r.detail
         );
         assert!(r.detail.contains("not relay-served"));
+    }
+
+    /// The ws gate reads the stream's bid count back out of this check's own
+    /// `data`, so the id and the JSON path are a contract between the two
+    /// modules. Build the input with `classify_endpoint` rather than a literal,
+    /// or a renamed field rots the reader in silence.
+    #[test]
+    fn stream_bids_are_readable_from_the_matrix_verdict() {
+        let mut served = EndpointStats::default();
+        served.add_relay("r0", "200", 60.0);
+        served.add_relay("r0", "204", 2.0);
+        let verdict = classify_endpoint("get_header_stream", &served, false);
+        assert_eq!(verdict.id, GET_HEADER_STREAM_MATRIX_ID);
+        assert_eq!(stream_bids_served(&[verdict]), Some(60));
+
+        // Every handshake refused: measured, and zero.
+        let mut refused = EndpointStats::default();
+        refused.add_relay("r0", "401", 60.0);
+        let verdict = classify_endpoint("get_header_stream", &refused, false);
+        assert_eq!(stream_bids_served(&[verdict]), Some(0));
+
+        // No samples for the endpoint -> SKIP -> unreadable, NOT zero: a
+        // commit-boost older than v0.11.0-rc2 folds the stream into get_header,
+        // where a fallback 200 and a streamed one are the same counter.
+        let skipped = classify_endpoint("get_header_stream", &EndpointStats::default(), false);
+        assert_eq!(skipped.status, CheckStatus::Skip);
+        assert_eq!(stream_bids_served(&[skipped]), None);
+
+        // The check never ran at all (metrics unreachable -> skip_all, or an
+        // http scenario) -> also unreadable.
+        assert_eq!(stream_bids_served(&[]), None);
+    }
+
+    /// The ws stream endpoint (CB v0.11.0-rc2+): bids over the stream PASS,
+    /// and a stream that never served WARNs rather than failing — the HTTP
+    /// fallback still serves the slot, and `cb-ws-stream-nokey` refuses every
+    /// handshake on purpose.
+    #[test]
+    fn classify_get_header_stream_never_fails() {
+        let mut served = EndpointStats::default();
+        served.add_relay("r0", "200", 60.0);
+        served.add_relay("r0", "204", 2.0);
+        served.add_relay("r0", "400", 1.0);
+        let r = classify_endpoint("get_header_stream", &served, true);
+        assert_eq!(r.status, CheckStatus::Pass, "{}", r.detail);
+        assert!(r.detail.contains("60 bids over the stream"), "{}", r.detail);
+
+        // the negative control: every handshake refused, everything fell back
+        let mut refused = EndpointStats::default();
+        refused.add_relay("r0", "401", 60.0);
+        let r = classify_endpoint("get_header_stream", &refused, true);
+        assert_eq!(
+            r.status,
+            CheckStatus::Warn,
+            "a refused stream must not FAIL"
+        );
+        assert!(
+            r.detail.contains("no bid served over the stream"),
+            "{}",
+            r.detail
+        );
+
+        // a proxy answering 5xx to the ws upgrade is a fallback, not a FAIL,
+        // in any proportion and under --strict
+        let mut warm = EndpointStats::default();
+        warm.add_relay("r0", "200", 60.0);
+        warm.add_relay("r0", "503", 1.0);
+        assert_eq!(
+            classify_endpoint("get_header_stream", &warm, true).status,
+            CheckStatus::Pass
+        );
+        let mut dead = EndpointStats::default();
+        dead.add_relay("r0", "503", 10.0);
+        dead.add_relay("r0", "200", 5.0);
+        assert_ne!(
+            classify_endpoint("get_header_stream", &dead, false).status,
+            CheckStatus::Fail
+        );
+    }
+
+    /// After the stream moved to its own endpoint, a ws scenario's `get_header`
+    /// series holds only incidental fallback traffic. A lone 4xx there is not a
+    /// malformed proposer request when the beacon node was demonstrably served.
+    #[test]
+    fn classify_get_header_4xx_only_is_incidental_when_the_cl_was_served() {
+        let mut s = EndpointStats::default();
+        s.add_relay("r0", "400", 1.0);
+        s.add_beacon("200", 60.0);
+        let r = classify_endpoint("get_header", &s, false);
+        assert_eq!(r.status, CheckStatus::Warn, "{}", r.detail);
+        assert!(r.detail.contains("incidental"), "{}", r.detail);
+
+        // with nothing served to the CL, 4xx-only is still a hard failure
+        let mut broken = EndpointStats::default();
+        broken.add_relay("r0", "400", 12.0);
+        assert_eq!(
+            classify_endpoint("get_header", &broken, false).status,
+            CheckStatus::Fail
+        );
+
+        // and so is a 4xx storm that outnumbers the headers the CL got
+        let mut swamped = EndpointStats::default();
+        swamped.add_relay("r0", "400", 500.0);
+        swamped.add_beacon("200", 1.0);
+        assert_eq!(
+            classify_endpoint("get_header", &swamped, false).status,
+            CheckStatus::Fail
+        );
+        // as many 4xx as served headers is still incidental
+        let mut even = EndpointStats::default();
+        even.add_relay("r0", "400", 3.0);
+        even.add_beacon("200", 3.0);
+        assert_eq!(
+            classify_endpoint("get_header", &even, true).status,
+            CheckStatus::Warn
+        );
+    }
+
+    /// A pure stream run has no http get_header traffic at all; the beacon side
+    /// alone says whether the proposer was served, and it is not a 4xx problem.
+    #[test]
+    fn classify_get_header_without_http_traffic_judges_the_beacon_side() {
+        let mut served = EndpointStats::default();
+        served.add_beacon("200", 60.0);
+        let r = classify_endpoint("get_header", &served, true);
+        assert_eq!(r.status, CheckStatus::Pass, "{}", r.detail);
+        assert!(r.detail.contains("over the stream"), "{}", r.detail);
+
+        let mut starved = EndpointStats::default();
+        starved.add_beacon("204", 60.0);
+        let r = classify_endpoint("get_header", &starved, false);
+        assert_eq!(r.status, CheckStatus::Warn, "{}", r.detail);
     }
 
     #[test]

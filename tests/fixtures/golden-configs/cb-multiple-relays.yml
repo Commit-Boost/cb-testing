@@ -25,7 +25,7 @@ mev_params:
   mev_sidecar: commit-boost
   mev_builder: flashbots
 
-  helix_relay_image: ghcr.io/gattaca-com/helix-relay:main
+  helix_relay_image: ghcr.io/gattaca-com/helix-relay@sha256:9e5ea856d51afbb0639ebf42adb54092bbbf582acbf6553e997b82170a4cd57e
   mev_relay_image: ethpandaops/mev-boost-relay:main
   mev_boost_image: commit-boost/commit-boost:kurtosis
   mev_builder_image: ethpandaops/reth-rbuilder:develop

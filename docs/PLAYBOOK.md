@@ -32,11 +32,10 @@ just build-cb-image
 just ci
 ```
 
-For the default scenarios you do **not** build helix — its relay image is pulled public. **The websocket
-header-stream scenarios (`cb-ws-stream`, `cb-ws-stream-nokey`, `cb-ws-stream-filekey`, any `get_header=stream` compose) are the
-exception**: the public `:main` image stubs the stream admission, so those need a helix built from the
-bundled submodule — see [Testing the websocket header stream](#testing-the-websocket-header-stream). The
-submodule is also there for building a custom relay branch (see
+You do **not** build helix. Every scenario, websocket bid stream included, runs the published helix
+`develop` image pinned by digest; see
+[Testing the websocket header stream](#testing-the-websocket-header-stream). The submodule is there
+for building a custom relay branch (see
 [Testing a specific branch](#testing-a-specific-cb-or-helix-branch)).
 
 ---
@@ -75,11 +74,18 @@ just test-all 4 /tmp/cb-results   # 4 in parallel, write per-scenario JSON to th
 
 **`just sweep-gate` is the release gate.** It runs the core "green vegetable" scenarios (basic,
 alt-clients, multiple-relays, mux, skip-sigverify, sigverify-diff, timing-games, extra-validation,
-config-surface, min-bid) with a fast window (wait 1 epoch, observe 1, skip finalization) and must exit
-0 — a full devnet OOMs free-tier GitHub runners, so there is no nightly CI for this; the sweep is the
-gate. It deliberately excludes the negative controls (`cb-sigverify-diff-control`, which fails by
-design), the ws scenarios (`cb-ws-stream*`, which need a submodule-built helix — see
-[Testing the websocket header stream](#testing-the-websocket-header-stream)), and `cb-signer`.
+config-surface, min-bid) plus the four websocket bid-stream scenarios (`cb-ws-stream`,
+`cb-ws-stream-filekey`, `cb-ws-prysm`, and the `cb-ws-stream-nokey` negative control) with a fast
+window (wait 1 epoch, observe 1, skip finalization), and must exit 0. A full devnet OOMs free-tier
+GitHub runners, so there is no nightly CI for this; the sweep is the gate. Fourteen configs at
+`--jobs 2` is roughly 1h25m of wall clock. It deliberately excludes `cb-sigverify-diff-control` (the
+poison control, which fails by design) and `cb-signer`.
+
+The ws scenarios are real coverage only because `feature.ws_stream_served` is tier 1: commit-boost
+falls back to HTTP on a failed handshake and keeps the slot green, so every other check passes on a
+stream that served nothing. That check FAILs the run instead. `cb-ws-stream-nokey` configures the
+relay to REFUSE the handshake and is in the gate on purpose: a control that never runs proves
+nothing. See [`CHECKS.md`](CHECKS.md#the-websocket-bid-stream-checks-config-gated-on-get_header--stream).
 
 `test-all` / `cb-orchestrator` drive each config through its own enclave, up to `--jobs` at a time.
 Two flags matter for a fast, trustworthy sweep: `--target-epoch 1 --min-epochs 1` (observe a full epoch
@@ -108,21 +114,22 @@ just show-logs        enclave="CB-Testnet"    # raw CB PBS logs, parsed (debuggi
 
 ## Testing the websocket header stream
 
-The ws header-stream scenarios need a helix built from the bundled `./helix` submodule. The public
-`ghcr.io/gattaca-com/helix-relay:main` image **stubs** the stream admission (it refuses the stream for every
-proposer — the real logic is in gattaca's private build), so against `:main` these scenarios silently degrade
-to HTTP fallback. The `develop` submodule carries the working public admission.
+Nothing to set up: the baked default relay image is helix `develop`, pinned by digest, and it serves
+the stream. `main` carries no `header_stream` route at all, which is why `develop` is the default for
+every scenario rather than a ws-only override.
 
 ```bash
-just build-helix-image                                  # -> local/helix-relay:kurtosis (from ./helix)
-echo 'HELIX_RELAY_IMAGE=local/helix-relay:kurtosis' >> .env
 just e2e configs/generated/cb-ws-stream.yml             # or any get_header=stream compose
 ```
 
-Expected: `feature.ws_header_stream` PASS with zero (or one startup-race) HTTP fallbacks. Note: against the
-submodule build, `relay.validator_registrations` SKIPs (the `develop` data-api query is unpopulated in this
-devnet; the check confirms registration via delivery instead). Remove the `.env` override to return non-ws
-scenarios to the pulled `:main` image.
+Expected: `feature.ws_stream_served` PASS (the tier-1 gate), `feature.ws_header_stream` PASS, and zero
+or one startup-race HTTP fallback. Note: `relay.validator_registrations` SKIPs against `develop` (its
+data-api query is unpopulated in this devnet; the check confirms registration via delivery instead).
+
+`cb-ws-stream-nokey` is the negative control: it sets `header_stream.admit_all: false`, so the relay
+refuses every handshake and the run falls back to HTTP. Its correct outcome is
+`feature.ws_stream_served` PASS with `feature.ws_header_stream` WARN-inconclusive, and it is expected
+to fail under `--require-feature-proof` for exactly that reason.
 
 ---
 

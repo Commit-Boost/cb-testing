@@ -5,6 +5,24 @@ pass/warn/fail/skip conditions, and where its data comes from. It is meant to be
 human and a CI/agent consumer of the verdict. Facts here are sourced from the code
 (`src/checks/*.rs`, `src/report.rs`, `src/main.rs`); when in doubt, the code wins.
 
+## What a run covers, and what it does not (read this before quoting a verdict)
+
+**`cb-verify` and the `sim` scenarios exercise CLASSIC PBS, not ePBS.** No config under
+`configs/generated/` sets `gloas_fork_epoch`, so it takes the ethereum-package default
+`FAR_FUTURE_EPOCH` (`18446744073709551615`, `src/package_io/constants.star`): gloas never
+activates and the devnet runs fulu. A green run proves the PBS pipeline works and that a change did not
+regress it. It proves **nothing** about the gloas builder API: `execution_payload_bid`,
+`builder_preferences` and the ePBS `submit_block` path are never called, and no check in this
+catalog reads them.
+
+The word `gloas` does appear in a run's log. That is the network-params struct enumerating every
+known fork, not a scheduled one; check the epoch, not the presence of the name.
+
+**To exercise ePBS, use the other harness**: `just epbs-test <cl-image>` or
+`just epbs-test-config configs/epbs/<scenario>.yaml`, whose configs set `gloas_fork_epoch` to
+`0` or `1`. See [EPBS.md](EPBS.md). It needs a gloas-capable CL image; at the time of writing no
+released CL implements gloas, so the CL image is the variable under test.
+
 ## The verdict model (read this first — it is load-bearing)
 
 A run emits a `VerificationReport` (`src/report.rs`): an `enclave`, a `timestamp`, an
@@ -79,8 +97,9 @@ dies mid-run:
   container logs or `kurtosis enclave inspect`, which survive a relay crash: `cb_running`,
   `mux.routing`, and the *offered-bid* half of `relay.best_bid`.
 - **CB Prometheus metrics — robust to relay death, but usually absent.** `cb_*_matrix`,
-  `cb_v2_fallback`, `cb_relay_latency`. These SKIP wholesale unless CB was configured to expose
-  metrics; the default kurtosis PBS mode does **not** set metrics config, so they SKIP by default.
+  `cb_v2_fallback`, `cb_relay_latency`, `cb_stream_window`. These SKIP wholesale unless CB was
+  configured to expose metrics; the default kurtosis PBS mode does **not** set metrics config, so
+  they SKIP by default.
 - **Relay data-API-based — fragile.** If the relay dies before check time these `FAIL` or `SKIP`:
   `relay.builder_blocks_received`, `relay.payloads_delivered_multi`, `relay.mev_delivery_rate`,
   `relay.validator_registrations`, `payload_hash_match`, and the *delivered-value* half of
@@ -108,15 +127,20 @@ dies mid-run:
 | `feature.extra_validation` | 1 | CB logs | extra-validation codepath fired (≥1 parent-block fetch); config-gated |
 | `feature.min_bid` | 1 | CB logs | the `min_bid_eth` floor dropped bids; FAIL if a winner is under it; config-gated |
 | `feature.skip_sigverify` | 1 | CB logs | skip-sigverify fired (differential: wrong-pubkey relay + auction winners); WARN in plain scenarios |
-| `feature.relay_header_file` | 1 | CB logs | a file-sourced `X-Api-Key` relay header was read (CB `relay headers loaded from secret sources` line); config-gated |
+| `feature.ws_header_stream` | 1 | CB logs | a bid arrived over the ws stream (CB `received new header from ws stream` line); WARN-inconclusive if none; config-gated |
+| `feature.ws_stream_served` | 1 | CB logs + CB Prometheus | the ws bid stream served, or was refused exactly as the scenario configured; **FAILs** otherwise; config-gated |
+| `feature.ws_stream_fallback` | 2 | CB logs | the stream is not flapping between the socket and the HTTP fallback; config-gated |
+| `feature.relay_header_file` | 1 | CB logs | a file-sourced `X-Api-Key` relay header was read (CB `relay header loaded from a secret source` line); config-gated |
 | `feature.relay_saw_api_key` | 2 | relay logs | the relay admitted the ws stream with exactly the secret file's key; needs a helix that logs `x_api_key` (public image: inconclusive, never gates) |
 | `signer.pubkeys` | 1 | CB signer API | the signer loaded the devnet's validator keys (JWT-authed count); config-gated |
 | `cb_get_header_matrix` | 2 → 1 on FAIL | CB Prometheus | get_header status-code distribution healthy |
+| `cb_get_header_stream_matrix` | 2 | CB Prometheus | ws bid-stream status codes, on the stream's own endpoint; never FAILs (CB v0.11.0-rc2+; SKIPs on older) |
 | `cb_register_validator_matrix` | 2 → 1 on FAIL | CB Prometheus | register_validator acceptance healthy |
 | `cb_submit_blinded_block_matrix` | 2 → 1 on FAIL | CB Prometheus | ≥1 blinded-block delivery (200/202) |
 | `cb_status_matrix` | 2 → 1 on FAIL | CB Prometheus | status endpoint answering 200 |
 | `cb_relay_v2_unsupported` | 2 → 1 on FAIL | CB Prometheus | no v2 submit_block lost to a relay 404ing the v2 route |
 | `cb_v2_fallback` | 2 | CB Prometheus | no v2→v1 submitBlindedBlock fallbacks |
+| `cb_stream_window` | 2 | CB Prometheus | the ws bid stream actually streams, not one bid per window (CB v0.11.0-rc2+; SKIPs on older) |
 | `cb_relay_latency` | 2 | CB Prometheus | p95 relay latency < 500 ms |
 
 Note: `relay.validator_registrations` (tier 3) is only added to the report when active validator
@@ -314,6 +338,43 @@ near 1.04 ETH, and CB validates `min_bid_wei < 1 ETH`, so no LEGAL floor could e
 scenario would silently prove nothing. `cb-min-bid` therefore sets subsidy `0` (bids ≈ 0.04 ETH of
 spamoor MEV) against a 0.5 ETH floor.
 
+### The websocket bid-stream checks, config-gated on `get_header = "stream"`
+
+Three checks share one problem: **commit-boost falls back to HTTP when a stream handshake fails and
+still serves the slot green**. Delivery, MEV rate, payload matching, `cb_get_header_matrix` all pass
+on a stream that served nothing, so none of them is evidence the transport worked.
+
+- **`feature.ws_header_stream`** (tier 1, CB logs) is the marker half: **PASS** on ≥1
+  `received new header from ws stream` line, else **WARN** carrying `inconclusive` (the stream may
+  have been armed and never exercised). Annotative on its own, like every other marker check.
+- **`feature.ws_stream_fallback`** (tier 2, CB logs) counts `falling back to http get_header`
+  against streamed headers. **PASS** on zero fallbacks, or on exactly one alongside a serving stream
+  (the startup registration race, measured on a healthy 220-slot run); **WARN** on more, which is a
+  flapping stream. Never gates.
+- **`feature.ws_stream_served`** (tier 1, CB logs + CB Prometheus) is the **GATE**, and the only ws
+  check that can fail a run.
+
+`feature.ws_stream_served` reads two independent sources as a union, so either alone proves the
+stream served: the CB log marker above, and the 200 count on
+`cb_pbs_relay_status_code_total{endpoint="get_header_stream"}` (read back out of the
+`cb_get_header_stream_matrix` verdict). A commit-boost older than v0.11.0-rc2 exposes no separate
+stream series and is carried by the marker; a run with debug logging off is carried by the counter.
+
+It reads the scenario's INTENT from `mev_params.helix_relay_config` in the run's Kurtosis args file:
+`header_stream.admit_all: false` means the relay was configured to refuse every handshake. Only an
+explicit `false` counts; an absent block, a non-helix relay and an unparseable file all read as
+"admits", so a scenario has to declare itself a negative control to be excused.
+
+- **PASS**: the relay admits the stream and a bid crossed it; or the relay refuses and none did
+  (`cb-ws-stream-nokey`, the negative control, lands here).
+- **FAIL**: the relay admits the stream and no bid crossed it, *including* when neither source
+  could be read. A scenario whose only purpose is the stream and which measured nothing is not a
+  green run. Also **FAIL** when the relay was configured to refuse and bids crossed anyway: the
+  admission toggle went dead, and the control no longer discriminates.
+- **WARN** (`inconclusive`): the relay refuses and neither source could be read. Silence cannot
+  confirm a negative, and the control makes no capability claim, so this is non-fatal by default and
+  fatal under `--require-feature-proof`.
+
 ### `signer.pubkeys` — tier 1 (CB signer API), only when a signer is running
 
 Emitted only when discovery finds a `cb-signer-*` service. Mints an HS256 module JWT and calls
@@ -335,7 +396,7 @@ key loading.
 
 ### `cb_*_matrix` — tier 2, escalates to tier 1 on FAIL (CB Prometheus)
 
-Four checks, one per endpoint, built from CB's status-code counters
+Five checks, one per endpoint, built from CB's status-code counters
 `cb_pbs_relay_status_code_total` (codes CB received from relays, the source of truth) and
 `cb_pbs_beacon_node_status_code_total` (codes CB returned to the CL, surfaced for cross-boundary
 diagnosis). Codes bucket into `200 / 202 / 204 / 4xx / 5xx / timeout / transport / other`. **`timeout` is CB's
@@ -345,19 +406,27 @@ relay-served status; 555 is CB cancelling its own
 request at its deadline; it must never count as relay 5xx (live-confirmed 2026-08-03: timing-games
 produced 42% 555s with ZERO real relay 5xx, and the old bucketing tier-1-failed the run). Metrics are
 fetched over HTTP, falling back to `kurtosis exec`; if neither works (the usual case — default
-kurtosis PBS mode sets no metrics config), **all** matrix checks plus `cb_v2_fallback` and
-`cb_relay_latency` SKIP.
+kurtosis PBS mode sets no metrics config), **all** matrix checks plus `cb_v2_fallback`,
+`cb_relay_latency` and `cb_stream_window` SKIP.
 
-Shared rules across all four: **relay-side 5xx FAILs when it exceeds 25% of COMPLETED responses**
+Shared rules across all five: **relay-side 5xx FAILs when it exceeds 25% of COMPLETED responses**
 (timeouts excluded from the denominator, so a real error storm still fails amid heavy timeout
 polling); at or below the rate it's a transient-warmup WARN, promoted to FAIL under `--strict`.
 **CB client-side codes (555 timeouts + 556 ws transport errors) above 25% combined → WARN, never FAIL
 — not even under `--strict`** (client-side
 deadline policy, e.g. timing-games cancelling late polls by design, or a slow relay). Any matrix FAIL
 is escalated from tier 2 to tier 1 so it gates the exit code. **No samples for the endpoint → SKIP.**
+**`cb_get_header_stream_matrix` is the exception: it never FAILs**, not on 5xx either — a refused
+ws upgrade falls back to HTTP, where a real relay outage still shows.
 
 - **`cb_get_header_matrix`** — PASS if any 200 (bids delivered, timeout count noted); WARN if only
-  204s (relay alive, no bid — promoted to **FAIL under `--strict`**); FAIL if only 4xx.
+  204s (relay alive, no bid — promoted to **FAIL under `--strict`**); FAIL if only 4xx, unless the
+  beacon node was served at least as many headers as there were 4xx (incidental ws-fallback /
+  registration-race traffic), which WARNs. With no http traffic at all (a pure stream run) it is
+  judged on the beacon side: PASS if headers were served, WARN if none.
+- **`cb_get_header_stream_matrix`** — PASS if any 200 over the stream; WARN if none. Never FAILs,
+  not even under `--strict`; SKIP against a commit-boost older than v0.11.0-rc2, which folds the
+  stream into `get_header`.
 - **`cb_register_validator_matrix`** — PASS if 200s and zero 4xx (100% accepted); WARN if a mix of
   200 and 4xx (some batches rejected — normal early on; the beacon-side 502 translation is surfaced);
   FAIL if only 4xx; SKIP if no registrations observed; FAIL on any 5xx.
@@ -409,6 +478,22 @@ hardcoded to 500 ms.
 - **PASS** — p95 < 500 ms.
 - **WARN** — p95 ≥ 500 ms.
 - **SKIP** — histogram not exposed, zero observations, or degenerate buckets.
+
+### `cb_stream_window` — tier 2 (CB Prometheus)
+
+Asserts the ws bid stream actually streams inside its windows, which the status matrix cannot see.
+Source: the `cb_pbs_relay_stream_connect_latency` and `cb_pbs_relay_stream_updates` histograms (read
+at their `+Inf` and `le=1` bounds) plus the `cb_pbs_relay_stream_invalid_frames_total` and
+`cb_pbs_relay_stream_fallback_total` counters. Annotative: it never FAILs, because the HTTP fallback
+under `get_header` still serves the slot. A handshake is counted when a stream opens and a window
+when it closes, so a live scrape reads one more handshake per window still in flight; the two counts
+are reported, not compared.
+
+- **PASS** — no unparseable frames, and at least one window carried more than one bid update.
+- **WARN** — the relay sent frames that could not be parsed as a bid; or every window carried at
+  most one update, which is a poll wearing a websocket and reads as healthy everywhere else.
+- **SKIP** — the stream histograms are absent (no ws relay in this scenario, or a commit-boost older
+  than v0.11.0-rc2), or the updates histogram has no `le=1` bucket, which the detector needs.
 
 ---
 
