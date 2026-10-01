@@ -32,9 +32,10 @@ ci: check test lint
 build-release:
     cargo build --release
 
-# Build the orchestrator binary (concurrent multi-enclave test runner)
+# Build the orchestrator (concurrent multi-enclave test runner) and the cb-verify
+# binary it runs for each config's checks
 build-orchestrator:
-    cargo build --release --bin cb-orchestrator
+    cargo build --release --bin cb-orchestrator --bin cb-verify
 
 # Run verifier against a running enclave
 verify enclave="CB-Testnet" target_epoch="7" min_epochs="2":
@@ -163,13 +164,13 @@ testnet-verbose config:
 #   just test-all                    # default: 2 jobs, no results dir
 #   just test-all 4 /tmp/results    # 4 jobs, save results to /tmp/results
 #   just test-all 2 /tmp/results --strict --keep
-test-all jobs="2":
+test-all jobs="2": build-orchestrator
     #!/usr/bin/env bash
     set -euo pipefail
     cargo run --release --bin cb-orchestrator -- --jobs {{jobs}}
 
 # Run a single config through the orchestrator (for debugging)
-test-one config jobs="1":
+test-one config jobs="1": build-orchestrator
     cargo run --release --bin cb-orchestrator -- \
         --jobs {{jobs}} \
         {{config}}
@@ -194,7 +195,7 @@ test-one config jobs="1":
 # the whole gate at `just sweep-gate 1` for a definitive (slower) result.
 # COST: each config takes about 14 minutes, so 14 configs are about 3h15m at --jobs 1
 # and roughly half that at --jobs 2 on a box with room for two devnets.
-sweep-gate jobs="2": generate-configs pull-images
+sweep-gate jobs="2": build-orchestrator generate-configs pull-images
     cargo run --release --bin cb-orchestrator -- \
         --jobs {{jobs}} --target-epoch 1 --min-epochs 1 --skip-finalization \
         configs/generated/cb-basic.yml \
