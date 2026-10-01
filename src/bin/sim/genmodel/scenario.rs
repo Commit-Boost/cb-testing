@@ -794,16 +794,20 @@ mod tests {
 
     #[test]
     fn tracked_cb_basic_config_stays_in_sync_with_sim_generate() {
-        // configs/generated/cb-basic.yml is TRACKED (render.rs's fixture + what
-        // `sim preflight` validates). Guard it against silently drifting from the
+        // configs/generated/cb-basic.yml is render.rs's fixture and what `sim
+        // preflight` validates. Guard it against silently drifting from the
         // generator — the staleness class that rotted the old example config.
+        // `just generate-configs` applies the .env image overrides, so compare
+        // against the same images or a local override reads as staleness.
         let tracked = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/configs/generated/cb-basic.yml"
         ));
-        let produced = Scenario::Basic
-            .args_file_in(&Images::default(), Path::new("keys"))
-            .unwrap();
+        let images = crate::generate::images_from_env(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/.env"
+        )));
+        let produced = Scenario::Basic.args_file_in(&images, Path::new("keys")).unwrap();
         assert_eq!(
             produced, tracked,
             "configs/generated/cb-basic.yml is stale — run `just generate-configs`"
