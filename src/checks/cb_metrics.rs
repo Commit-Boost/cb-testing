@@ -302,8 +302,8 @@ pub fn classify_endpoint(endpoint: &str, stats: &EndpointStats, strict: bool) ->
     let rtransport = stats.relay_get("transport");
     let b5xx = stats.beacon_get("5xx");
 
-    // Relay 5xx handling (H2 fix). These are absolute CUMULATIVE counters that
-    // include the pre/early-window warmup phase, where a handful of 5xx are normal
+    // Relay 5xx handling (H2 fix). Without a baseline these counters include
+    // the pre/early-window warmup phase, where a handful of 5xx are normal
     // (relays/builders not yet ready). FAILing on any 5xx > 0 made a genuinely
     // healthy run red. Classify on the 5xx RATE instead: a materially broken
     // relay/CB-to-relay link produces a high fraction of 5xx (FAIL); a few 5xx
@@ -958,57 +958,186 @@ pub fn stream_bids_served(checks: &[CheckResult]) -> Option<u64> {
     )
 }
 
-/// Run all CB metrics checks.
-///
-/// Tries HTTP fetch first, falls back to kurtosis exec if needed.
+/// Where commit-boost's `/metrics` is read from: the published port first,
+/// then `kurtosis service exec` on the first CB service.
+#[derive(Debug, Clone, Copy)]
+pub struct MetricsSource<'a> {
+    pub metrics_url: Option<&'a str>,
+    pub enclave: Option<&'a str>,
+    pub cb_services: &'a [String],
+}
+
+impl MetricsSource<'_> {
+    /// One scrape as raw exposition text, known to parse.
+    pub async fn scrape_text(&self, http_client: &reqwest::Client) -> eyre::Result<String> {
+        let mut errors = Vec::new();
+        if let Some(url) = self.metrics_url {
+            match metrics::fetch_metrics_text(http_client, url).await {
+                Ok(text) if metrics::parse_metrics(&text).is_ok() => return Ok(text),
+                Ok(_) => errors.push(format!("{url}: unparseable exposition")),
+                Err(e) => {
+                    tracing::warn!("HTTP metrics fetch failed: {e}, trying exec fallback");
+                    errors.push(format!("{url}: {e}"));
+                }
+            }
+        }
+        if let (Some(enclave), Some(service)) = (self.enclave, self.cb_services.first()) {
+            tracing::info!("Fetching metrics via exec from {service}");
+            match metrics::fetch_metrics_text_via_exec(enclave, service, METRICS_PORT) {
+                Ok(text) if metrics::parse_metrics(&text).is_ok() => return Ok(text),
+                Ok(_) => errors.push(format!("exec {service}: unparseable exposition")),
+                Err(e) => {
+                    tracing::warn!("Exec metrics fetch failed: {e}");
+                    errors.push(format!("exec {service}: {e}"));
+                }
+            }
+        }
+        if errors.is_empty() {
+            eyre::bail!("no metrics URL and no CB service to exec into");
+        }
+        eyre::bail!("{}", errors.join("; "))
+    }
+
+    /// One scrape, parsed.
+    pub async fn scrape(&self, http_client: &reqwest::Client) -> eyre::Result<Scrape> {
+        metrics::parse_metrics(&self.scrape_text(http_client).await?)
+    }
+}
+
+/// What the checks subtract from the final scrape.
+#[derive(Debug, Clone)]
+pub enum Baseline {
+    /// Scraped as the observation window opened.
+    Scrape(Scrape),
+    /// No window (`--min-epochs 0`): the counters since CB started are the
+    /// intended subject.
+    NoWindow,
+    /// A window was set and has no baseline, so the checks read counters that
+    /// include pre-window traffic. The reason is carried into every verdict.
+    Missing(String),
+}
+
+/// The head slot at which the baseline is due: the slot before the window, so
+/// the window's first get_header has not happened yet.
+pub fn baseline_due(head_slot: u64, start_slot: u64) -> bool {
+    head_slot + 1 >= start_slot
+}
+
+/// Run all CB metrics checks on the traffic since `baseline`.
 ///
 /// `strict` controls whether soft warnings (zero deliveries, zero bids)
 /// are promoted to hard failures. See [`classify_endpoint`].
 pub async fn run_metrics_checks(
     http_client: &reqwest::Client,
-    metrics_url: Option<&str>,
-    enclave: Option<&str>,
-    cb_services: &[String],
+    source: MetricsSource<'_>,
+    baseline: &Baseline,
     strict: bool,
 ) -> Vec<CheckResult> {
-    let skip_all = |reason: &str| -> Vec<CheckResult> {
-        [
-            "cb_get_header_matrix",
-            "cb_get_header_stream_matrix",
-            "cb_stream_window",
-            "cb_register_validator_matrix",
-            "cb_submit_blinded_block_matrix",
-            "cb_status_matrix",
-            "cb_v2_fallback",
-            "cb_relay_latency",
-        ]
-        .iter()
-        .map(|id| CheckResult::skip(*id, 2, reason))
-        .collect()
+    match source.scrape(http_client).await {
+        Ok(end) => judge(&end, baseline, strict),
+        Err(e) => {
+            tracing::warn!("CB metrics unavailable: {e}");
+            [
+                "cb_get_header_matrix",
+                "cb_get_header_stream_matrix",
+                "cb_stream_window",
+                "cb_register_validator_matrix",
+                "cb_submit_blinded_block_matrix",
+                "cb_status_matrix",
+                "cb_v2_fallback",
+                "cb_relay_latency",
+            ]
+            .iter()
+            .map(|id| {
+                CheckResult::skip(
+                    *id,
+                    2,
+                    "Metrics not available (CB needs metrics config; not set in default kurtosis PBS mode)",
+                )
+            })
+            .collect()
+        }
+    }
+}
+
+/// The checks on `end - baseline`, each recording which traffic it judged in
+/// `data.scope`.
+fn judge(end: &Scrape, baseline: &Baseline, strict: bool) -> Vec<CheckResult> {
+    let (mut out, scope, note, degraded) = match baseline {
+        Baseline::Scrape(base) => {
+            let window = metrics::window(base, end);
+            let mut scope = serde_json::json!({ "scope": "window" });
+            let mut note = None;
+            if !window.resets.is_empty() {
+                scope["counter_resets"] = serde_json::json!(window.resets);
+                note = Some(format!(
+                    "commit-boost restarted inside the window ({} series went backwards); judged on the counts since the restart",
+                    window.resets.len()
+                ));
+            }
+            (
+                run_checks_on_scrape(&window.scrape, strict),
+                scope,
+                note,
+                false,
+            )
+        }
+        Baseline::NoWindow => (
+            run_checks_on_scrape(end, strict),
+            serde_json::json!({ "scope": "cumulative" }),
+            None,
+            false,
+        ),
+        Baseline::Missing(reason) => (
+            run_checks_on_scrape(end, strict),
+            serde_json::json!({ "scope": "cumulative", "baseline_error": reason }),
+            Some(format!(
+                "judged on every count since commit-boost started, NOT the observation window: {reason}"
+            )),
+            true,
+        ),
     };
-
-    if let Some(url) = metrics_url {
-        match metrics::fetch_metrics(http_client, url).await {
-            Ok(scrape) => return run_checks_on_scrape(&scrape, strict),
-            Err(e) => {
-                tracing::warn!("HTTP metrics fetch failed: {e}, trying exec fallback");
-            }
+    for check in &mut out {
+        if let (Some(data), Some(fields)) = (check.data.as_object_mut(), scope.as_object()) {
+            data.extend(fields.clone());
+        }
+        if check.status == CheckStatus::Skip {
+            continue;
+        }
+        if let Some(note) = &note {
+            check.detail = format!("{} [{note}]", check.detail);
+        }
+        if degraded {
+            check.inconclusive = true;
         }
     }
+    out
+}
 
-    if let (Some(enclave), Some(service)) = (enclave, cb_services.first()) {
-        tracing::info!("Fetching metrics via exec from {service}");
-        match metrics::fetch_metrics_via_exec(enclave, service, METRICS_PORT) {
-            Ok(scrape) => return run_checks_on_scrape(&scrape, strict),
-            Err(e) => {
-                tracing::warn!("Exec metrics fetch failed: {e}");
-            }
-        }
+/// Carry the stream matrix's scope onto a check that read its bid count
+/// through [`stream_bids_served`], so a verdict resting on a cumulative count
+/// says so.
+pub fn with_stream_scope(mut check: CheckResult, checks: &[CheckResult]) -> CheckResult {
+    let Some(matrix) = checks
+        .iter()
+        .find(|c| c.id == GET_HEADER_STREAM_MATRIX_ID && c.status != CheckStatus::Skip)
+    else {
+        return check;
+    };
+    if let Some(data) = check.data.as_object_mut() {
+        data.insert("metric_scope".into(), matrix.data["scope"].clone());
     }
-
-    skip_all(
-        "Metrics not available (CB needs metrics config; not set in default kurtosis PBS mode)",
-    )
+    if matrix.inconclusive {
+        check.detail = format!(
+            "{} [the stream bid count covers every count since commit-boost started, NOT the observation window: {}]",
+            check.detail,
+            matrix.data["baseline_error"]
+                .as_str()
+                .unwrap_or("no baseline scrape")
+        );
+        check.inconclusive = true;
+    }
+    check
 }
 
 fn run_checks_on_scrape(scrape: &Scrape, strict: bool) -> Vec<CheckResult> {
@@ -1829,5 +1958,179 @@ cb_pbs_relay_latency_count{endpoint="submit_blinded_block",relay_id="r0"} 345
         // interpolating to roughly 1000ms.
         let p95_ms = r.data["p95_ms"].as_f64().expect("p95_ms");
         assert!((100.0..=2500.0).contains(&p95_ms), "p95_ms={p95_ms}");
+    }
+
+    /// The ws-geth-nimbus cell as the window opens: nimbus registers its
+    /// validators at the first epoch boundary, so Helix had answered
+    /// `400 proposer not registered` on both the stream and the HTTP fallback
+    /// for every slot so far.
+    const NIMBUS_BASELINE: &str = r#"# TYPE cb_pbs_relay_status_code_total counter
+cb_pbs_relay_status_code_total{endpoint="get_header",http_status_code="400",relay_id="mev_relay_0"} 33
+cb_pbs_relay_status_code_total{endpoint="get_header_stream",http_status_code="400",relay_id="mev_relay_0"} 33
+"#;
+
+    /// The same CB at the window close: every in-window slot was served over
+    /// the stream.
+    const NIMBUS_END: &str = r#"# TYPE cb_pbs_relay_status_code_total counter
+cb_pbs_relay_status_code_total{endpoint="get_header",http_status_code="400",relay_id="mev_relay_0"} 33
+cb_pbs_relay_status_code_total{endpoint="get_header_stream",http_status_code="400",relay_id="mev_relay_0"} 33
+cb_pbs_relay_status_code_total{endpoint="get_header_stream",http_status_code="200",relay_id="mev_relay_0"} 31
+# TYPE cb_pbs_beacon_node_status_code_total counter
+cb_pbs_beacon_node_status_code_total{endpoint="get_header",http_status_code="200"} 31
+"#;
+
+    fn by_id<'a>(checks: &'a [CheckResult], id: &str) -> &'a CheckResult {
+        checks
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("{id} missing"))
+    }
+
+    #[test]
+    fn pre_window_rejections_do_not_fail_a_window_that_was_served() {
+        let end = parse(NIMBUS_END);
+        let checks = judge(&end, &Baseline::Scrape(parse(NIMBUS_BASELINE)), false);
+
+        let header = by_id(&checks, "cb_get_header_matrix");
+        assert_ne!(header.status, CheckStatus::Fail, "{}", header.detail);
+        assert_eq!(header.tier, 2, "{}", header.detail);
+        assert!(
+            header.detail.contains("served 31 header(s)"),
+            "{}",
+            header.detail
+        );
+        assert_eq!(header.data["scope"], "window");
+
+        let stream = by_id(&checks, GET_HEADER_STREAM_MATRIX_ID);
+        assert_eq!(stream.status, CheckStatus::Pass, "{}", stream.detail);
+        assert!(
+            stream
+                .detail
+                .contains("31 bids over the stream, 0 no-bid (204), 0 refused"),
+            "{}",
+            stream.detail
+        );
+        assert_eq!(stream_bids_served(&checks), Some(31));
+        assert!(checks.iter().all(|c| !c.inconclusive));
+
+        // The same end scrape judged without a window is the incident: the
+        // pre-window 400s outnumber the served headers and fail tier 1
+        let cumulative = judge(&end, &Baseline::NoWindow, false);
+        let header = by_id(&cumulative, "cb_get_header_matrix");
+        assert_eq!(header.status, CheckStatus::Fail, "{}", header.detail);
+        assert_eq!(header.tier, 1);
+        assert!(
+            header.detail.contains("only 4xx responses (33)"),
+            "{}",
+            header.detail
+        );
+        assert_eq!(header.data["scope"], "cumulative");
+    }
+
+    #[test]
+    fn in_window_rejections_are_still_judged() {
+        // two slots inside the window were still unregistered
+        let end = NIMBUS_END.replace(
+            r#"endpoint="get_header",http_status_code="400",relay_id="mev_relay_0"} 33"#,
+            r#"endpoint="get_header",http_status_code="400",relay_id="mev_relay_0"} 35"#,
+        );
+        let checks = judge(
+            &parse(&end),
+            &Baseline::Scrape(parse(NIMBUS_BASELINE)),
+            false,
+        );
+        let header = by_id(&checks, "cb_get_header_matrix");
+        assert_eq!(header.status, CheckStatus::Warn, "{}", header.detail);
+        assert!(header.detail.contains("2 4xx"), "{}", header.detail);
+    }
+
+    #[test]
+    fn a_missing_baseline_judges_cumulative_and_says_so() {
+        let reason = "baseline scrape at slot 31 failed: connection refused";
+        let checks = judge(&parse(NIMBUS_END), &Baseline::Missing(reason.into()), false);
+        let header = by_id(&checks, "cb_get_header_matrix");
+        assert!(header.inconclusive);
+        assert!(
+            header.detail.contains("NOT the observation window"),
+            "{}",
+            header.detail
+        );
+        assert_eq!(header.data["scope"], "cumulative");
+        assert_eq!(header.data["baseline_error"], reason);
+
+        let stream = by_id(&checks, GET_HEADER_STREAM_MATRIX_ID);
+        assert_eq!(stream.status, CheckStatus::Pass);
+        assert!(
+            stream.inconclusive,
+            "a green verdict on the wrong window must be flagged"
+        );
+
+        // a SKIP judged nothing, so it carries the scope but no caveat
+        let latency = by_id(&checks, "cb_relay_latency");
+        assert_eq!(latency.status, CheckStatus::Skip);
+        assert!(!latency.inconclusive);
+        assert!(!latency.detail.contains("NOT the observation window"));
+        assert_eq!(latency.data["scope"], "cumulative");
+
+        // the ws gate reads its count from the stream matrix, and inherits
+        // the caveat with it
+        let gate = with_stream_scope(
+            CheckResult::pass("feature.ws_stream_served", 1, "served"),
+            &checks,
+        );
+        assert!(gate.inconclusive);
+        assert!(gate.detail.contains(reason), "{}", gate.detail);
+        assert_eq!(gate.data["metric_scope"], "cumulative");
+
+        let windowed = judge(
+            &parse(NIMBUS_END),
+            &Baseline::Scrape(parse(NIMBUS_BASELINE)),
+            false,
+        );
+        let gate = with_stream_scope(
+            CheckResult::pass("feature.ws_stream_served", 1, "served"),
+            &windowed,
+        );
+        assert!(!gate.inconclusive);
+        assert_eq!(gate.data["metric_scope"], "window");
+    }
+
+    #[test]
+    fn a_restart_inside_the_window_is_surfaced() {
+        let end = NIMBUS_END.replace(
+            r#"endpoint="get_header_stream",http_status_code="400",relay_id="mev_relay_0"} 33"#,
+            r#"endpoint="get_header_stream",http_status_code="400",relay_id="mev_relay_0"} 1"#,
+        );
+        let checks = judge(
+            &parse(&end),
+            &Baseline::Scrape(parse(NIMBUS_BASELINE)),
+            false,
+        );
+        let stream = by_id(&checks, GET_HEADER_STREAM_MATRIX_ID);
+        assert!(
+            stream.detail.contains("restarted inside the window"),
+            "{}",
+            stream.detail
+        );
+        assert_eq!(stream.data["scope"], "window");
+        assert_eq!(
+            stream.data["counter_resets"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert!(!stream.inconclusive);
+    }
+
+    #[test]
+    fn a_stream_family_that_did_not_move_in_the_window_skips() {
+        let text = format!("{STREAM_SCRAPE}{NIMBUS_END}");
+        let checks = judge(&parse(&text), &Baseline::Scrape(parse(&text)), false);
+        for id in [
+            "cb_stream_window",
+            "cb_get_header_matrix",
+            GET_HEADER_STREAM_MATRIX_ID,
+        ] {
+            let c = by_id(&checks, id);
+            assert_eq!(c.status, CheckStatus::Skip, "{id}: {}", c.detail);
+        }
     }
 }

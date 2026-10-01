@@ -16,6 +16,7 @@ mod health;
 mod live;
 
 use beacon::BeaconClient;
+use checks::cb_metrics::Baseline;
 use checks::{CheckResult, CheckStatus};
 use health::{HealthTarget, ServiceKind};
 use live::{LIVE_METRICS_FILTER, compute_deltas, format_delta_json, format_delta_log};
@@ -129,6 +130,12 @@ struct Cli {
     /// directly accessible.
     #[arg(long)]
     live_metrics: bool,
+
+    /// A CB `/metrics` scrape (Prometheus text) taken as the observation window
+    /// opened, for a caller that watched the window itself (cb-orchestrator).
+    /// Without it cb-verify scrapes the baseline during its own wait.
+    #[arg(long)]
+    metrics_baseline: Option<String>,
 
     /// Print raw CB PBS service logs to stdout for debugging.
     ///
@@ -295,6 +302,22 @@ async fn run_verification(cli: &Cli) -> i32 {
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    let metrics_source = checks::cb_metrics::MetricsSource {
+        metrics_url,
+        enclave: Some(enclave_name.as_str()),
+        cb_services: &services.cb_service_names,
+    };
+    let mut baseline = if cli.min_epochs == 0 {
+        Baseline::NoWindow
+    } else {
+        match &cli.metrics_baseline {
+            Some(path) => read_baseline(path),
+            // Replaced by wait_for_slot if it sees the window open
+            None => Baseline::Missing(format!(
+                "no baseline scrape was taken as the window opened at slot {start_slot}"
+            )),
+        }
+    };
     let mut targets: Vec<HealthTarget> = Vec::new();
     for (i, url) in services.beacon_urls.iter().enumerate() {
         targets.push(HealthTarget::new(
@@ -399,6 +422,11 @@ async fn run_verification(cli: &Cli) -> i32 {
             live_metrics: cli.live_metrics,
             json_output: cli.json,
         },
+        BaselineCapture {
+            source: metrics_source,
+            baseline: (cli.min_epochs > 0 && cli.metrics_baseline.is_none())
+                .then_some(&mut baseline),
+        },
     )
     .await
     {
@@ -491,14 +519,8 @@ async fn run_verification(cli: &Cli) -> i32 {
 
     info!("Running CB metrics checks...");
     all_checks.extend(
-        checks::cb_metrics::run_metrics_checks(
-            &http_client,
-            metrics_url,
-            Some(enclave_name.as_str()),
-            &services.cb_service_names,
-            cli.strict,
-        )
-        .await,
+        checks::cb_metrics::run_metrics_checks(&http_client, metrics_source, &baseline, cli.strict)
+            .await,
     );
 
     // MUX routing check (optional — requires config with [[mux]] sections)
@@ -558,13 +580,15 @@ async fn run_verification(cli: &Cli) -> i32 {
                 // of the metrics verdict already in `all_checks`, so it must run
                 // after run_metrics_checks.
                 let stream_bids = checks::cb_metrics::stream_bids_served(&all_checks);
-                all_checks.extend(checks::feature_fired::run_ws_stream_served_check(
+                let served = checks::feature_fired::run_ws_stream_served_check(
                     &enclave_name,
                     &services.cb_service_names,
                     &template,
                     cb_path,
                     stream_bids,
-                ));
+                )
+                .map(|c| checks::cb_metrics::with_stream_scope(c, &all_checks));
+                all_checks.extend(served);
             }
             Err(e) => {
                 warn!("Could not read CB config for feature-fired checks: {e}");
@@ -659,12 +683,31 @@ struct WaitLiveOpts<'a> {
     json_output: bool,
 }
 
+/// The CB metrics baseline to scrape during the wait; `baseline` is `None`
+/// when there is nothing to capture (no window, or the caller supplied one).
+struct BaselineCapture<'a> {
+    source: checks::cb_metrics::MetricsSource<'a>,
+    baseline: Option<&'a mut Baseline>,
+}
+
+/// A `--metrics-baseline` file as a [`Baseline`]; unreadable is `Missing`.
+fn read_baseline(path: &str) -> Baseline {
+    match std::fs::read_to_string(path)
+        .map_err(eyre::Report::from)
+        .and_then(|text| metrics::parse_metrics(&text))
+    {
+        Ok(scrape) => Baseline::Scrape(scrape),
+        Err(e) => Baseline::Missing(format!("could not read the baseline scrape {path}: {e}")),
+    }
+}
+
 /// Wait for the beacon chain head to reach `end_slot`.
 ///
 /// No finalization gate — just wait for head advancement. Interleaves
 /// health probes every ~30s and live metrics scraping if requested.
 /// Live metrics are delayed until head passes `start_slot` so only
 /// observation-window events are captured. Returns false on timeout.
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_slot(
     beacon: &BeaconClient,
     http: &reqwest::Client,
@@ -673,6 +716,7 @@ async fn wait_for_slot(
     end_slot: u64,
     timeout: u64,
     live_opts: WaitLiveOpts<'_>,
+    mut capture: BaselineCapture<'_>,
 ) -> bool {
     info!(
         "Waiting for chain to reach slot {end_slot} (verification starts at slot {start_slot}, timeout {timeout}s)..."
@@ -688,6 +732,9 @@ async fn wait_for_slot(
     // Live metrics: deferred until observation window starts.
     let mut prev_scrape: Option<prometheus_parse::Scrape> = None;
     let mut live_started = false;
+    // A baseline scraped after the window opened would drop the window's first
+    // slots, so it is only taken when the head was seen short of it first
+    let mut saw_head_before_window = false;
 
     loop {
         if wait_start.elapsed() >= timeout_dur {
@@ -718,6 +765,32 @@ async fn wait_for_slot(
             "  head_slot={:?} epoch={current_epoch} finalized_epoch={:?} (waiting for slot {end_slot} to begin verification)",
             head, finalized
         );
+
+        if let Some(h) = head {
+            if !checks::cb_metrics::baseline_due(h, start_slot) {
+                saw_head_before_window = true;
+            } else if let Some(baseline) = capture.baseline.take() {
+                *baseline = if !saw_head_before_window {
+                    Baseline::Missing(format!(
+                        "the window opened at slot {start_slot} before cb-verify was watching \
+                         (first head seen: slot {h})"
+                    ))
+                } else {
+                    match capture.source.scrape(http).await {
+                        Ok(scrape) => {
+                            info!("CB metrics baseline scraped at head slot {h}");
+                            Baseline::Scrape(scrape)
+                        }
+                        Err(e) => {
+                            Baseline::Missing(format!("baseline scrape at slot {h} failed: {e}"))
+                        }
+                    }
+                };
+                if let Baseline::Missing(reason) = baseline {
+                    warn!("CB metrics checks fall back to cumulative counters: {reason}");
+                }
+            }
+        }
 
         // Start live metrics once observation window begins.
         if !live_started

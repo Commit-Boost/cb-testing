@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use cb_testnet_verifier::checks::cb_metrics;
+use cb_testnet_verifier::discovery;
 use clap::Parser;
 use eyre::{Context, Result, bail};
 use serde::Serialize;
@@ -367,21 +369,38 @@ async fn run_enclave_pipeline(
         bail!(msg);
     }
 
+    // Resolved before the wait so the baseline scrape at the window's edge is
+    // one request, not a kurtosis round trip
+    let services = discovery::discover(&enc.name)
+        .inspect_err(|e| {
+            warn!(
+                "[{}] discovery for the CB metrics baseline failed: {e}",
+                enc.name
+            )
+        })
+        .ok();
+
     // Phase 2: Wait for readiness
     info!(
         "[{}] Waiting for readiness (target epoch {target_epoch})...",
         enc.name
     );
 
-    if let Err(e) = wait_for_enclave_readiness(&enc.name, target_epoch, timeout).await {
-        let msg = format!("Readiness timeout: {e}");
-        error!("[{}] {}", enc.name, msg);
-        if !keep {
-            let _ = teardown_enclave(&enc.name);
-        }
-        bail!(msg);
-    }
+    let saw_head_before_window =
+        match wait_for_enclave_readiness(&enc.name, target_epoch, timeout).await {
+            Ok(saw) => saw,
+            Err(e) => {
+                let msg = format!("Readiness timeout: {e}");
+                error!("[{}] {}", enc.name, msg);
+                if !keep {
+                    let _ = teardown_enclave(&enc.name);
+                }
+                bail!(msg);
+            }
+        };
     enc.ready_at = Some(Instant::now());
+    let baseline =
+        capture_metrics_baseline(&enc.name, services.as_ref(), saw_head_before_window).await;
     info!(
         "[{}] Enclave ready after {:?}",
         enc.name,
@@ -416,8 +435,12 @@ async fn run_enclave_pipeline(
         skip_finalization,
         min_epochs,
         target_epoch,
+        baseline.as_deref(),
     )
     .await;
+    if let Some(path) = &baseline {
+        let _ = std::fs::remove_file(path);
+    }
 
     enc.checked_at = Some(Instant::now());
 
@@ -490,12 +513,17 @@ async fn launch_enclave(name: &str, config: &Path, package: &str) -> Result<()> 
     Ok(())
 }
 
-/// Phase 2: Wait for the enclave's beacon to reach the target epoch.
+/// Phase 2: Wait for the enclave's beacon to reach the slot before the target
+/// epoch, where the CB metrics baseline is due.
+///
+/// `Ok(true)` when the head was seen short of that slot first, so a baseline
+/// scraped now precedes the window's traffic.
 async fn wait_for_enclave_readiness(
     name: &str,
     target_epoch: u64,
     timeout_secs: u64,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut saw_head_before_window = false;
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
     let poll_interval = Duration::from_secs(10);
@@ -526,9 +554,10 @@ async fn wait_for_enclave_readiness(
                         .and_then(|s| s.parse::<u64>().ok())
                 {
                     let epoch = slot / 32;
-                    if epoch >= target_epoch {
-                        return Ok(());
+                    if cb_metrics::baseline_due(slot, target_epoch * 32) {
+                        return Ok(saw_head_before_window);
                     }
+                    saw_head_before_window = true;
                     tracing::debug!(
                         "[{}] Beacon at epoch {epoch}, waiting for {target_epoch}...",
                         name
@@ -541,6 +570,46 @@ async fn wait_for_enclave_readiness(
         }
 
         tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// Scrape CB's `/metrics` as the window opens into a file for cb-verify's
+/// `--metrics-baseline`. `None` leaves cb-verify to judge cumulative counters
+/// and flag them as such.
+async fn capture_metrics_baseline(
+    name: &str,
+    services: Option<&discovery::EnclaveServices>,
+    saw_head_before_window: bool,
+) -> Option<PathBuf> {
+    if !saw_head_before_window {
+        warn!(
+            "[{name}] the window opened before readiness polling saw the chain; no CB metrics baseline"
+        );
+        return None;
+    }
+    let services = services?;
+    let source = cb_metrics::MetricsSource {
+        metrics_url: services.cb_metrics_urls.first().map(String::as_str),
+        enclave: Some(name),
+        cb_services: &services.cb_service_names,
+    };
+    let text = match source.scrape_text(&reqwest::Client::new()).await {
+        Ok(text) => text,
+        Err(e) => {
+            warn!("[{name}] no CB metrics baseline: {e}");
+            return None;
+        }
+    };
+    let path = std::env::temp_dir().join(format!("{name}.metrics-baseline.prom"));
+    match std::fs::write(&path, text) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            warn!(
+                "[{name}] no CB metrics baseline: writing {}: {e}",
+                path.display()
+            );
+            None
+        }
     }
 }
 
@@ -612,6 +681,7 @@ async fn run_checks(
     skip_finalization: bool,
     min_epochs: u64,
     target_epoch: u64,
+    metrics_baseline: Option<&Path>,
 ) -> Result<CheckSummary> {
     // Find the cb-verify binary (built from the same crate)
     let manifest_path = std::env::var("CARGO_MANIFEST_DIR")
@@ -641,6 +711,9 @@ async fn run_checks(
 
     if let Some(dir) = results_dir {
         cmd.arg("--output-dir").arg(dir);
+    }
+    if let Some(path) = metrics_baseline {
+        cmd.arg("--metrics-baseline").arg(path);
     }
     if strict {
         cmd.arg("--strict");

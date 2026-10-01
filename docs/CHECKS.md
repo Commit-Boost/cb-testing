@@ -407,7 +407,8 @@ request at its deadline; it must never count as relay 5xx (live-confirmed 2026-0
 produced 42% 555s with ZERO real relay 5xx, and the old bucketing tier-1-failed the run). Metrics are
 fetched over HTTP, falling back to `kurtosis exec`; if neither works (the usual case — default
 kurtosis PBS mode sets no metrics config), **all** matrix checks plus `cb_v2_fallback`,
-`cb_relay_latency` and `cb_stream_window` SKIP.
+`cb_relay_latency` and `cb_stream_window` SKIP. They judge the traffic inside the observation window
+(see "Known gaps and caveats"): a series that did not move in the window counts as absent.
 
 Shared rules across all five: **relay-side 5xx FAILs when it exceeds 25% of COMPLETED responses**
 (timeouts excluded from the denominator, so a real error storm still fails amid heavy timeout
@@ -541,12 +542,17 @@ the intro.
   relay — no slot sees ≥2 relays competing, so it WARNs "aggregation not exercised" rather than
   verifying anything. With an identical two-relay setup (e.g. two helix instances serving the same
   bid) the comparison is technically competitive but degenerate.
-- **The `cb_*_matrix` counters are cumulative, not windowed.** The H2 fix made the 5xx verdict
-  rate-based (FAIL only above 25% of completed responses; below = transient-warmup WARN), and code 555
-  now buckets as `timeout` (WARN-only), so neither a warmup blip nor a designed deadline-cancellation
-  fails a run anymore. But the counters still cover the container's whole life, not the observation
-  window — a sustained pre-window error burst can still dominate the rate. True windowing (delta
-  against a baseline scrape, as `--live-metrics` already takes) remains future work.
+- **The Prometheus checks are windowed only when a baseline was scraped.** Every `cb_*` check judges
+  the final scrape minus a baseline taken as the window opens (at the head one slot before it; the
+  5s/10s head polls make that edge accurate to about a slot). cb-verify scrapes it during its own
+  wait; cb-orchestrator scrapes it after readiness and hands it over as `--metrics-baseline`. Each
+  check records `data.scope`: `window`, or `cumulative` for `--min-epochs 0`. When a window was set
+  and no baseline exists (the window opened before anyone was watching, or the scrape failed), the
+  checks fall back to cumulative counters, carry `data.baseline_error`, say so in their detail, and
+  are marked inconclusive, as is `feature.ws_stream_served`, which reads the stream matrix's count.
+  A counter that went backwards means CB restarted mid-window: the checks then judge the counts since
+  the restart and list the series in `data.counter_resets`. The log-marker half of
+  `feature.ws_stream_served` still reads CB's whole log.
 - **A real anomaly can still exit 0.** As stated in the intro: relay equivocation, unverifiable
   routing, and best-bid shortfall are all `WARN`. Gate on the JSON `result` per check, not the exit
   code, if you care about these.
