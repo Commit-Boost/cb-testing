@@ -13,6 +13,7 @@ use eyre::{Result, WrapErr};
 use super::cb::{CbParams, SignerParams, cb_toml, cb_toml_mux};
 use super::helix::helix_relay_config;
 use super::spec;
+use super::target::Target;
 
 // --- Vetted static fragments (verbatim from Python) -------------------------
 
@@ -601,6 +602,7 @@ impl Scenario {
     pub fn args_file_in(&self, images: &Images, keys_dir: &Path) -> Result<String> {
         let cb_block = self.cb_block(keys_dir)?;
         let mev_params = build_mev_params(
+            Target::Fork,
             self.relays(),
             images,
             &cb_block,
@@ -620,6 +622,23 @@ impl Scenario {
         .join("\n\n")
             + "\n")
     }
+
+    /// The args-file for `target`'s package. The fork is [`Self::args_file_in`];
+    /// the de-forked package renders through `ScenarioSpec`, which
+    /// `lower_reproduces_every_scenario` proves equal to it on the fork.
+    pub fn args_file_for(
+        &self,
+        target: Target,
+        images: &Images,
+        keys_dir: &Path,
+    ) -> Result<String> {
+        match target {
+            Target::Fork => self.args_file_in(images, keys_dir),
+            Target::Defork => self
+                .to_spec()
+                .render_for(target, self.comment(), images, keys_dir),
+        }
+    }
 }
 
 // --- sigverify differential fault injection ---------------------------------
@@ -636,14 +655,19 @@ pub const WRONG_RELAY_PUBKEY: &str = "0xaaf6c1251e73fb600624937760fef218aace5b25
 /// scenario + the auto-appended builder participant, main.star launches the
 /// single helix instance as `helix-relay-2` (index = participant_count 2 +
 /// relay_index 0), listening on the fixed in-enclave port 4040 - confirmed by
-/// the live 2-helix runs (helix-relay-2/-3).
+/// the live 2-helix runs (helix-relay-2/-3). The de-forked package names a relay
+/// by index only when it comes from `mev_relays`, which is why that target always
+/// emits the list.
 pub(super) fn poisoned_relay_url() -> String {
     format!("http://{WRONG_RELAY_PUBKEY}@helix-relay-2:4040")
 }
 
 // --- mev_params assembly (ports build_mev_params) ---------------------------
 
+// One call per renderer; a params struct would only rename these arguments.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_mev_params(
+    target: Target,
     relays: &[&str],
     images: &Images,
     cb_block: &str,
@@ -654,23 +678,37 @@ pub(super) fn build_mev_params(
 ) -> String {
     let mut lines: Vec<String> = vec!["mev_params:".to_string()];
 
-    if relays.len() > 1 {
-        lines.push("  mev_relay:".to_string());
-        for r in relays {
-            lines.push(format!("    - {r}"));
-        }
-    } else {
-        lines.push(format!("  mev_relay: {}", relays[0]));
-    }
+    match target {
+        Target::Fork => {
+            if relays.len() > 1 {
+                lines.push("  mev_relay:".to_string());
+                for r in relays {
+                    lines.push(format!("    - {r}"));
+                }
+            } else {
+                lines.push(format!("  mev_relay: {}", relays[0]));
+            }
 
-    lines.push("  mev_sidecar: commit-boost".to_string());
-    lines.push("  mev_builder: flashbots".to_string());
+            lines.push("  mev_sidecar: commit-boost".to_string());
+            lines.push("  mev_builder: flashbots".to_string());
+        }
+        // The sidecar and builder come with `mev_type: commit-boost`. Always the
+        // list, even for one relay: upstream names a lone helix relay
+        // `helix-relay`, and only a listed one `helix-relay-{index}`.
+        Target::Defork => {
+            lines.push("  mev_relays:".to_string());
+            for r in relays {
+                lines.push(format!("    - {r}"));
+            }
+        }
+    }
     lines.push(String::new());
 
     // Image map. Single-relay scenarios omit mev_relay_image (correlates with the
-    // scalar relay form above).
+    // scalar relay form above). The de-forked package reads it only for a
+    // flashbots relay, and none runs.
     lines.push(format!("  helix_relay_image: {}", images.helix_relay));
-    if relays.len() > 1 {
+    if target == Target::Fork && relays.len() > 1 {
         lines.push(format!("  mev_relay_image: {}", images.mev_relay));
     }
     lines.push(format!("  mev_boost_image: {}", images.mev_boost));
@@ -747,6 +785,18 @@ mod tests {
         }
     }
 
+    /// The target switch leaves the fork output on its goldens.
+    #[test]
+    fn fork_target_matches_every_golden() {
+        let images = Images::default();
+        for s in Scenario::ALL {
+            let produced = s
+                .args_file_for(Target::Fork, &images, Path::new("keys"))
+                .unwrap();
+            assert_matches_golden(s.name(), &produced);
+        }
+    }
+
     #[test]
     fn alt_client_pair_flows_into_participants() {
         // Law 7: the pair is real config, not a label.
@@ -807,7 +857,9 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/.env"
         )));
-        let produced = Scenario::Basic.args_file_in(&images, Path::new("keys")).unwrap();
+        let produced = Scenario::Basic
+            .args_file_in(&images, Path::new("keys"))
+            .unwrap();
         assert_eq!(
             produced, tracked,
             "configs/generated/cb-basic.yml is stale — run `just generate-configs`"

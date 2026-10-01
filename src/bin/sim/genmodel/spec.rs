@@ -23,6 +23,7 @@ use super::scenario::{
     COMMON_ADDITIONAL_SERVICES, COMMON_NETWORK_PARAMS, ElCl, Images, MUX_NETWORK_PARAMS,
     build_mev_params, load_pubkeys, poisoned_relay_url,
 };
+use super::target::{Target, with_inline_chain};
 use cb_testnet_verifier::checks::feature_fired::Feature;
 
 /// The api key the ws stream authenticates with — a fixed devnet UUID that rides
@@ -421,7 +422,26 @@ impl ScenarioSpec {
         }
     }
 
-    /// Render the full Kurtosis args-file, with `comment` as the leading block.
+    /// The `mev_params` keys this spec needs that `target`'s package has no
+    /// equivalent for; empty when it renders. The de-forked package does not
+    /// carry the `cb-signer` patch (`docs/defork-plan.md`), and dropping the key
+    /// would leave a config that no longer tests its feature.
+    pub fn unsupported_keys(&self, target: Target) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if target == Target::Defork && self.signer {
+            keys.push("commit_boost_signer");
+        }
+        keys
+    }
+
+    /// Render the full Kurtosis args-file for the fork, with `comment` as the
+    /// leading block. See [`Self::render_for`].
+    pub fn render(&self, comment: &str, images: &Images, keys_dir: &Path) -> Result<String> {
+        self.render_for(Target::Fork, comment, images, keys_dir)
+    }
+
+    /// Render the full Kurtosis args-file for `target`'s package, with `comment`
+    /// as the leading block.
     ///
     /// The comment is a render-time parameter, NOT a spec field: it is
     /// hand-written per-scenario prose with no knob preimage, so it is not part
@@ -433,7 +453,20 @@ impl ScenarioSpec {
     /// `[pbs]`/per-relay/literal-relay seam, so those combinations cannot be
     /// rendered and are rejected loudly rather than silently dropping the
     /// injected config. `keys_dir` is read only for mux (the per-node pubkeys).
-    pub fn render(&self, comment: &str, images: &Images, keys_dir: &Path) -> Result<String> {
+    /// A spec with [`Self::unsupported_keys`] on `target` is rejected the same way.
+    pub fn render_for(
+        &self,
+        target: Target,
+        comment: &str,
+        images: &Images,
+        keys_dir: &Path,
+    ) -> Result<String> {
+        let unsupported = self.unsupported_keys(target);
+        eyre::ensure!(
+            unsupported.is_empty(),
+            "the {target} package has no equivalent for {}",
+            unsupported.join(", ")
+        );
         let cb_block = if matches!(self.topology, Topology::Mux) {
             eyre::ensure!(
                 !self.timing_games
@@ -451,8 +484,13 @@ impl ScenarioSpec {
         } else {
             cb_toml(&self.to_cb_params())
         };
+        let cb_block = match target {
+            Target::Fork => cb_block,
+            Target::Defork => with_inline_chain(&cb_block, self.network_params())?,
+        };
 
         let mev_params = build_mev_params(
+            target,
             self.relays(),
             images,
             &cb_block,
@@ -466,7 +504,7 @@ impl ScenarioSpec {
             comment.to_string(),
             self.el_cl().participants(),
             COMMON_ADDITIONAL_SERVICES.to_string(),
-            "mev_type: custom".to_string(),
+            format!("mev_type: {}", target.mev_type()),
             mev_params,
             self.network_params().to_string(),
         ]
@@ -862,6 +900,155 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every named and curated spec, with the comment `sim generate` gives it.
+    fn generated() -> Vec<(String, String, ScenarioSpec)> {
+        let mut out: Vec<(String, String, ScenarioSpec)> = Scenario::ALL
+            .iter()
+            .map(|s| (s.name().to_string(), s.comment().to_string(), s.to_spec()))
+            .collect();
+        for (name, spec) in curated() {
+            out.push((name.to_string(), spec.auto_comment(), spec));
+        }
+        out
+    }
+
+    fn mev_params(args_file: &str) -> serde_yaml::Mapping {
+        let root: serde_yaml::Value = serde_yaml::from_str(args_file).unwrap();
+        root["mev_params"].as_mapping().unwrap().clone()
+    }
+
+    /// The fork path is untouched by the target switch: `render` is the fork.
+    #[test]
+    fn fork_target_is_the_existing_render() {
+        let images = Images::default();
+        for (name, comment, spec) in generated() {
+            assert_eq!(
+                spec.render_for(Target::Fork, &comment, &images, keys())
+                    .unwrap(),
+                spec.render(&comment, &images, keys()).unwrap(),
+                "{name}"
+            );
+            assert!(spec.unsupported_keys(Target::Fork).is_empty(), "{name}");
+        }
+    }
+
+    /// The de-forked render is the fork render with each fork-only key mapped:
+    /// same participants, network, images, subsidy and helix config; the relay
+    /// selection moves to `mev_relays`; only the CB chain line differs.
+    #[test]
+    fn defork_maps_every_fork_only_key() {
+        let images = Images::default();
+        const DEFORK_KEYS: [&str; 9] = [
+            "mev_relays",
+            "helix_relay_image",
+            "mev_boost_image",
+            "mev_builder_image",
+            "mev_builder_cl_image",
+            "mev_builder_subsidy",
+            "helix_relay_config",
+            "commit_boost_config",
+            "commit_boost_extra_files",
+        ];
+        for (name, comment, spec) in generated() {
+            if !spec.unsupported_keys(Target::Defork).is_empty() {
+                continue;
+            }
+            let fork_file = spec.render(&comment, &images, keys()).unwrap();
+            let defork_file = spec
+                .render_for(Target::Defork, &comment, &images, keys())
+                .unwrap();
+            let (fork, defork) = (mev_params(&fork_file), mev_params(&defork_file));
+
+            assert!(fork_file.contains("\nmev_type: custom\n"), "{name}");
+            assert!(defork_file.contains("\nmev_type: commit-boost\n"), "{name}");
+            for key in defork.keys() {
+                let key = key.as_str().unwrap();
+                assert!(DEFORK_KEYS.contains(&key), "{name}: unexpected key {key}");
+            }
+
+            // The relay set: the fork's scalar or list, always a list here.
+            let fork_relays: Vec<String> = match &fork["mev_relay"] {
+                serde_yaml::Value::String(one) => vec![one.clone()],
+                many => serde_yaml::from_value(many.clone()).unwrap(),
+            };
+            let defork_relays: Vec<String> =
+                serde_yaml::from_value(defork["mev_relays"].clone()).unwrap();
+            assert_eq!(defork_relays, fork_relays, "{name}");
+            assert_eq!(fork["mev_sidecar"].as_str(), Some("commit-boost"), "{name}");
+            assert_eq!(fork["mev_builder"].as_str(), Some("flashbots"), "{name}");
+
+            for key in DEFORK_KEYS.iter().filter(|k| **k != "mev_relays") {
+                if *key == "commit_boost_config" {
+                    continue;
+                }
+                assert_eq!(defork.get(*key), fork.get(*key), "{name}: {key}");
+            }
+
+            let fork_cb = fork["commit_boost_config"].as_str().unwrap();
+            let defork_cb = defork["commit_boost_config"].as_str().unwrap();
+            let (fork_chain, fork_rest) = fork_cb.split_once('\n').unwrap();
+            let (defork_chain, defork_rest) = defork_cb.split_once('\n').unwrap();
+            assert_eq!(fork_chain, crate::genmodel::cb::CHAIN_FROM_SPEC, "{name}");
+            assert!(
+                defork_chain.contains("slot_time_secs = 12,")
+                    && defork_chain.contains(r#"chain_id = "3151908""#)
+                    && !defork_chain.contains(".Network"),
+                "{name}: {defork_chain}"
+            );
+            assert_eq!(defork_rest, fork_rest, "{name}");
+
+            // Everything outside mev_params is shared verbatim.
+            let outside = |f: &str| {
+                let mut root: serde_yaml::Value = serde_yaml::from_str(f).unwrap();
+                let map = root.as_mapping_mut().unwrap();
+                map.remove("mev_params");
+                map.remove("mev_type");
+                root
+            };
+            assert_eq!(outside(&defork_file), outside(&fork_file), "{name}");
+        }
+    }
+
+    /// The keys the de-forked package has no patch for are refused, named, and
+    /// never rendered without them: a signer scenario without its signer, or a
+    /// file-key scenario without its file, tests nothing.
+    #[test]
+    fn defork_refuses_the_keys_it_cannot_express() {
+        let images = Images::default();
+        let mut refused: Vec<(String, Vec<&str>)> = Vec::new();
+        for (name, comment, spec) in generated() {
+            let keys_needed = spec.unsupported_keys(Target::Defork);
+            let rendered = spec.render_for(Target::Defork, &comment, &images, keys());
+            if keys_needed.is_empty() {
+                assert!(rendered.is_ok(), "{name}");
+            } else {
+                let err = rendered.unwrap_err().to_string();
+                for key in &keys_needed {
+                    assert!(err.contains(key), "{name}: {err}");
+                }
+                refused.push((name, keys_needed));
+            }
+        }
+        assert_eq!(
+            refused,
+            vec![("cb-signer".to_string(), vec!["commit_boost_signer"])]
+        );
+    }
+
+    /// One relay is still `helix-relay-2` on the de-forked package only because
+    /// it is listed in `mev_relays`; the poisoned url addresses it by that name.
+    #[test]
+    fn defork_single_relay_is_listed_so_the_poisoned_url_resolves() {
+        let images = Images::default();
+        let spec = Scenario::SigverifyDiff.to_spec();
+        let out = spec
+            .render_for(Target::Defork, "# x", &images, keys())
+            .unwrap();
+        assert!(out.contains("  mev_relays:\n    - helix\n"), "{out}");
+        assert!(!out.contains("mev_relay:"), "{out}");
+        assert!(out.contains("@helix-relay-2:4040"), "{out}");
     }
 
     /// Mux composed with any injection feature is rejected loudly (not a silent

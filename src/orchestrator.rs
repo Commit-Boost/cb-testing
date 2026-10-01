@@ -52,6 +52,13 @@ struct Cli {
     #[arg(long, default_value = "./ethereum-package")]
     package: String,
 
+    /// Enclave name prefix: each config runs in `<prefix>-<stem>`, and any
+    /// enclave already under that name is removed first. Give a batch against a
+    /// second package its own prefix, or it tears down the first batch's
+    /// enclaves for the same configs.
+    #[arg(long, default_value = "CB")]
+    enclave_prefix: String,
+
     /// Observation window in epochs.
     #[arg(long, default_value_t = 2)]
     min_epochs: u64,
@@ -176,7 +183,7 @@ async fn main() -> Result<()> {
     let enclaves: Vec<EnclaveStatus> = configs
         .iter()
         .map(|config| {
-            let name = enclave_name(config);
+            let name = enclave_name(&cli.enclave_prefix, config);
             EnclaveStatus {
                 name,
                 config: config.clone(),
@@ -873,7 +880,7 @@ async fn discover_beacon_url(enclave: &str) -> Result<String> {
 }
 
 /// Derive an enclave name from a config filename.
-fn enclave_name(config: &Path) -> String {
+fn enclave_name(prefix: &str, config: &Path) -> String {
     let stem = config
         .file_stem()
         .and_then(|s| s.to_str())
@@ -881,7 +888,7 @@ fn enclave_name(config: &Path) -> String {
 
     // Strip common prefixes like "cb-" for cleaner names
     let name = stem.strip_prefix("cb-").unwrap_or(stem);
-    format!("CB-{name}")
+    format!("{prefix}-{name}")
 }
 
 /// Resolve config file paths: expand directories to *.yml files.
@@ -966,4 +973,18 @@ fn print_batch_summary(batch: &BatchReport) {
     }
 
     println!("╚══════════════════════════════════════════════════════════════╝");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enclave_name_keeps_the_default_prefix_and_takes_another() {
+        let config = Path::new("configs/generated/cb-mux.yml");
+        assert_eq!(enclave_name("CB", config), "CB-mux");
+        // A second package's batch must not share names with the first: the
+        // orchestrator removes an existing enclave of the same name on start.
+        assert_eq!(enclave_name("DF", config), "DF-mux");
+    }
 }

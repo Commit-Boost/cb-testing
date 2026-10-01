@@ -114,12 +114,21 @@ sim generate cb-mux --out-dir /tmp/x
 sim scenario --base cb-basic --set clients=geth-teku,get_header=stream   # compose (stdout)
 sim scenario --spec spec.json     # full ScenarioSpec as JSON (the AI-drivable surface)
 sim generate --check              # drift gate: nonzero if on-disk configs != what the generator emits
+sim generate --curated --target defork   # -> configs/generated-defork/ (= just generate-configs-defork)
 sim preflight configs/generated/cb-mux.yml   # ~1s: parse the rendered config with the REAL helix image
 sim checks --list [--json]        # the check contract, machine-readable
 sim diff a.json b.json [--json]   # verdict/provenance regression gate between two reports
 sim triage <enclave>              # each dead service's ROOT panic, as JSON
 sim --log-format json <cmd>       # structured event stream for agents (default: pretty)
 ```
+`--target defork` shapes the configs for the de-forked ethereum-package (upstream plus the patch set in
+`docs/defork-plan.md`); the mapping of each fork-only key is the table in `genmodel/target.rs`. A
+scenario that needs a key with no de-forked equivalent (`commit_boost_signer`,
+`commit_boost_extra_files`) is skipped and named on stderr, never rendered without it.
+`just sweep-gate-defork <package>` runs the gate against such a checkout; it passes
+`cb-orchestrator --package <path> --enclave-prefix DF`, because the orchestrator removes any enclave
+already under a config's name and a second batch under the default `CB-*` names would tear down the first.
+
 `.env` (gitignored, see `.env.example`) overrides the embedded docker images and is read only at the
 `sim generate` CLI boundary, so assembly stays pure.
 

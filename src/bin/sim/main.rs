@@ -13,6 +13,7 @@ use clap::Parser;
 use eyre::WrapErr;
 
 use genmodel::spec::ScenarioSpec;
+use genmodel::target::Target;
 
 mod checks_catalog;
 mod cli;
@@ -42,7 +43,11 @@ fn main() {
             out_dir,
             check,
             curated,
-        } => generate(scenario.as_deref(), &out_dir, check, curated),
+            target,
+        } => {
+            let out_dir = out_dir.unwrap_or_else(|| target.default_out_dir().to_path_buf());
+            generate(scenario.as_deref(), &out_dir, check, curated, target)
+        }
         Command::Scenario {
             spec,
             base,
@@ -112,11 +117,11 @@ fn scenario_cmd(
 
 /// Generate Kurtosis args-files (Task 1), or `--check` them (P2 drift gate).
 /// Implemented in `generate::run` / `generate::check`.
-fn generate(scenario: Option<&str>, out_dir: &Path, check: bool, curated: bool) {
+fn generate(scenario: Option<&str>, out_dir: &Path, check: bool, curated: bool, target: Target) {
     let result = if check {
-        generate::check(scenario, out_dir, curated)
+        generate::check(scenario, out_dir, curated, target)
     } else {
-        generate::run(scenario, out_dir, curated)
+        generate::run(scenario, out_dir, curated, target)
     };
     if let Err(e) = result {
         tracing::error!(error = %e, "sim generate failed");

@@ -8,6 +8,12 @@
 //! (timeouts, extra `[pbs]` lines, per-relay lines) are injected by plain string
 //! building — NOT serde — so there is no quoting/sentinel hazard.
 
+/// The first line of both CB templates: CB loads the chain from the spec file
+/// the package mounts at `.Network`. The de-forked target swaps it for an inline
+/// chain (`target::with_inline_chain`).
+pub const CHAIN_FROM_SPEC: &str =
+    r#"chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }"#;
+
 /// Generate-time knobs for the basic CB template (`build_cb_toml_basic`).
 #[derive(Debug, Clone)]
 pub struct CbParams {
@@ -96,7 +102,7 @@ impl CbParams {
 /// `per_relay_lines` (inside the range loop).
 pub fn cb_toml(p: &CbParams) -> String {
     let mut lines: Vec<String> = vec![
-        r#"chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }"#.to_string(),
+        CHAIN_FROM_SPEC.to_string(),
         String::new(),
         "[pbs]".to_string(),
         r#"host = "0.0.0.0""#.to_string(),
@@ -193,7 +199,7 @@ pub fn cb_toml_mux(pubkeys_node0: &[String], pubkeys_node1: &[String]) -> String
     let node1_list = format_pubkey_list(pubkeys_node1);
 
     let lines: Vec<String> = vec![
-        r#"chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }"#.to_string(),
+        CHAIN_FROM_SPEC.to_string(),
         String::new(),
         "[pbs]".to_string(),
         r#"host = "0.0.0.0""#.to_string(),

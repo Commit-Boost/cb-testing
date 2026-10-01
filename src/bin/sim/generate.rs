@@ -12,18 +12,21 @@ use std::path::Path;
 use eyre::{Result, WrapErr, eyre};
 
 use crate::genmodel::scenario::{Images, Scenario};
+use crate::genmodel::spec::ScenarioSpec;
+use crate::genmodel::target::Target;
 
 /// Generate one scenario (by name) or all named scenarios (`None`) into
-/// `out_dir`, plus the curated composable configs when `curated`. Reads `keys/`
-/// and `.env` relative to the CWD (the repo root — how `just generate-configs`
-/// and the Python generator both run).
-pub fn run(scenario: Option<&str>, out_dir: &Path, curated: bool) -> Result<()> {
+/// `out_dir`, plus the curated composable configs when `curated`, shaped for
+/// `target`'s ethereum-package. Reads `keys/` and `.env` relative to the CWD (the
+/// repo root — how `just generate-configs` and the Python generator both run).
+pub fn run(scenario: Option<&str>, out_dir: &Path, curated: bool, target: Target) -> Result<()> {
     run_in(
         scenario,
         out_dir,
         Path::new("keys"),
         Path::new(".env"),
         curated,
+        target,
     )
 }
 
@@ -37,9 +40,10 @@ fn run_in(
     keys_dir: &Path,
     env_path: &Path,
     curated: bool,
+    target: Target,
 ) -> Result<()> {
     let images = images_from_env(env_path);
-    let outputs = assemble(scenario, &images, keys_dir, curated)?;
+    let outputs = assemble(scenario, &images, keys_dir, curated, target)?;
 
     fs::create_dir_all(out_dir)
         .wrap_err_with(|| format!("creating output dir {}", out_dir.display()))?;
@@ -56,13 +60,14 @@ fn run_in(
 
 /// Verify the on-disk configs already match what the generator would produce,
 /// WITHOUT writing (CI / agent drift gate). Errors (nonzero exit) on any drift.
-pub fn check(scenario: Option<&str>, out_dir: &Path, curated: bool) -> Result<()> {
+pub fn check(scenario: Option<&str>, out_dir: &Path, curated: bool, target: Target) -> Result<()> {
     check_in(
         scenario,
         out_dir,
         Path::new("keys"),
         Path::new(".env"),
         curated,
+        target,
     )
 }
 
@@ -72,9 +77,10 @@ fn check_in(
     keys_dir: &Path,
     env_path: &Path,
     curated: bool,
+    target: Target,
 ) -> Result<()> {
     let images = images_from_env(env_path);
-    let outputs = assemble(scenario, &images, keys_dir, curated)?;
+    let outputs = assemble(scenario, &images, keys_dir, curated, target)?;
 
     let mut drift: Vec<String> = Vec::new();
     for (name, body) in &outputs {
@@ -99,12 +105,14 @@ fn check_in(
 
 /// Select scenarios and assemble each `(name, body)`. Reads mux key files (the
 /// only fallible step) — shared by `run` and `check` so both fail identically
-/// before touching the filesystem.
+/// before touching the filesystem. A scenario `target`'s package cannot express
+/// is skipped, and named on stderr.
 fn assemble(
     scenario: Option<&str>,
     images: &Images,
     keys_dir: &Path,
     curated: bool,
+    target: Target,
 ) -> Result<Vec<(String, String)>> {
     let scenarios: Vec<Scenario> = match scenario {
         Some(name) => vec![
@@ -113,21 +121,44 @@ fn assemble(
         ],
         None => Scenario::ALL.to_vec(),
     };
-    let mut out: Vec<(String, String)> = scenarios
-        .iter()
-        .map(|s| Ok((s.name().to_string(), s.args_file_in(images, keys_dir)?)))
-        .collect::<Result<_>>()?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for s in &scenarios {
+        if !skipped(s.name(), &s.to_spec(), target) {
+            out.push((
+                s.name().to_string(),
+                s.args_file_for(target, images, keys_dir)?,
+            ));
+        }
+    }
     // The curated composable coverage points (rendered from ScenarioSpec, not
     // the Scenario enum). `--curated` emits them alongside the named scenarios.
     if curated {
         for (name, spec) in crate::genmodel::spec::curated() {
-            out.push((
-                name.to_string(),
-                spec.render(&spec.auto_comment(), images, keys_dir)?,
-            ));
+            if !skipped(name, &spec, target) {
+                out.push((
+                    name.to_string(),
+                    spec.render_for(target, &spec.auto_comment(), images, keys_dir)?,
+                ));
+            }
         }
     }
     Ok(out)
+}
+
+/// True when `spec` needs a key `target`'s package has no equivalent for. Said
+/// out loud, because a scenario that silently goes missing from a gate batch
+/// reads as a scenario that passed.
+fn skipped(name: &str, spec: &ScenarioSpec, target: Target) -> bool {
+    let unsupported = spec.unsupported_keys(target);
+    if unsupported.is_empty() {
+        return false;
+    }
+    tracing::warn!(scenario = name, %target, keys = ?unsupported, "skipped: not expressible");
+    eprintln!(
+        "Skipped {name}: the {target} package has no equivalent for {}",
+        unsupported.join(", ")
+    );
+    true
 }
 
 fn names() -> Vec<&'static str> {
@@ -205,7 +236,7 @@ mod tests {
     fn run_writes_all_six_matching_assembly() {
         let dir = std::env::temp_dir().join(format!("sim-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir, false).expect("generate all");
+        run(None, &dir, false, Target::Fork).expect("generate all");
         let images = images_from_env(Path::new(".env"));
         for s in Scenario::ALL {
             let produced = fs::read_to_string(dir.join(format!("{}.yml", s.name()))).unwrap();
@@ -221,20 +252,43 @@ mod tests {
     fn check_passes_when_current_and_fails_on_drift() {
         let dir = std::env::temp_dir().join(format!("sim-check-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir, false).expect("seed");
+        run(None, &dir, false, Target::Fork).expect("seed");
         // Fresh output → check is clean.
-        check(None, &dir, false).expect("check should pass on freshly-generated configs");
+        check(None, &dir, false, Target::Fork)
+            .expect("check should pass on freshly-generated configs");
         // Mutate one file → check must fail.
         let f = dir.join("cb-basic.yml");
         let mut body = fs::read_to_string(&f).unwrap();
         body.push_str("\n# hand-edit\n");
         fs::write(&f, body).unwrap();
-        let err = check(None, &dir, false).unwrap_err();
+        let err = check(None, &dir, false, Target::Fork).unwrap_err();
         assert!(err.to_string().contains("out of date"), "got: {err}");
         assert!(
             err.to_string().contains("cb-basic.yml"),
             "names the drifted file: {err}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The de-forked target writes every scenario it can express into its own
+    /// dir, leaves out the ones it cannot, and its `--check` agrees.
+    #[test]
+    fn defork_run_writes_the_expressible_scenarios_only() {
+        let dir = std::env::temp_dir().join(format!("sim-defork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        run(None, &dir, true, Target::Defork).expect("generate defork");
+        assert!(!dir.join("cb-signer.yml").exists(), "cb-signer written");
+        assert!(
+            dir.join("cb-ws-stream-filekey.yml").exists(),
+            "cb-ws-stream-filekey missing"
+        );
+        let basic = fs::read_to_string(dir.join("cb-basic.yml")).unwrap();
+        assert!(basic.contains("\nmev_type: commit-boost\n"));
+        assert!(
+            dir.join("cb-timing-extra-validation.yml").exists(),
+            "curated"
+        );
+        check(None, &dir, true, Target::Defork).expect("defork check on fresh output");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -250,6 +304,7 @@ mod tests {
             Path::new("/no/such/keys"),
             Path::new("/no/such/.env"),
             false,
+            Target::Fork,
         )
         .unwrap_err();
         assert!(err.to_string().contains("pubkey file"), "got: {err}");

@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::genmodel::target::Target;
+
 /// Structured preflight + triage for Commit-Boost Kurtosis testnets.
 #[derive(Debug, Parser)]
 #[command(name = "sim", about = "helix preflight + triage for the sim harness")]
@@ -70,9 +72,11 @@ pub enum Command {
     Generate {
         /// Scenario name (e.g. `cb-basic`); omit to generate all six.
         scenario: Option<String>,
-        /// Directory to write the generated `<scenario>.yml` files into.
-        #[arg(long, default_value = "configs/generated")]
-        out_dir: PathBuf,
+        /// Directory to write the generated `<scenario>.yml` files into
+        /// (default: `configs/generated`, or `configs/generated-defork` for
+        /// `--target defork`).
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
         /// Don't write; instead verify the on-disk configs already match what the
         /// generator would produce, and exit nonzero on any drift (CI / agent gate).
         #[arg(long)]
@@ -81,6 +85,12 @@ pub enum Command {
         /// clients + high-value feature combos; rendered from `ScenarioSpec`).
         #[arg(long)]
         curated: bool,
+        /// The ethereum-package the configs are shaped for: the Commit-Boost
+        /// `fork` (`mev_type: custom`), or the `defork`ed upstream package
+        /// (`mev_type: commit-boost` + `mev_relays`). A scenario the target
+        /// cannot express is skipped and named on stderr.
+        #[arg(long, value_enum, default_value_t)]
+        target: Target,
     },
     /// Render a COMPOSABLE scenario config from a structured `ScenarioSpec` — a
     /// full JSON spec, or a named base with typed field overrides. Unlike

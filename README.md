@@ -64,6 +64,12 @@ Kurtosis uses a default Commit-Boost config that can be overridden by inlining i
 just generate-configs
 ```
 
+`just generate-configs-defork` (`sim generate --curated --target defork`) writes the same scenarios
+shaped for the de-forked ethereum-package (upstream plus the patch set in `docs/defork-plan.md`:
+`mev_type: commit-boost`, `mev_relays`, an inline CB chain) into `configs/generated-defork/`. A scenario
+that package cannot express yet is skipped and named on stderr. `just sweep-gate-defork <package>` runs
+the gate against such a checkout, under `DF-*` enclave names so it can run beside a fork batch.
+
 `sim generate` emits the named scenarios (the frozen, byte-goldened regression set — the full list is
 `Scenario::ALL` in `src/bin/sim/genmodel/scenario.rs`). The headline ones:
 
