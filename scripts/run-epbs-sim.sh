@@ -51,10 +51,18 @@
 #                      real lodestar VC signer end to end. Independent of the bid
 #                      skip_sigverify progressive-SSZ blocker (the request-auth
 #                      message is a plain container, not a progressive one).
+#   --assert direct    apply with `direct_entries = true` in the km overlay, so
+#                      each validator also gets a builder_config entry pointing
+#                      straight at buildoor (same auth_data as the CB entry).
+#                      HARD-fails unless the stored doc holds both entries, the
+#                      BN ranks a bid from BOTH CB and buildoor in >=
+#                      MIN_DIRECT_SLOTS slots, and after CB is STOPPED the chain
+#                      keeps producing builder-built blocks sourced directly
+#                      from buildoor (the redundancy the direct entry buys).
 # No flag = the default builder-built assertion (unchanged).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth|direct]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -120,8 +128,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|request-auth) : ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  ""|p2p|preserve|block-submission|builder-down|request-auth|direct) : ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth|direct)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
 # block-submission's /beacon_blocks decode only succeeds on the mainnet preset
@@ -142,6 +150,10 @@ esac
 
 # builder-down runs a second observe window after stopping buildoor
 BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor is stopped
+# direct: slots whose ranked candidates must include BOTH paths, and slots to watch
+# with CB stopped
+MIN_DIRECT_SLOTS="${MIN_DIRECT_SLOTS:-4}"
+CB_DOWN_SLOTS="${CB_DOWN_SLOTS:-12}"
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -370,6 +382,84 @@ assert_request_auth() { # $1=n_built
   die "request-auth failed (built=$n_built need>=$MIN_BUILDER_SLOTS, authfail=$authfail need=0)"
 }
 
+# --- assert direct: the BN reaches buildoor through CB AND directly --------------
+# Lodestar asks every builder_config entry for a bid in parallel and logs one
+# "Ranked builder bid candidates slot=N, candidates=<url>:total=..,<url>:..,
+# bidSource=<url>" line per proposal, so both paths are visible per slot.
+DIRECT_URL="$(sed -E 's|://[^@/]*@|://|' <<<"$BUILDOOR_RELAY_URL")"
+CB_ENTRY_URL="http://${CB_NAME}:18550"
+
+# ranked lines for slots in [$1,$2] -> "slot cb direct bidSource" rows
+ranked_rows() {
+  bn_logs | grep 'Ranked builder bid candidates' | python3 -c '
+import re,sys
+s0,s1,cb,direct=int(sys.argv[1]),int(sys.argv[2]),sys.argv[3],sys.argv[4]
+for line in sys.stdin:
+    m=re.search(r"slot=(\d+)",line)
+    if not m or not s0<=int(m.group(1))<=s1: continue
+    cands=re.search(r"candidates=(.*?), bidSource=",line)
+    cands=cands.group(1) if cands else ""
+    src=re.search(r"bidSource=(\S+)",line)
+    print(m.group(1), int(cb+":" in cands), int(direct+":" in cands), src.group(1) if src else "-")
+' "$1" "$2" "$CB_ENTRY_URL" "$DIRECT_URL"
+}
+
+stop_cb() {
+  if [[ "$CB_LAUNCH" == "service" ]]; then
+    kurtosis service stop "$ENCLAVE" "$CB_NAME" >/dev/null 2>&1
+  else
+    docker stop "$CB_NAME" >/dev/null 2>&1
+  fi
+}
+
+assert_direct() { # $1,$2 = observed window
+  log "assert direct: builder_config holds a CB entry and a direct buildoor entry"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local K1; K1="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"][0]["validating_pubkey"])')"
+  local urls; urls="$(km_entry_urls "$K1")"
+  echo "  $K1 entries: $(tr '\n' ' ' <<<"$urls")"
+  grep -qxF "$CB_ENTRY_URL" <<<"$urls" || die "direct: no CB entry ($CB_ENTRY_URL) stored"
+  grep -qxF "$DIRECT_URL" <<<"$urls" || die "direct: no direct entry ($DIRECT_URL) stored"
+
+  log "assert direct: the BN ranks bids from both paths in the same slot"
+  local rows; rows="$(ranked_rows "$1" "$2")"
+  local both; both=$(awk '$2==1 && $3==1' <<<"$rows" | wc -l)
+  echo "  ranked slots in [$1,$2]: $(wc -l <<<"$rows"), with both CB and direct candidates: $both"
+  grep -m3 'Ranked builder bid candidates' <<<"$(bn_logs)" | sed 's/^/    e.g. /' | cut -c1-300
+  (( both >= MIN_DIRECT_SLOTS )) || { echo "$rows"; die "direct: only $both slot(s) ranked both paths (need >=$MIN_DIRECT_SLOTS)"; }
+
+  log "assert direct: stop CB, blocks stay builder-built through the direct entry"
+  local stop_slot; stop_slot="$(bn_head_slot)"
+  stop_cb || die "could not stop $CB_NAME"
+  local target=$(( stop_slot + CB_DOWN_SLOTS )) cur=0
+  for i in $(seq 1 $(( CB_DOWN_SLOTS + 4 )) ); do
+    cur="$(bn_head_slot)"
+    printf '  head=%s / target=%s (CB down)\r' "$cur" "$target"
+    (( cur >= target )) && break
+    sleep 6
+  done
+  echo
+  local from=$(( stop_slot + 2 ))
+  local built_after; built_after="$(sed -n 's/^builder=//p' <<<"$(classify_blocks "$from" "$cur")")"
+  local n_built_after=0
+  [[ -n "$built_after" ]] && n_built_after=$(awk -F, '{print NF}' <<<"$built_after")
+  local after; after="$(ranked_rows "$from" "$cur")"
+  local direct_won; direct_won=$(awk -v u="$DIRECT_URL" '$4==u' <<<"$after" | wc -l)
+  local cb_seen; cb_seen=$(awk '$2==1' <<<"$after" | wc -l)
+  echo "  head advanced $(( cur - stop_slot )) slots with CB stopped"
+  echo "  builder-built blocks after stop: $n_built_after  [slots: $built_after]"
+  echo "  selections won by the direct entry: $direct_won; CB candidates after stop: $cb_seen"
+
+  log "RESULT"
+  if (( n_built_after >= 1 && direct_won >= 1 && cb_seen == 0 )); then
+    printf '\033[1;32mPASS: both paths ranked in %s slots; with CB down, %s blocks built via the direct entry\033[0m\n' \
+      "$both" "$n_built_after"
+    return 0
+  fi
+  echo "$after"
+  die "direct: CB down -> built=$n_built_after need>=1, direct wins=$direct_won need>=1, CB candidates=$cb_seen need=0"
+}
+
 # --- assert builder-down: builder failure never stalls the proposer -------------
 # buildoor is stopped after >=1 builder-built slot. The proposer must fall back to
 # self-building: the chain keeps advancing, the new blocks carry
@@ -478,7 +568,10 @@ if [[ -z "$CB_IMAGE" ]]; then
   # an empty CB_IMAGE (the "silence == success" trap).
   cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh")" \
     || die "provisioning CB artifacts from the submodule failed (see build output above)"
+  km_override="$CB_KM_BIN"
   eval "$cb_art"   # sets CB_IMAGE + CB_KM_BIN
+  # a caller's CB_KM_BIN (e.g. a cb-km branch build) wins over the submodule's
+  [[ -n "$km_override" ]] && CB_KM_BIN="$km_override"
 fi
 docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not present locally"
 
@@ -645,6 +738,8 @@ else
 fi
 
 # ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
+# top-level key: it must precede the [[vcs]] table or TOML scopes it to that table
+[[ "$ASSERT_MODE" == "direct" ]] && sed -i '1i direct_entries = true' "$RUN_DIR/km-overlay.toml"
 log "cb-km apply (point 64 validators' builder_config at CB)"
 "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
 echo "apply OK"
@@ -726,6 +821,11 @@ if [[ "$ASSERT_MODE" == "builder-down" ]]; then
     || { cb_logs | tail -20; die "builder-down precondition: buildoor never built a block (built=$n_built, wins=$auction_wins)"; }
   echo "  precondition OK: buildoor built >=1 block before stop"
   assert_builder_down "$start_slot"
+  exit 0
+fi
+
+if [[ "$ASSERT_MODE" == "direct" ]]; then
+  assert_direct "$start_slot" "$end_slot"
   exit 0
 fi
 
