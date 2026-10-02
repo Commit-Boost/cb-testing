@@ -4,7 +4,7 @@ How to get the repo running and how to extend it — add a **check** (a new verd
 **scenario** (a new devnet configuration that exercises a CB feature). This is the how-to-develop doc; it
 does not re-explain the architecture or the check catalog:
 
-- **[`docs/ARCH.md`](ARCH.md)** — how the pieces fit (module map, the config↔fork seam, the verdict model).
+- **[`docs/ARCH.md`](ARCH.md)** — how the pieces fit (module map, the config↔package seam, the verdict model).
 - **[`docs/CHECKS.md`](CHECKS.md)** — the authoritative per-check catalog + the verdict contract for consumers.
 - **[`docs/DESIGN.md`](DESIGN.md)** — why the repo exists + the design laws referenced below (Law 1
   real-schema configs, Law 3 feature-asserting scenarios, Law 4 TDD-able verdicts, Law 5 observability).
@@ -20,8 +20,9 @@ does not re-explain the architecture or the check catalog:
   Rust workspace (one lib + five bins: `cb-verify`, `cb-orchestrator`, `sim`, `test-mux`, `test-relay`).
 - **Docker + Kurtosis CLI 1.18.1** — only needed for the devnet e2e, not for unit tests. Pin 1.18.1 (the
   parsers read its human text tables; a newer CLI has a config-version clash — see the runbook).
-- The bundled submodules (`git submodule update --init`, or clone `--recursive`): the forked
-  `ethereum-package` (needed to launch a devnet), plus `commit-boost-client` and `helix` (build sources).
+- The bundled submodules (`git submodule update --init`, or clone `--recursive`): `ethereum-package`
+  (upstream plus a thin patch branch, needed to launch a devnet), plus `commit-boost-client` and `helix`
+  (build sources).
 
 ### The `just` recipes (the whole dev loop)
 
@@ -140,7 +141,7 @@ which is how false-greens ship. Pure classifier first, thin I/O shell second, al
 
 A scenario is a typed devnet configuration that assembles into a Kurtosis args-file. Everything lives under
 [`src/bin/sim/genmodel/`](../src/bin/sim/genmodel/); the assembly is pure and guarded by byte-identity golden
-fixtures. The config↔fork coupling (the two `|` block scalars, the runtime template holes) is explained in
+fixtures. The config↔package coupling (the two `|` block scalars, the runtime template holes) is explained in
 [`docs/ARCH.md`](ARCH.md) §4 — read it before touching the block bodies.
 
 > **Composing instead of authoring.** For a one-off combination of *existing* features (e.g. the ws stream on
@@ -157,7 +158,7 @@ fixtures. The config↔fork coupling (the two `|` block scalars, the runtime tem
    (order = emission order — match the intent; the array is what `sim generate` iterates).
 2. **Fill the match arms** for the new variant: `name()` (the canonical basename, e.g. `cb-myfeature`),
    `comment()` (the leading doc block), `relays()` (`&["helix"]` single-relay vs `&["helix", "helix"]`
-   multi-relay — this also toggles the scalar-vs-list `mev_relay` form and `mev_relay_image` emission),
+   multi-relay — this is the `mev_relays` list, so one relay is still `helix-relay-2`),
    `cb_block()` (the CB TOML — see next step), and `network_params()` (only if you need a different validator
    count; `Mux` is the sole scenario using `MUX_NETWORK_PARAMS` = 256 keys).
 3. **Build the CB TOML.** Most scenarios just construct a `CbParams` in `cb_block()` and call
@@ -210,6 +211,6 @@ escalation: [`docs/CHECKS.md`](CHECKS.md).
 
 Do not reverse-engineer the tree; the module-by-module map is **[`docs/ARCH.md`](ARCH.md) §2–3** (shared lib
 `src/lib.rs`, the `cb-verify` binary `src/main.rs`, the `sim` submodules under `src/bin/sim/`, and the
-config↔fork seam). The check catalog is [`docs/CHECKS.md`](CHECKS.md); the fork divergence is
-[`docs/fork-delta.md`](fork-delta.md); the current backlog of what to build next is the internal
+config↔package seam). The check catalog is [`docs/CHECKS.md`](CHECKS.md); the patches carried on top of
+upstream ethereum-package are [`docs/fork-delta.md`](fork-delta.md); the current backlog of what to build next is the internal
 the local `.agent/` working area (backlog + plans index).

@@ -10,7 +10,7 @@ Automated verification for [Commit-Boost](https://github.com/Commit-Boost/commit
 - [Rust toolchain](https://rustup.rs/) (1.91+, edition 2024)
 - Docker (for Kurtosis)
 - The bundled submodules: clone with `--recursive`, or run `git submodule update --init` in an
-  existing checkout. This pulls three: the forked `ethereum-package`, `commit-boost-client`
+  existing checkout. This pulls three: `ethereum-package`, `commit-boost-client`
   (the CB sidecar source, built into the devnet image), and `helix` (relay source, for local
   branch-switching builds).
 
@@ -43,16 +43,19 @@ command). It is gitignored — do not commit it. Use `.env.example` as the refer
 
 ## Kurtosis setup / gotchas
 
-Kurtosis stands the devnet up from a forked `ethereum-package`, one of the three bundled submodules
+Kurtosis stands the devnet up from `ethereum-package`, one of the three bundled submodules
 (init all three with `git submodule update --init`, or clone with `--recursive`):
 
 | Submodule | Source | Role |
 |---|---|---|
-| `ethereum-package` | forked `Commit-Boost/ethereum-package` | the Kurtosis devnet definition |
+| `ethereum-package` | `Commit-Boost/ethereum-package`, branch `cb-on-upstream` | the Kurtosis devnet definition |
 | `commit-boost-client` | `Commit-Boost/commit-boost-client` | CB sidecar source, built into the devnet image |
 | `helix` | `gattaca-com/helix` | relay source, for local branch-switching builds (image is pulled) |
 
-The `ethereum-package` fork generalizes hardcoded patterns from upstream, enabling configs like commit-boost + helix that weren't possible before. Once [this PR](https://github.com/ethpandaops/ethereum-package/pull/1384) merges we can deprecate the fork.
+The `cb-on-upstream` branch is upstream `ethpandaops/ethereum-package` plus a small patch set: the exact
+relay set via `mev_relays` (so helix relays sit behind `mev_type: commit-boost`), an inline helix
+config, per-relay builder subsidies, CB extra files and metrics, an opt-in CB signer, and two
+builder-reth peering fixes.
 
 ### Kurtosis configs
 
@@ -64,11 +67,10 @@ Kurtosis uses a default Commit-Boost config that can be overridden by inlining i
 just generate-configs
 ```
 
-`just generate-configs-defork` (`sim generate --curated --target defork`) writes the same scenarios
-shaped for the de-forked ethereum-package (upstream plus the patch set in `docs/defork-plan.md`:
-`mev_type: commit-boost`, `mev_relays`, an inline CB chain) into `configs/generated-defork/`. A scenario
-that package cannot express yet is skipped and named on stderr. `just sweep-gate-defork <package>` runs
-the gate against such a checkout, under `DF-*` enclave names so it can run beside a fork batch.
+The configs are shaped for that package: `mev_type: commit-boost`, `mev_relays`, and an inline CB
+chain. The older Commit-Boost fork (`mev_type: custom` plus its relay/sidecar/builder resolver) is
+legacy: `sim generate --curated --target fork` still writes configs for it, into
+`configs/generated-fork/`, to run with `--package` pointing at a checkout of the fork.
 
 `sim generate` emits the named scenarios (the frozen, byte-goldened regression set — the full list is
 `Scenario::ALL` in `src/bin/sim/genmodel/scenario.rs`). The headline ones:
@@ -277,7 +279,7 @@ cb-testing/
       payload_matching.rs # Hash matching
       mux_routing.rs      # Mux config parsing, log analysis
       cb_metrics.rs       # Prometheus metrics checks
-  ethereum-package/       # Forked Kurtosis devnet definition (submodule)
+  ethereum-package/       # Kurtosis devnet definition, upstream + CB patches (submodule)
   commit-boost-client/    # CB sidecar source, built into the devnet image (submodule)
   helix/                  # Relay source, for local branch-switching builds (submodule)
 ```

@@ -22,7 +22,7 @@ Rust workspace (one lib, three bins):
 - **docs/ARCH.md** - HOW it fits: end-to-end flow, module map, the config <-> fork seam, the verdict model.
 - **docs/CHECKS.md** - the authoritative **per-check contract** (tier, source, pass/warn/fail/skip conditions).
 - **docs/DEVELOPING.md** - the dev loop + how to add a check / a scenario.
-- **docs/fork-delta.md** - what our `ethereum-package` fork changes vs upstream, file by file.
+- **docs/fork-delta.md** - what the legacy `ethereum-package` fork changed vs upstream, file by file.
 - **docs/local-kurtosis-e2e.md** - the operational runbook + the paid-for incidents behind half the design.
 - **docs/EPBS.md** - the **ePBS (gloas) sim**: `just epbs-test <cl-image>` stands up a gloas devnet with
   buildoor + commit-boost and asserts builder-built blocks flow VC -> CB -> buildoor end to end. Read this to
@@ -57,7 +57,7 @@ Internal back-room (agent working material, not part of the public docs surface)
 
 ```bash
 sim doctor                        # host preflight: kurtosis 1.18.1, docker, memory, CB image, submodule
-git submodule update --init       # 3 submodules: ethereum-package (fork), commit-boost-client, helix
+git submodule update --init       # 3 submodules: ethereum-package (cb-on-upstream), commit-boost-client, helix
 just build-cb-image               # once: builds commit-boost/commit-boost:kurtosis from ./commit-boost-client
 just e2e                                            # cb-basic, end to end
 just e2e configs/generated/cb-mux.yml               # any scenario
@@ -101,8 +101,7 @@ green on a stream that served nothing.
 
 **Composable scenarios** (`src/bin/sim/genmodel/spec.rs`, [`docs/composable-scenarios.md`](docs/composable-scenarios.md)):
 `ScenarioSpec` is a flat closed-enum surface that composes features freely and renders through the SAME seams
-as the named scenarios (proven byte-identical for every named one via `Scenario::to_spec()` +
-`lower_reproduces_every_scenario`). Use it for any combination that is not a frozen named scenario — e.g. the
+as the named scenarios (they render through it via `Scenario::to_spec()`, so their goldens pin it). Use it for any combination that is not a frozen named scenario — e.g. the
 ws stream on a specific client, or a client the named set does not cover. The `clients` axis covers all 5
 mainstream CLs (`geth-lighthouse`, `nethermind-prysm`, `geth-teku`, `geth-nimbus`, `geth-lodestar`).
 `spec::curated()` freezes a few high-value composed specs as goldens (`tests/fixtures/curated-configs/`).
@@ -114,20 +113,21 @@ sim generate cb-mux --out-dir /tmp/x
 sim scenario --base cb-basic --set clients=geth-teku,get_header=stream   # compose (stdout)
 sim scenario --spec spec.json     # full ScenarioSpec as JSON (the AI-drivable surface)
 sim generate --check              # drift gate: nonzero if on-disk configs != what the generator emits
-sim generate --curated --target defork   # -> configs/generated-defork/ (= just generate-configs-defork)
+sim generate --curated --target fork     # legacy fork shape -> configs/generated-fork/
 sim preflight configs/generated/cb-mux.yml   # ~1s: parse the rendered config with the REAL helix image
 sim checks --list [--json]        # the check contract, machine-readable
 sim diff a.json b.json [--json]   # verdict/provenance regression gate between two reports
 sim triage <enclave>              # each dead service's ROOT panic, as JSON
 sim --log-format json <cmd>       # structured event stream for agents (default: pretty)
 ```
-`--target defork` shapes the configs for the de-forked ethereum-package (upstream plus the patch set in
-`docs/defork-plan.md`); the mapping of each fork-only key is the table in `genmodel/target.rs`. A
-scenario that needs a key with no de-forked equivalent (none does today; see
-`ScenarioSpec::unsupported_keys`) is skipped and named on stderr, never rendered without it.
-`just sweep-gate-defork <package>` runs the gate against such a checkout; it passes
-`cb-orchestrator --package <path> --enclave-prefix DF`, because the orchestrator removes any enclave
-already under a config's name and a second batch under the default `CB-*` names would tear down the first.
+`generate` and `scenario` shape configs for the de-forked ethereum-package by default (`--target defork`:
+upstream plus the patch set on the submodule's `cb-on-upstream` branch), and every recipe runs them
+against `./ethereum-package`. `--target fork` is the legacy opt-in for the old Commit-Boost fork, run with
+`cb-orchestrator --package <fork checkout> --enclave-prefix <P>` (the orchestrator removes any enclave
+already under a config's name, so a second batch under the default `CB-*` names would tear down the
+first). The mapping of each fork-only key is the table in `genmodel/target.rs`. A scenario that needs a
+key with no equivalent on its target (none does today; see `ScenarioSpec::unsupported_keys`) is skipped
+and named on stderr, never rendered without it.
 
 `.env` (gitignored, see `.env.example`) overrides the embedded docker images and is read only at the
 `sim generate` CLI boundary, so assembly stays pure.
@@ -239,9 +239,10 @@ If you ever build `cb-km` by hand, rebuild it from the CURRENT submodule and con
 - **Pass `kurtosis run` an ABSOLUTE package path from a script.** `run-and-verify.sh` resolves
   `$REPO_DIR/ethereum-package`; a relative `./ethereum-package` resolves against the caller's cwd and fails
   with a confusing "no kurtosis.yml" error.
-- **`ethereum-package/` is a FORK** (`Commit-Boost/ethereum-package`, branch `cb-testing`), pinned as a
+- **`ethereum-package/` is upstream plus a patch set** (`Commit-Boost/ethereum-package`, branch
+  `cb-on-upstream`: ethpandaops upstream at a pinned SHA plus a few named commits), pinned as a
   detached-HEAD submodule and load-bearing (empty without `--init`). Changes there must be **pushed** or
-  every other clone breaks. There is no `upstream` remote configured. See docs/fork-delta.md.
+  every other clone breaks. There is no `upstream` remote configured.
 - **`commit-boost-client/` and `helix/` are also submodules** (`Commit-Boost/commit-boost-client` @ a
   certified `main`; `gattaca-com/helix` @ `develop`), the build sources for `just build-cb-image` and local
   relay builds. Same push rule: bump the pin to a commit that exists on the remote or `--recursive` clones break.

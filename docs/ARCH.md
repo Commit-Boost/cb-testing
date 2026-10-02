@@ -33,7 +33,7 @@ functions.
    │        classify_helix_probe() → Pass / Fail{field} / Inconclusive.
    │        Exits nonzero ONLY on Fail (genuine config drift) → aborts the run early.
    ├─(1c) check_host_memory                         advisory OOM warning before a ~10-min spend
-   ├─(2) kurtosis run ./ethereum-package \          launch the devnet (the forked package)
+   ├─(2) kurtosis run ./ethereum-package \          launch the devnet (the de-forked package)
    │        --args-file <config> --image-download always
    │        → geth + lighthouse, N helix relays, reth-rbuilder builder,
    │          commit-boost sidecar, dora + spamoor + prometheus
@@ -118,19 +118,19 @@ different report types because `sim` runs before/around a devnet, not against a 
 | `genmodel/scenario.rs` | `Scenario` enum (the named scenarios, `Scenario::ALL`) + `Images` map; `args_file_in()` joins the static fragments + helix const + CB block into a full args-file; `build_mev_params`. `to_spec()` maps each named scenario to a `ScenarioSpec`. |
 | `genmodel/spec.rs` | `ScenarioSpec` — the flat, composable, structured (AI-targetable) scenario surface (closed-enum knobs: clients / topology / get_header / sigverify / min_bid / timing_games / extra_validation / signer). `render()` reuses the same assembly seams as `args_file_in` (proven byte-identical for every named scenario), so any composition renders a valid config. `curated()` = high-value composed specs frozen as goldens. Drives `sim scenario` + `sim generate --curated`. See [`composable-scenarios.md`](composable-scenarios.md). |
 | `genmodel/helix.rs` | `HELIX_RELAY_CONFIG` — the helix YAML block, byte-identical across all named scenarios (const). |
-| `genmodel/target.rs` | `Target` (`fork` default, `defork`): which ethereum-package the args-file is shaped for, the fork-only key mapping, and the inline CB chain the de-forked package needs. Selected by `sim generate --target`. |
+| `genmodel/target.rs` | `Target` (`defork` default, `fork` legacy opt-in): which ethereum-package the args-file is shaped for, the fork-only key mapping, and the inline CB chain the de-forked package needs. Selected by `--target` on `sim generate` and `sim scenario`. |
 | `genmodel/cb.rs` | The CB TOML block: `cb_toml(CbParams)` + `cb_toml_mux(node0, node1)` — verbatim port of the Python builders, generate-time knobs injected by string building. |
-| `render.rs` | The **compatibility contract** with the fork: `extract_config_blocks` (pull the two `|` scalars), `substitute_runtime_vars` (strip the `{{ range }}` loop, fill `{{ .VAR }}` dummies), `default_dummies`. Pure. |
+| `render.rs` | The **compatibility contract** with the package: `extract_config_blocks` (pull the two `|` scalars), `substitute_runtime_vars` (strip the `{{ range }}` loop, fill `{{ .VAR }}` dummies), `default_dummies`. Pure. |
 | `preflight.rs` | `sim preflight`: render + run the real helix image + `classify_helix_probe` (pure, 3-valued). |
 | `triage.rs` | `sim triage`: `parse_service_statuses` + `services_to_triage` (pure) + process I/O to collect logs (kurtosis→docker fallback for the masking bug). |
 | `diagnose.rs` | `extract_root_cause` (pure): pattern-based root-panic extraction from log text, skipping broker/grpc masking lines. Shared by `preflight` and `triage`. |
 
 ---
 
-## 4. Config generation ↔ the fork coupling
+## 4. Config generation ↔ the package coupling
 
 This is the load-bearing seam. `sim generate` emits a Kurtosis args-file whose `mev_params` carries
-**two `|` block scalars** that the forked ethereum-package parses and fills at launch:
+**two `|` block scalars** that the ethereum-package parses and fills at launch:
 
 - `helix_relay_config: |`  — the helix relay's YAML config (byte-identical across all named scenarios).
 - `commit_boost_config: |` — the commit-boost sidecar's TOML config (varies ≤ ~7 lines per scenario).
@@ -148,7 +148,7 @@ host/port, the actual beacon/blocksim URLs, genesis timestamp, the real relay UR
 back into something the real image can parse: `strip_range_blocks` drops the `.Relays` loop (valid
 because relays are `#[serde(default)]` downstream) and `replace_simple_vars` fills each `{{ .VAR }}`
 from `default_dummies()`. `default_dummies` therefore has to cover **every** hole the args-file uses —
-if the fork adds a template var, this map is where the contract breaks, and the preflight tests
+if the package adds a template var, this map is where the contract breaks, and the preflight tests
 (`substituted helix is valid YAML` / `substituted CB is valid TOML`) are what catch it.
 
 **Typing lives only at the assembly layer** (`Scenario` + `Images`), not in the block bodies. The
@@ -201,14 +201,13 @@ The per-check catalog (names, tiers, thresholds, what each asserts) lives in **`
   lacks). `cb-verify` and `cb-orchestrator` *are* tokio (they do concurrent HTTP polling / parallel
   enclaves), but `sim` and the shared discovery layer are not.
 
-- **The forked `ethereum-package` exists on purpose.** Upstream treats out-of-protocol block building
-  as bespoke, hard-coded convenience and injects the VC `--builder` flag deep inside
-  `enrich_mev_extra_params` via a naming-convention URL, with no external-builder hook. The fork carries
-  a general `(relay, sidecar, builder)` component model (`mev_resolver.star`) + a `mev_type: custom`
-  config API — which is exactly what lets a config say "helix relay + commit-boost sidecar +
-  reth-rbuilder builder" and, later, swap in an ePBS builder. A pure shim over today's upstream would
-  have to reimplement a brittle 7-client flag matrix — worse than the fork. cb-testing is the fork's
-  consumer/dogfood (DESIGN Law 6). ONE fork; do not maintain two.
+- **`ethereum-package` is upstream plus a small patch set, not a fork.** The submodule tracks
+  `cb-on-upstream`: ethpandaops upstream at a pinned SHA plus named commits. Upstream's
+  `mev_type: commit-boost` already pairs the CB sidecar with the flashbots (reth-rbuilder) builder, and
+  the `mev_relays` patch puts helix relays behind it, which is what the old fork's
+  `(relay, sidecar, builder)` resolver and `mev_type: custom` existed for. The fork survives only as
+  the `--target fork` opt-in. docs/fork-delta.md lists the patches and why each one exists. Keep the
+  patch set small enough to upstream.
 
 - **The pure `classify_*` / pure-core seam.** Every verb that makes a judgement splits into a **pure
   classifier** (data in, verdict out — unit-testable against fixture logs, no devnet, no docker) and a

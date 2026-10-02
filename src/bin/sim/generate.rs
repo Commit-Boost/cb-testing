@@ -236,11 +236,13 @@ mod tests {
     fn run_writes_all_six_matching_assembly() {
         let dir = std::env::temp_dir().join(format!("sim-gen-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir, false, Target::Fork).expect("generate all");
+        run(None, &dir, false, Target::default()).expect("generate all");
         let images = images_from_env(Path::new(".env"));
         for s in Scenario::ALL {
             let produced = fs::read_to_string(dir.join(format!("{}.yml", s.name()))).unwrap();
-            let expected = s.args_file_in(&images, Path::new("keys")).unwrap();
+            let expected = s
+                .args_file_for(Target::default(), &images, Path::new("keys"))
+                .unwrap();
             assert_eq!(produced, expected, "{} on-disk body", s.name());
         }
         let _ = fs::remove_dir_all(&dir);
@@ -252,16 +254,16 @@ mod tests {
     fn check_passes_when_current_and_fails_on_drift() {
         let dir = std::env::temp_dir().join(format!("sim-check-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir, false, Target::Fork).expect("seed");
+        run(None, &dir, false, Target::default()).expect("seed");
         // Fresh output → check is clean.
-        check(None, &dir, false, Target::Fork)
+        check(None, &dir, false, Target::default())
             .expect("check should pass on freshly-generated configs");
         // Mutate one file → check must fail.
         let f = dir.join("cb-basic.yml");
         let mut body = fs::read_to_string(&f).unwrap();
         body.push_str("\n# hand-edit\n");
         fs::write(&f, body).unwrap();
-        let err = check(None, &dir, false, Target::Fork).unwrap_err();
+        let err = check(None, &dir, false, Target::default()).unwrap_err();
         assert!(err.to_string().contains("out of date"), "got: {err}");
         assert!(
             err.to_string().contains("cb-basic.yml"),
@@ -270,13 +272,13 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The de-forked target writes every scenario it can express into its own
-    /// dir, leaves out the ones it cannot, and its `--check` agrees.
+    /// The default (de-forked) target writes every scenario it can express,
+    /// leaves out the ones it cannot, and its `--check` agrees.
     #[test]
-    fn defork_run_writes_the_expressible_scenarios_only() {
-        let dir = std::env::temp_dir().join(format!("sim-defork-{}", std::process::id()));
+    fn default_run_writes_the_expressible_scenarios_only() {
+        let dir = std::env::temp_dir().join(format!("sim-default-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        run(None, &dir, true, Target::Defork).expect("generate defork");
+        run(None, &dir, true, Target::default()).expect("generate default");
         let signer = fs::read_to_string(dir.join("cb-signer.yml")).unwrap();
         assert!(
             signer.contains("\n  commit_boost_signer: true\n"),
@@ -292,7 +294,7 @@ mod tests {
             dir.join("cb-timing-extra-validation.yml").exists(),
             "curated"
         );
-        check(None, &dir, true, Target::Defork).expect("defork check on fresh output");
+        check(None, &dir, true, Target::default()).expect("check on fresh output");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -308,7 +310,7 @@ mod tests {
             Path::new("/no/such/keys"),
             Path::new("/no/such/.env"),
             false,
-            Target::Fork,
+            Target::default(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("pubkey file"), "got: {err}");

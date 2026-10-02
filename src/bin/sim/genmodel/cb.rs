@@ -248,12 +248,20 @@ pub fn cb_toml_mux(pubkeys_node0: &[String], pubkeys_node1: &[String]) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::genmodel::scenario::COMMON_NETWORK_PARAMS;
+    use crate::genmodel::target::with_inline_chain;
     use crate::genmodel::{extract_block_scalar, golden};
+
+    /// `cb_toml` as the goldens' (default) target carries it: the chain line
+    /// swapped for the inline chain.
+    fn as_rendered(block: String) -> String {
+        with_inline_chain(&block, COMMON_NETWORK_PARAMS).unwrap()
+    }
 
     #[test]
     fn basic_cb_matches_golden_block() {
         let block = extract_block_scalar(golden("cb-basic"), "commit_boost_config");
-        assert_eq!(cb_toml(&CbParams::basic()), block);
+        assert_eq!(as_rendered(cb_toml(&CbParams::basic())), block);
     }
 
     #[test]
@@ -272,7 +280,7 @@ mod tests {
             signer: None,
         };
         let block = extract_block_scalar(golden("cb-timing-games"), "commit_boost_config");
-        assert_eq!(cb_toml(&params), block);
+        assert_eq!(as_rendered(cb_toml(&params)), block);
     }
 
     #[test]
@@ -282,7 +290,7 @@ mod tests {
             ..CbParams::basic()
         };
         let block = extract_block_scalar(golden("cb-skip-sigverify"), "commit_boost_config");
-        assert_eq!(cb_toml(&params), block);
+        assert_eq!(as_rendered(cb_toml(&params)), block);
     }
 
     #[test]
@@ -295,7 +303,7 @@ mod tests {
             ..CbParams::basic()
         };
         let block = extract_block_scalar(golden("cb-extra-validation"), "commit_boost_config");
-        assert_eq!(cb_toml(&params), block);
+        assert_eq!(as_rendered(cb_toml(&params)), block);
     }
 
     #[test]

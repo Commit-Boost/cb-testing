@@ -236,10 +236,9 @@ impl Scenario {
         }
     }
 
-    /// The `ScenarioSpec` this named scenario corresponds to. The migration
-    /// contract: `spec.render(self.comment(), ..) == self.args_file_in(..)` for
-    /// every scenario (test `lower_reproduces_every_scenario`), which pins the
-    /// composable `ScenarioSpec::render` path against the byte-golden'd assembly.
+    /// The `ScenarioSpec` this named scenario corresponds to, and what
+    /// [`Self::args_file_for`] renders. On the fork target it reproduces
+    /// [`Self::args_file_in`] byte-for-byte (test `lower_reproduces_every_scenario`).
     pub fn to_spec(self) -> spec::ScenarioSpec {
         use spec::{
             ClientPair, HeaderTransport, KeyPresence, MinBid, ScenarioSpec, Sigverify, Topology,
@@ -597,8 +596,9 @@ impl Scenario {
         }
     }
 
-    /// Assemble the full Kurtosis args-file for this scenario. Reads
-    /// `keys/node-{0,1}-pubkeys.json` under `keys_dir` for the mux scenario only.
+    /// Assemble the full Kurtosis args-file for this scenario on the legacy fork
+    /// target. Reads `keys/node-{0,1}-pubkeys.json` under `keys_dir` for the mux
+    /// scenario only.
     pub fn args_file_in(&self, images: &Images, keys_dir: &Path) -> Result<String> {
         let cb_block = self.cb_block(keys_dir)?;
         let mev_params = build_mev_params(
@@ -623,9 +623,9 @@ impl Scenario {
             + "\n")
     }
 
-    /// The args-file for `target`'s package. The fork is [`Self::args_file_in`];
-    /// the de-forked package renders through `ScenarioSpec`, which
-    /// `lower_reproduces_every_scenario` proves equal to it on the fork.
+    /// The args-file for `target`'s package. The de-forked package renders
+    /// through `ScenarioSpec`; the fork is [`Self::args_file_in`], which
+    /// `lower_reproduces_every_scenario` proves equal to the spec render there.
     pub fn args_file_for(
         &self,
         target: Target,
@@ -773,6 +773,11 @@ mod tests {
     use super::*;
     use crate::genmodel::assert_matches_golden;
 
+    /// The args-file for the default target, as `sim generate` writes it.
+    fn default_args_file(s: Scenario, images: &Images, keys_dir: &str) -> Result<String> {
+        s.args_file_for(Target::default(), images, Path::new(keys_dir))
+    }
+
     /// Headline test: every scenario assembled with the default images must be
     /// byte-identical to its golden fixture. The mux scenario exercises the full
     /// 256-key path (real `keys/*.json`).
@@ -780,19 +785,7 @@ mod tests {
     fn every_scenario_matches_its_golden() {
         let images = Images::default();
         for s in Scenario::ALL {
-            let produced = s.args_file_in(&images, Path::new("keys")).unwrap();
-            assert_matches_golden(s.name(), &produced);
-        }
-    }
-
-    /// The target switch leaves the fork output on its goldens.
-    #[test]
-    fn fork_target_matches_every_golden() {
-        let images = Images::default();
-        for s in Scenario::ALL {
-            let produced = s
-                .args_file_for(Target::Fork, &images, Path::new("keys"))
-                .unwrap();
+            let produced = default_args_file(s, &images, "keys").unwrap();
             assert_matches_golden(s.name(), &produced);
         }
     }
@@ -800,18 +793,14 @@ mod tests {
     #[test]
     fn alt_client_pair_flows_into_participants() {
         // Law 7: the pair is real config, not a label.
-        let out = Scenario::BasicAltClients
-            .args_file_in(&Images::default(), Path::new("keys"))
-            .unwrap();
+        let out = default_args_file(Scenario::BasicAltClients, &Images::default(), "keys").unwrap();
         assert!(
             out.contains("el_type: nethermind"),
             "alt EL in participants"
         );
         assert!(out.contains("cl_type: prysm"), "alt CL in participants");
         // Every other scenario stays on the baked default pair.
-        let basic = Scenario::Basic
-            .args_file_in(&Images::default(), Path::new("keys"))
-            .unwrap();
+        let basic = default_args_file(Scenario::Basic, &Images::default(), "keys").unwrap();
         assert!(basic.contains("el_type: geth") && basic.contains("cl_type: lighthouse"));
     }
 
@@ -828,9 +817,7 @@ mod tests {
         assert_eq!(ElCl::ALT.el_rpc_url(), "http://el-1-nethermind-prysm:8545");
         // The default-pair scenario's rendered config still carries the
         // original url byte-for-byte (no silent drift from the refactor).
-        let out = Scenario::ExtraValidation
-            .args_file_in(&Images::default(), Path::new("keys"))
-            .unwrap();
+        let out = default_args_file(Scenario::ExtraValidation, &Images::default(), "keys").unwrap();
         assert!(out.contains(r#"rpc_url = "http://el-1-geth-lighthouse:8545""#));
     }
 
@@ -857,9 +844,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/.env"
         )));
-        let produced = Scenario::Basic
-            .args_file_in(&images, Path::new("keys"))
-            .unwrap();
+        let produced = default_args_file(Scenario::Basic, &images, "keys").unwrap();
         assert_eq!(
             produced, tracked,
             "configs/generated/cb-basic.yml is stale — run `just generate-configs`"
@@ -870,9 +855,8 @@ mod tests {
     fn mux_with_missing_keys_is_a_clean_error_not_a_panic() {
         // The mux scenario reads keys/*.json; a missing dir must surface as an
         // Err (which `run` turns into a clean exit), never a panic mid-generation.
-        let err = Scenario::Mux
-            .args_file_in(&Images::default(), Path::new("/no/such/keys"))
-            .unwrap_err();
+        let err =
+            default_args_file(Scenario::Mux, &Images::default(), "/no/such/keys").unwrap_err();
         assert!(err.to_string().contains("pubkey file"), "got: {err}");
     }
 
@@ -883,10 +867,7 @@ mod tests {
             if s == Scenario::Mux {
                 continue;
             }
-            assert!(
-                s.args_file_in(&Images::default(), Path::new("/no/such/keys"))
-                    .is_ok()
-            );
+            assert!(default_args_file(s, &Images::default(), "/no/such/keys").is_ok());
         }
     }
 }

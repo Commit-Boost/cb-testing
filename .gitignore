@@ -3,7 +3,7 @@
 *.swo
 .DS_Store
 configs/generated
-configs/generated-defork
+configs/generated-fork
 configs/epbs/.run
 kurtosis-configs/
 scripts/kurtosis-configs/

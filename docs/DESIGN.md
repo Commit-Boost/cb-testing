@@ -103,28 +103,23 @@ JSON) — never a separate agent-only tool category; build good logging on every
 consume it. The `VerificationReport` is the model to extend, not replace.
 
 <a id="law-6"></a>
-### Law 6 — Dogfood the abstraction in one fork; upstreaming is optional icing later
+### Law 6 — Ride upstream with a thin patch branch; never re-fork
 
-The `(relay, sidecar, builder)` component model (`mev_resolver.star`) + the `mev_type: custom` config
-API already exist in the fork, and cb-testing already consumes them — so this is maturing what exists,
-not a new build, and there is no rush to upstream. Topology: ONE fork carries the abstraction;
-cb-testing is its consumer/dogfood (do NOT maintain two forks — the abstraction-vs-usage seam is the
-fork/consumer boundary, not two forks of one repo). "Do it properly" means:
+`ethereum-package` is upstream ethpandaops plus a short list of named commits (branch
+`cb-on-upstream`, listed with the reason for each in `docs/fork-delta.md`). Upstream's own
+`mev_type: commit-boost` is the base; a patch adds only what a scenario needs and upstream cannot
+express, or fixes what stock upstream cannot launch.
 
-- (a) refine the abstraction to be clean and GENERAL (reads like an API a stranger would use: any relay
-  × any sidecar × any builder, already spans epbs/buildoor/mev-rs);
-- (b) add the external-sidecar hook (let VCs point at an externally-supplied builder URL; make each
-  component independently `none`-able) — the one missing piece that later enables a thin
-  compose-over-UNMODIFIED-upstream shim;
-- (c) keep the fork delta minimal and PR-shaped as you touch it.
+- (a) **Rebase, don't layer.** Moving to a new upstream is a rebase of the patch branch plus a full
+  `sweep-gate`. A patch upstream has made redundant is dropped, not kept.
+- (b) **A patch earns its place with a failing run** and states why upstream is not enough. When the
+  reason stops being true, the patch goes.
+- (c) **Keep each patch PR-shaped.** The bug fixes among them are upstream candidates.
 
-OPTIONAL LATER: upstream the proven code (a medium PR — the `mev_resolver.star` module + a refactor of
-`main.star`'s mev dispatch + `input_parser.star`'s per-client builder-flag matrix), then cb-testing
-repoints its `import_module` from the fork to upstream in one line. A pure shim is not possible on
-today's upstream because upstream injects the VC `--builder` flag inside `enrich_mev_extra_params`,
-triggered only by a native `mev_type` via a naming-convention URL, with no external-builder hook — a
-shim would otherwise reimplement the brittle per-client flag matrix, worse than the fork. (The `#1384`
-"exit" referenced in earlier audits is UNVERIFIED — check upstream HEAD before any PR.)
+This replaces an earlier plan to carry a `(relay, sidecar, builder)` abstraction (`mev_type: custom`)
+in a long-lived fork. Measured against current upstream, that abstraction was no longer needed:
+upstream's commit-boost type plus a relay-list patch expressed every scenario, and the whole gate
+passes on the patch branch. The fork's config shape survives only as the `--target fork` opt-in.
 
 <a id="law-7"></a>
 ### Law 7 — Coverage is a matrix, not a point
@@ -134,8 +129,8 @@ if everything hardcodes geth+lighthouse.
 
 ## Where to go next
 
-- `docs/ARCH.md` — how the pieces fit (module map, the config↔fork seam, the verdict model).
+- `docs/ARCH.md` — how the pieces fit (module map, the config↔package seam, the verdict model).
 - `docs/CHECKS.md` — the per-check catalog (tiers, thresholds, feature-assertion status).
 - `docs/DEVELOPING.md` — the dev loop + how to add a check or a scenario.
-- `docs/fork-delta.md` — what the `ethereum-package` fork changes vs upstream, file by file.
+- `docs/fork-delta.md` — the patches `ethereum-package` carries on top of upstream, and why each exists.
 - `docs/local-kurtosis-e2e.md` — the operational runbook.

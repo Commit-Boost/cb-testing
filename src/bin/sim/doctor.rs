@@ -3,7 +3,7 @@
 //! Turns the hard-won gotchas in `docs/local-kurtosis-e2e.md` into one command:
 //! is kurtosis installed (and the config-version-9-safe 1.18.1 pin), is docker
 //! reachable, does the host have memory headroom for a ~10-min devnet, is the CB
-//! image built, and is the forked `ethereum-package` submodule initialized.
+//! image built, and is the `ethereum-package` submodule initialized.
 //!
 //! Structure mirrors the other verbs: a PURE classifier (`classify`, given probe
 //! results -> verdict) that is unit-tested, and a thin IO layer (`gather_probes`)

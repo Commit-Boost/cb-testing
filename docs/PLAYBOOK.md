@@ -19,7 +19,7 @@ You need: **Docker**, the **Rust toolchain** (1.91+, edition 2024), the **Kurtos
 
 ```bash
 # 1. Clone WITH submodules. This is the whole testing ground in one step:
-#    ethereum-package (forked), commit-boost-client (CB source), helix (relay source).
+#    ethereum-package (upstream + patch branch), commit-boost-client (CB source), helix (relay source).
 git clone --recursive https://github.com/Commit-Boost/cb-testing.git
 cd cb-testing
 #    Already cloned without --recursive?  git submodule update --init

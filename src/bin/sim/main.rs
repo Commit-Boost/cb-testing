@@ -54,19 +54,22 @@ fn main() {
             set,
             out,
             show_spec,
-        } => scenario_cmd(spec, base, set, out, show_spec),
+            target,
+        } => scenario_cmd(spec, base, set, out, show_spec, target),
     }
 }
 
 /// Render a composable scenario from a `ScenarioSpec` (`--spec <json>`) or a
-/// named base with typed overrides (`--base`/`--set`). Implemented via
-/// `ScenarioSpec::{from_json, from_base_and_overrides}` + `render`.
+/// named base with typed overrides (`--base`/`--set`), shaped for `target`'s
+/// package. Implemented via `ScenarioSpec::{from_json, from_base_and_overrides}`
+/// + `render_for`.
 fn scenario_cmd(
     spec_path: Option<PathBuf>,
     base: Option<String>,
     set: Option<String>,
     out: Option<PathBuf>,
     show_spec: bool,
+    target: Target,
 ) {
     let result = (|| -> eyre::Result<()> {
         let spec = match &spec_path {
@@ -97,7 +100,7 @@ fn scenario_cmd(
             eprintln!("arms: [{}]", arms.join(", "));
         }
         let images = generate::images_from_env(Path::new(".env"));
-        let rendered = spec.render(&spec.auto_comment(), &images, Path::new("keys"))?;
+        let rendered = spec.render_for(target, &spec.auto_comment(), &images, Path::new("keys"))?;
         match &out {
             Some(path) => {
                 std::fs::write(path, &rendered)

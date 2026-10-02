@@ -85,19 +85,13 @@ test-mux enclave="CB-Testnet" config="configs/generated/cb-mux.yml":
         --timeout 300
 
 # Generate Kurtosis YAML configs into configs/generated/ (the typed `sim`
-# generator). Loads optional .env for Docker image overrides (see .env.example).
+# generator), shaped for the de-forked ./ethereum-package (`mev_type: commit-boost`
+# + `mev_relays`). Loads optional .env for Docker image overrides (see .env.example).
 # `--curated` also emits the composable coverage points (the extra CL clients,
 # cb-ws-prysm, cb-timing-extra-validation) so the gate and `just e2e` can reach
 # them by path like any other scenario.
 generate-configs:
     cargo run --quiet --bin sim -- generate --curated
-
-# The same configs shaped for the de-forked ethereum-package (upstream plus the
-# patch set in docs/defork-plan.md: `mev_type: commit-boost` + `mev_relays`), into
-# configs/generated-defork/. A scenario that package cannot express yet is
-# skipped and named on stderr, not written.
-generate-configs-defork:
-    cargo run --quiet --bin sim -- generate --curated --target defork
 
 # Build the Commit-Boost image the devnet runs, from the bundled commit-boost submodule
 # (default ./commit-boost-client submodule). Produces commit-boost/commit-boost:{{tag}};
@@ -219,29 +213,6 @@ sweep-gate jobs="2": build-orchestrator generate-configs pull-images
         configs/generated/cb-ws-stream-filekey.yml \
         configs/generated/cb-ws-prysm.yml \
         configs/generated/cb-ws-stream-nokey.yml
-
-# sweep-gate against the de-forked ethereum-package checked out at `package`.
-# Its own config dir and enclave prefix (DF-*) let it run beside a fork batch:
-# the orchestrator removes any enclave already under a config's name on start.
-#   just sweep-gate-defork ../ep-defork
-sweep-gate-defork package jobs="1": build-orchestrator generate-configs-defork pull-images
-    cargo run --release --bin cb-orchestrator -- \
-        --jobs {{jobs}} --target-epoch 1 --min-epochs 1 --skip-finalization \
-        --package {{package}} --enclave-prefix DF \
-        configs/generated-defork/cb-basic.yml \
-        configs/generated-defork/cb-basic-nethermind-prysm.yml \
-        configs/generated-defork/cb-multiple-relays.yml \
-        configs/generated-defork/cb-mux.yml \
-        configs/generated-defork/cb-skip-sigverify.yml \
-        configs/generated-defork/cb-sigverify-diff.yml \
-        configs/generated-defork/cb-timing-games.yml \
-        configs/generated-defork/cb-extra-validation.yml \
-        configs/generated-defork/cb-config-surface.yml \
-        configs/generated-defork/cb-min-bid.yml \
-        configs/generated-defork/cb-ws-stream.yml \
-        configs/generated-defork/cb-ws-prysm.yml \
-        configs/generated-defork/cb-ws-stream-nokey.yml \
-        configs/generated-defork/cb-ws-stream-filekey.yml
 
 # Test a consensus-client build against the ePBS (gloas) sim, end to end.
 # The commit-boost artifacts (km-e2e image + cb-km) are built from the pinned

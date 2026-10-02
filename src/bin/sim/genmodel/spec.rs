@@ -9,10 +9,9 @@
 //!
 //! `lower()` reuses the existing assembly seams verbatim (`CbParams`, `cb_toml`,
 //! `cb_toml_mux`, `build_mev_params`, `ElCl`, `poisoned_relay_url`,
-//! `load_pubkeys`); it introduces no new YAML/TOML emission. The 13 named
-//! scenarios are reproduced byte-for-byte (see `Scenario::to_spec` + the
-//! `lower_reproduces_every_scenario` test), so byte-golden acceptance is
-//! preserved; the combinatorial space is guarded by offline property tests.
+//! `load_pubkeys`); it introduces no new YAML/TOML emission. The named scenarios
+//! render through it (see `Scenario::to_spec`), so the byte goldens pin it
+//! directly; the combinatorial space is guarded by offline property tests.
 
 use std::path::Path;
 
@@ -432,12 +431,6 @@ impl ScenarioSpec {
         }
     }
 
-    /// Render the full Kurtosis args-file for the fork, with `comment` as the
-    /// leading block. See [`Self::render_for`].
-    pub fn render(&self, comment: &str, images: &Images, keys_dir: &Path) -> Result<String> {
-        self.render_for(Target::Fork, comment, images, keys_dir)
-    }
-
     /// Render the full Kurtosis args-file for `target`'s package, with `comment`
     /// as the leading block.
     ///
@@ -645,7 +638,9 @@ mod tests {
                 ..ScenarioSpec::default()
             };
             let el = spec.el_cl();
-            let out = spec.render("# x", &images, keys()).unwrap();
+            let out = spec
+                .render_for(Target::default(), "# x", &images, keys())
+                .unwrap();
             assert!(
                 out.contains(&format!("el_type: {}", el.el)),
                 "missing el_type {} for {c:?}",
@@ -665,19 +660,22 @@ mod tests {
         fs.iter().map(|f| f.id()).collect()
     }
 
-    /// THE MIGRATION CONTRACT: the composable `render` path reproduces every
-    /// named scenario byte-for-byte against the existing (byte-golden'd)
-    /// `args_file_in`. If this passes, `render` inherits the goldens' coverage.
+    /// The legacy fork target still renders every named scenario, and the
+    /// composable path agrees byte-for-byte with the direct fork assembly
+    /// `args_file_in`.
     #[test]
     fn lower_reproduces_every_scenario() {
         let images = Images::default();
         for s in Scenario::ALL {
-            let via_spec = s.to_spec().render(s.comment(), &images, keys()).unwrap();
+            let via_spec = s
+                .to_spec()
+                .render_for(Target::Fork, s.comment(), &images, keys())
+                .unwrap();
             let via_assembly = s.args_file_in(&images, keys()).unwrap();
             assert_eq!(
                 via_spec,
                 via_assembly,
-                "render(spec) != args_file_in for {}",
+                "render_for(fork) != args_file_in for {}",
                 s.name()
             );
         }
@@ -693,7 +691,9 @@ mod tests {
         let images = Images::default();
         for s in Scenario::ALL {
             let spec = s.to_spec();
-            let rendered = spec.render(s.comment(), &images, keys()).unwrap();
+            let rendered = spec
+                .render_for(Target::default(), s.comment(), &images, keys())
+                .unwrap();
             assert_eq!(
                 sorted_ids(detect_enabled_features(&rendered)),
                 sorted_ids(spec.armed_features()),
@@ -733,7 +733,9 @@ mod tests {
             topology: Topology::TwoRelays,
             ..ScenarioSpec::default()
         };
-        let out = spec.render("# composite", &images, keys()).unwrap();
+        let out = spec
+            .render_for(Target::default(), "# composite", &images, keys())
+            .unwrap();
         let at = |needle: &str| {
             out.find(needle)
                 .unwrap_or_else(|| panic!("missing {needle}"))
@@ -806,7 +808,7 @@ mod tests {
         out
     }
 
-    /// `render` is total across the non-mux composable space (no panic, always
+    /// `render_for` is total across the non-mux composable space (no panic, always
     /// Ok), and the round-trip holds for every enumerated point — the offline
     /// "enumerable/testable" deliverable (a test, not a coverage-claiming verb).
     #[test]
@@ -814,7 +816,7 @@ mod tests {
         let images = Images::default();
         for spec in enumerate() {
             let rendered = spec
-                .render(&spec.auto_comment(), &images, keys())
+                .render_for(Target::default(), &spec.auto_comment(), &images, keys())
                 .unwrap_or_else(|e| panic!("render failed for {spec:?}: {e}"));
             assert_eq!(
                 sorted_ids(detect_enabled_features(&rendered)),
@@ -883,7 +885,9 @@ mod tests {
         let images = Images::default();
         let dir = "tests/fixtures/curated-configs";
         for (name, spec) in curated() {
-            let rendered = spec.render(&spec.auto_comment(), &images, keys()).unwrap();
+            let rendered = spec
+                .render_for(Target::default(), &spec.auto_comment(), &images, keys())
+                .unwrap();
             let path = format!("{dir}/{name}.yml");
             if std::env::var("BLESS_CURATED").is_ok() {
                 std::fs::create_dir_all(dir).unwrap();
@@ -917,21 +921,6 @@ mod tests {
         root["mev_params"].as_mapping().unwrap().clone()
     }
 
-    /// The fork path is untouched by the target switch: `render` is the fork.
-    #[test]
-    fn fork_target_is_the_existing_render() {
-        let images = Images::default();
-        for (name, comment, spec) in generated() {
-            assert_eq!(
-                spec.render_for(Target::Fork, &comment, &images, keys())
-                    .unwrap(),
-                spec.render(&comment, &images, keys()).unwrap(),
-                "{name}"
-            );
-            assert!(spec.unsupported_keys(Target::Fork).is_empty(), "{name}");
-        }
-    }
-
     /// The de-forked render is the fork render with each fork-only key mapped:
     /// same participants, network, images, subsidy and helix config; the relay
     /// selection moves to `mev_relays`; only the CB chain line differs.
@@ -954,7 +943,9 @@ mod tests {
             if !spec.unsupported_keys(Target::Defork).is_empty() {
                 continue;
             }
-            let fork_file = spec.render(&comment, &images, keys()).unwrap();
+            let fork_file = spec
+                .render_for(Target::Fork, &comment, &images, keys())
+                .unwrap();
             let defork_file = spec
                 .render_for(Target::Defork, &comment, &images, keys())
                 .unwrap();
@@ -1057,6 +1048,9 @@ mod tests {
             timing_games: true,
             ..ScenarioSpec::default()
         };
-        assert!(bad.render("# x", &images, keys()).is_err());
+        assert!(
+            bad.render_for(Target::default(), "# x", &images, keys())
+                .is_err()
+        );
     }
 }

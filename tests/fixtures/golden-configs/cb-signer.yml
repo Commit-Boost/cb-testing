@@ -20,12 +20,11 @@ additional_services:
   - spamoor
   - prometheus
 
-mev_type: custom
+mev_type: commit-boost
 
 mev_params:
-  mev_relay: helix
-  mev_sidecar: commit-boost
-  mev_builder: flashbots
+  mev_relays:
+    - helix
 
   helix_relay_image: ghcr.io/gattaca-com/helix-relay@sha256:9e5ea856d51afbb0639ebf42adb54092bbbf582acbf6553e997b82170a4cd57e
   mev_boost_image: commit-boost/commit-boost:kurtosis
@@ -130,7 +129,7 @@ mev_params:
     is_local_dev: false
 
   commit_boost_config: |
-    chain = { genesis_time_secs = {{ .Timestamp }}, path = "{{ .Network }}" }
+    chain = { genesis_time_secs = {{ .Timestamp }}, slot_time_secs = 12, genesis_fork_version = "0x10000038", fulu_fork_slot = 0, chain_id = "3151908" }
 
     [pbs]
     host = "0.0.0.0"

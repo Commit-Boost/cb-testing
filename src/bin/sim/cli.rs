@@ -73,8 +73,8 @@ pub enum Command {
         /// Scenario name (e.g. `cb-basic`); omit to generate all six.
         scenario: Option<String>,
         /// Directory to write the generated `<scenario>.yml` files into
-        /// (default: `configs/generated`, or `configs/generated-defork` for
-        /// `--target defork`).
+        /// (default: `configs/generated`, or `configs/generated-fork` for
+        /// `--target fork`).
         #[arg(long)]
         out_dir: Option<PathBuf>,
         /// Don't write; instead verify the on-disk configs already match what the
@@ -85,10 +85,10 @@ pub enum Command {
         /// clients + high-value feature combos; rendered from `ScenarioSpec`).
         #[arg(long)]
         curated: bool,
-        /// The ethereum-package the configs are shaped for: the Commit-Boost
-        /// `fork` (`mev_type: custom`), or the `defork`ed upstream package
-        /// (`mev_type: commit-boost` + `mev_relays`). A scenario the target
-        /// cannot express is skipped and named on stderr.
+        /// The ethereum-package the configs are shaped for: the `defork`ed
+        /// upstream package (`mev_type: commit-boost` + `mev_relays`), or the
+        /// legacy Commit-Boost `fork` (`mev_type: custom`). A scenario the
+        /// target cannot express is skipped and named on stderr.
         #[arg(long, value_enum, default_value_t)]
         target: Target,
     },
@@ -115,5 +115,8 @@ pub enum Command {
         /// Print the resolved spec as JSON to stderr before rendering (preview).
         #[arg(long)]
         show_spec: bool,
+        /// The ethereum-package the config is shaped for, as for `generate`.
+        #[arg(long, value_enum, default_value_t)]
+        target: Target,
     },
 }

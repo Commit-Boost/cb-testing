@@ -14,8 +14,8 @@
 
 ## The two flows (pick one)
 - **cb-testing (this repo) — the verification harness.** `cb-verify` Rust binary with tiered
-  pass/fail checks, the named scenarios (`Scenario::ALL`) + composable `sim scenario`, forked
-  `Commit-Boost/ethereum-package` submodule, helix relay.
+  pass/fail checks, the named scenarios (`Scenario::ALL`) + composable `sim scenario`, the
+  `ethereum-package` submodule (upstream plus the `cb-on-upstream` patch branch), helix relay.
   This is the authoritative flow (success criteria baked in). **We use this.**
 - **commit-boost-client `just kurtosis-*`** — lighter alt: upstream `ethereum-package`,
   `mev_type: commit-boost`, mev-boost-relay, no pass/fail harness. Good for a quick smoke.
@@ -48,7 +48,7 @@ docker buildx). Verify: `docker image inspect commit-boost/commit-boost:kurtosis
 ## Step 2 — Prepare cb-testing  (STATUS: done, CONFIRMED)
 ```bash
 cd .
-git submodule update --init --recursive        # pull forked ethereum-package @ 4844f884 (was EMPTY)
+git submodule update --init --recursive        # pull ethereum-package (cb-on-upstream; empty otherwise)
 # .env — override BOTH images (see gotcha):
 #   MEV_BOOST_IMAGE=commit-boost/commit-boost:kurtosis     (local CB build)
 #   HELIX_RELAY_IMAGE=ghcr.io/gattaca-com/helix-relay:main (public; we don't build helix)
@@ -128,7 +128,7 @@ kurtosis clean -a                     # full wipe
   `~/.config/kurtosis/kurtosis-config.yml` at `config-version: 9`, which 1.18.1 can't read
   (`ConfigVersion(9) ... newer than ConfigVersion_v7`). Fix on downgrade: `rm` that file (engine restart
   regenerates it), then `kurtosis analytics disable`. (This box: pinned to 1.18.1.)
-- Forked ethereum-package submodule is load-bearing + must be `--init`ed (empty otherwise).
+- The ethereum-package submodule is load-bearing + must be `--init`ed (empty otherwise).
 - `--image-download always` still uses purely-local tags if they aren't registry refs.
 - Image-tag mismatch across generator / example config / justfile (see Step 1).
 - (add machine-specific / version-pin issues here)

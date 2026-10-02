@@ -1,11 +1,11 @@
 //! Which ethereum-package an args-file is written for.
 //!
-//! [`Target::Fork`] is the Commit-Boost fork of ethereum-package, the default and
-//! what the goldens pin: `mev_type: custom` plus the fork's `(relay, sidecar,
-//! builder)` resolver keys. [`Target::Defork`] is upstream ethpandaops
-//! ethereum-package carrying the small patch set in `docs/defork-plan.md`, where
+//! [`Target::Defork`] is the default: upstream ethpandaops ethereum-package plus
+//! the small patch set on the submodule's `cb-on-upstream` branch, where
 //! `mev_type: commit-boost` picks the commit-boost sidecar and the flashbots
-//! builder, and `mev_params.mev_relays` replaces the relay set.
+//! builder, and `mev_params.mev_relays` replaces the relay set. [`Target::Fork`]
+//! is the legacy Commit-Boost fork, kept as an explicit opt-in: `mev_type:
+//! custom` plus the fork's `(relay, sidecar, builder)` resolver keys.
 //!
 //! How each fork-only key maps onto the de-forked package:
 //!
@@ -32,8 +32,8 @@ const GENESIS_FORK_VERSION: &str = "0x10000038";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Target {
-    #[default]
     Fork,
+    #[default]
     Defork,
 }
 
@@ -47,12 +47,13 @@ impl Target {
         }
     }
 
-    /// Where `sim generate` writes this target's configs by default. Separate
-    /// dirs, so the two targets can be generated and run side by side.
+    /// Where `sim generate` writes this target's configs by default. The fork
+    /// gets its own dir, so opting into it never overwrites the configs every
+    /// recipe runs.
     pub fn default_out_dir(self) -> &'static Path {
         match self {
-            Target::Fork => Path::new("configs/generated"),
-            Target::Defork => Path::new("configs/generated-defork"),
+            Target::Fork => Path::new("configs/generated-fork"),
+            Target::Defork => Path::new("configs/generated"),
         }
     }
 }
@@ -118,6 +119,21 @@ mod tests {
 
     /// The line the live de-fork probe passed with (12s slots, devnet 3151908).
     const PROBE_CHAIN: &str = r#"chain = { genesis_time_secs = {{ .Timestamp }}, slot_time_secs = 12, genesis_fork_version = "0x10000038", fulu_fork_slot = 0, chain_id = "3151908" }"#;
+
+    /// Every recipe reads `configs/generated/`, so the default target is the
+    /// one written there, and the fork opt-in never lands on top of it.
+    #[test]
+    fn the_default_target_writes_the_configs_the_recipes_run() {
+        assert_eq!(Target::default(), Target::Defork);
+        assert_eq!(
+            Target::default().default_out_dir(),
+            Path::new("configs/generated")
+        );
+        assert_ne!(
+            Target::Fork.default_out_dir(),
+            Target::default().default_out_dir()
+        );
+    }
 
     #[test]
     fn inline_chain_matches_the_live_probe_for_both_fragments() {
