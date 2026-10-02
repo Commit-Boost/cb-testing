@@ -513,11 +513,30 @@ async fn launch_enclave(name: &str, config: &Path, package: &str) -> Result<()> 
         .wrap_err("Failed to run kurtosis")?;
 
     if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("kurtosis run failed: {}", stderr.trim());
+        match starlark_error(&stdout) {
+            Some(error) => bail!("kurtosis run failed: {error}"),
+            None => bail!("kurtosis run failed: {}", stderr.trim()),
+        }
     }
 
     Ok(())
+}
+
+/// The Starlark error block from `kurtosis run` stdout. Kurtosis prints the
+/// reason a run failed (a `fail()`, a container that died on boot) there, while
+/// stderr carries only its INFO lines.
+fn starlark_error(stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("There was an error"))?;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.starts_with("Error encountered running Starlark code"))
+        .map_or(lines.len(), |offset| start + offset);
+    Some(lines[start..end].join("\n").trim().to_string())
 }
 
 /// Phase 2: Wait for the enclave's beacon to reach the slot before the target
@@ -978,6 +997,35 @@ fn print_batch_summary(batch: &BatchReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starlark_error_is_the_block_kurtosis_prints_on_stdout() {
+        let interpret = "Printing a message\n\
+            There was an error interpreting Starlark code \n\
+            Evaluation error: fail: Unsupported relay kind bogus in mev_relays\n\
+            \tat [3:13]: <toplevel>\n\
+            \n\
+            Error encountered running Starlark code.\n\
+            UUID   Name   Ports   Status\n";
+        assert_eq!(
+            starlark_error(interpret).unwrap(),
+            "There was an error interpreting Starlark code \n\
+             Evaluation error: fail: Unsupported relay kind bogus in mev_relays\n\
+             \tat [3:13]: <toplevel>"
+        );
+
+        let execute = "Adding service with name 'commit-boost-1-lighthouse-geth'\n\
+            There was an error executing Starlark code \n\
+            \x20 Caused by: Container 'abc' die with a non zero exit code rapidly after it was started.\n\
+            \x20       Error: unable to decode file";
+        assert!(
+            starlark_error(execute)
+                .unwrap()
+                .ends_with("unable to decode file")
+        );
+
+        assert_eq!(starlark_error("Starlark code successfully run.\n"), None);
+    }
 
     #[test]
     fn enclave_name_keeps_the_default_prefix_and_takes_another() {
