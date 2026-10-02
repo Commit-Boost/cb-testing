@@ -17,7 +17,7 @@
 //! | `mev_relay_image` | dropped: it is the flashbots relay's image, and no flashbots relay runs |
 //! | CB `chain = { .., path = "{{ .Network }}" }` | an inline chain, see [`with_inline_chain`] |
 //! | `commit_boost_extra_files` | unchanged |
-//! | `commit_boost_signer` | none, see `ScenarioSpec::unsupported_keys` |
+//! | `commit_boost_signer` | unchanged |
 
 use std::path::Path;
 

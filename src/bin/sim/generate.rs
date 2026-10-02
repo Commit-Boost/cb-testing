@@ -277,7 +277,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sim-defork-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         run(None, &dir, true, Target::Defork).expect("generate defork");
-        assert!(!dir.join("cb-signer.yml").exists(), "cb-signer written");
+        let signer = fs::read_to_string(dir.join("cb-signer.yml")).unwrap();
+        assert!(
+            signer.contains("\n  commit_boost_signer: true\n"),
+            "{signer}"
+        );
         assert!(
             dir.join("cb-ws-stream-filekey.yml").exists(),
             "cb-ws-stream-filekey missing"

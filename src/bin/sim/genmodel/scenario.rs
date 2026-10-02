@@ -718,7 +718,7 @@ pub(super) fn build_mev_params(
     lines.push(String::new());
     lines.push(format!("  mev_builder_subsidy: {subsidy}"));
     if signer {
-        // Opt-in knob consumed by the fork's main.star: launch a CB SIGNER
+        // Opt-in knob consumed by both packages' main.star: launch a CB SIGNER
         // container beside the PBS sidecar, reusing this participant's
         // validator keystores.
         lines.push("  commit_boost_signer: true".to_string());

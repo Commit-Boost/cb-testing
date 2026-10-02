@@ -423,15 +423,13 @@ impl ScenarioSpec {
     }
 
     /// The `mev_params` keys this spec needs that `target`'s package has no
-    /// equivalent for; empty when it renders. The de-forked package does not
-    /// carry the `cb-signer` patch (`docs/defork-plan.md`), and dropping the key
-    /// would leave a config that no longer tests its feature.
+    /// equivalent for; empty when it renders. Both packages express every key
+    /// today. A fork-only key belongs here rather than dropped in the render,
+    /// because a config without it no longer tests its feature.
     pub fn unsupported_keys(&self, target: Target) -> Vec<&'static str> {
-        let mut keys = Vec::new();
-        if target == Target::Defork && self.signer {
-            keys.push("commit_boost_signer");
+        match target {
+            Target::Fork | Target::Defork => Vec::new(),
         }
-        keys
     }
 
     /// Render the full Kurtosis args-file for the fork, with `comment` as the
@@ -940,7 +938,7 @@ mod tests {
     #[test]
     fn defork_maps_every_fork_only_key() {
         let images = Images::default();
-        const DEFORK_KEYS: [&str; 9] = [
+        const DEFORK_KEYS: [&str; 10] = [
             "mev_relays",
             "helix_relay_image",
             "mev_boost_image",
@@ -950,6 +948,7 @@ mod tests {
             "helix_relay_config",
             "commit_boost_config",
             "commit_boost_extra_files",
+            "commit_boost_signer",
         ];
         for (name, comment, spec) in generated() {
             if !spec.unsupported_keys(Target::Defork).is_empty() {
@@ -1031,10 +1030,7 @@ mod tests {
                 refused.push((name, keys_needed));
             }
         }
-        assert_eq!(
-            refused,
-            vec![("cb-signer".to_string(), vec!["commit_boost_signer"])]
-        );
+        assert_eq!(refused, Vec::<(String, Vec<&str>)>::new());
     }
 
     /// One relay is still `helix-relay-2` on the de-forked package only because

@@ -123,8 +123,8 @@ sim --log-format json <cmd>       # structured event stream for agents (default:
 ```
 `--target defork` shapes the configs for the de-forked ethereum-package (upstream plus the patch set in
 `docs/defork-plan.md`); the mapping of each fork-only key is the table in `genmodel/target.rs`. A
-scenario that needs a key with no de-forked equivalent (`commit_boost_signer`,
-`commit_boost_extra_files`) is skipped and named on stderr, never rendered without it.
+scenario that needs a key with no de-forked equivalent (none does today; see
+`ScenarioSpec::unsupported_keys`) is skipped and named on stderr, never rendered without it.
 `just sweep-gate-defork <package>` runs the gate against such a checkout; it passes
 `cb-orchestrator --package <path> --enclave-prefix DF`, because the orchestrator removes any enclave
 already under a config's name and a second batch under the default `CB-*` names would tear down the first.
