@@ -37,8 +37,9 @@ its assertions fall into two families:
 
 **A. On-chain observation (HTTP against the beacon API).** `classify_blocks`
 and the default-mode counter read `/eth/v2/beacon/blocks/{slot}` and classify a
-gloas block as builder-built when `signed_execution_payload_bid.message.value != 0`
-(lines 228-245, 609-625). Head-slot polling reads
+gloas block as builder-built when `signed_execution_payload_bid.message.builder_index`
+is not `BUILDER_INDEX_SELF_BUILD` (`scripts/epbs-blocks.py`). Not by `value != 0`: a
+builder paying through `execution_payment` bids `value = 0`. Head-slot polling reads
 `/eth/v1/beacon/headers/head`. These are pure HTTP-JSON reads.
 
 **B. Log grepping (the load-bearing half).** Every `--assert` mode ultimately
@@ -214,8 +215,8 @@ task can address `http://cb-epbs:18550` by service DNS. So we CAN, natively:
 - POST to a CB endpoint and assert a status code / JSON field;
 - assert on-chain builder-built block counts by reading
   `/eth/v2/beacon/blocks/{slot}` and checking
-  `signed_execution_payload_bid.message.value` (the exact `check` our default
-  mode does, portable to `check_http_json` assertions or a `run_shell`).
+  `signed_execution_payload_bid.message.builder_index` (the exact `check` our
+  default mode does, portable to `check_http_json` assertions or a `run_shell`).
 
 `run_shell` (used throughout `assertoor/cb-mev-pipeline.yaml`) runs `bash` with
 `curl` + `jq` inside the assertoor container, writes to `$ASSERTOOR_SUMMARY`, and
@@ -379,9 +380,10 @@ tasks:
         head=$(curl -sf "$BEACON_URL/eth/v1/beacon/headers/head" | jq -r .data.header.message.slot)
         built=0
         for s in $(seq $((head-16)) $head); do
-          v=$(curl -sf "$BEACON_URL/eth/v2/beacon/blocks/$s" \
-              | jq -r '.data.message.body.signed_execution_payload_bid.message.value // "0"')
-          [ "$v" != "0" ] && built=$((built+1))
+          # builder_index, not value: a builder paying via execution_payment bids 0
+          i=$(curl -sf "$BEACON_URL/eth/v2/beacon/blocks/$s" \
+              | jq -r '.data.message.body.signed_execution_payload_bid.message.builder_index // empty')
+          [ -n "$i" ] && [ "$i" != "18446744073709551615" ] && built=$((built+1))
         done
         echo "builder_built=$built" >> "$ASSERTOOR_SUMMARY"
         [ "$built" -ge "$MIN" ] || { echo "FAIL only $built builder-built"; exit 1; }

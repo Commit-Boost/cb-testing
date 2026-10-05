@@ -7,7 +7,9 @@
 # runs `cb-km apply` to point every validator's builder_config at commit-boost
 # (auth_data=buildoor), then observes the loop and asserts:
 #   BN -> CB execution_payload_bid calls, buildoor bids via CB (auction winner),
-#   and builder-built blocks on chain (signed_execution_payload_bid.value != 0).
+#   and builder-built blocks on chain (the block's signed_execution_payload_bid
+#   names a registry builder, not BUILDER_INDEX_SELF_BUILD; see
+#   scripts/epbs-blocks.py).
 #
 # A real ethereum-package `epbs` mev_type that launches CB as the sidecar (no
 # manual add + no `cb-km apply`) needs an upstream-package change - see the
@@ -40,7 +42,7 @@
 #   --assert builder-down  after buildoor activates and >=1 builder-built slot is
 #                      seen, STOP buildoor and assert the proposer stays live: the
 #                      chain keeps advancing, the new blocks are self-built
-#                      (signed_execution_payload_bid.value == 0), and CB returns
+#                      (builder_index == BUILDER_INDEX_SELF_BUILD), and CB returns
 #                      204 "no header available" and NEVER 500. Proves builder
 #                      failure never stalls the proposer.
 #   --assert request-auth  render CB with verify_builder_request_auth = true and
@@ -252,47 +254,19 @@ bn_head_slot() {
     | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0
 }
 
-# Classify each block in [s0,s1]: prints two lines, "builder=<slots>" and
-# "self=<slots>" (comma-separated). A gloas block is builder-built when its
-# signed_execution_payload_bid.message.value != 0, self-built when value == 0.
-#
-# Only a 404 means "no block in that slot". Every other failure (connection
-# refused, a timeout, a body whose shape does not match) is REPORTED on stderr
-# with its slot and cause and counted in a summary line: an unclassifiable slot
-# silently dropped into neither list reads downstream as a legitimate zero, so a
-# BN that is unreachable or serving an unexpected shape looks exactly like a
-# client that never builds. stdout stays the two lines the asserts parse.
+# Classify each block in [s0,s1]: prints "builder=<slots>", "self=<slots>" and
+# "payment_only=<slots>" (comma-separated). A gloas block is builder-built when
+# its signed_execution_payload_bid names a registry builder, self-built when it
+# carries BUILDER_INDEX_SELF_BUILD. The bid's value is NOT the marker: a builder
+# paying through execution_payment bids value = 0 (payment_only lists those).
+# Unclassifiable slots are reported on stderr and land in no list; see
+# scripts/epbs-blocks.py.
 classify_blocks() { # $1=s0 $2=s1
-  python3 - "$BN" "$1" "$2" <<'PY'
-import sys,json,urllib.request,urllib.error
-bn,s0,s1=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
-builder,selfb,errs=[],[],[]
-missed=0
-for slot in range(s0,s1+1):
-    try:
-        with urllib.request.urlopen(f"{bn}/eth/v2/beacon/blocks/{slot}",timeout=5) as r:
-            body=json.load(r)['data']['message']['body']
-        bid=body.get('signed_execution_payload_bid',{}).get('message',{})
-        v=bid.get('value','0')
-        (builder if v not in ('0','',None) else selfb).append(slot)
-    except urllib.error.HTTPError as e:
-        if e.code==404: missed+=1          # no block proposed in this slot
-        else: errs.append((slot,"HTTP {0} {1}".format(e.code,e.reason)))
-    except Exception as e:
-        errs.append((slot,"{0}: {1}".format(type(e).__name__,e)))
-if errs:
-    w=sys.stderr
-    print("classify_blocks: {0} of {1} slots in [{2},{3}] could NOT be classified "
-          "and are counted in NEITHER list; empty-slot 404s: {4}"
-          .format(len(errs),s1-s0+1,s0,s1,missed),file=w)
-    for slot,why in errs[:10]:
-        print("  slot {0}: {1}".format(slot,why),file=w)
-    if len(errs)>10:
-        print("  ... and {0} more".format(len(errs)-10),file=w)
-print("builder="+",".join(map(str,builder)))
-print("self="+",".join(map(str,selfb)))
-PY
+  python3 "$REPO_ROOT/scripts/epbs-blocks.py" classify "$BN" "$1" "$2"
 }
+
+# number of entries in a comma-separated slot list ("" -> 0)
+count_csv() { if [[ -n "$1" ]]; then awk -F, '{print NF}' <<<"$1"; else echo 0; fi; }
 
 # --- assert block-submission: CB SSZ-decodes the CL's gloas SignedBeaconBlock ------
 # The proposer reveals every builder-built (CB-won) block by POSTing the gloas
@@ -463,7 +437,7 @@ assert_direct() { # $1,$2 = observed window
 # --- assert builder-down: builder failure never stalls the proposer -------------
 # buildoor is stopped after >=1 builder-built slot. The proposer must fall back to
 # self-building: the chain keeps advancing, the new blocks carry
-# signed_execution_payload_bid.value == 0 (local block), and CB returns 204 "no
+# BUILDER_INDEX_SELF_BUILD (a local block), and CB returns 204 "no
 # header available" (relay unreachable -> no bid) and never a 500. Hard-fail on a
 # stalled chain or any 5xx from the bid endpoint.
 assert_builder_down() { # $1=slot at which buildoor was already confirmed building
@@ -499,8 +473,8 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   echo "  head advanced $advanced slots after buildoor stop (target window $BUILDER_DOWN_SLOTS)"
 
   # 2) classify blocks strictly AFTER the stop settled (stop_slot+2 onward): they
-  #    must be self-built (value==0); a builder-built block with buildoor down is
-  #    unexpected.
+  #    must be self-built (BUILDER_INDEX_SELF_BUILD); a builder-built block with
+  #    buildoor down is unexpected.
   local from=$(( stop_slot + 2 ))
   local cls; cls="$(classify_blocks "$from" "$cur")"
   local built_after selfb_after
@@ -509,7 +483,7 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   local n_built_after n_self_after
   n_built_after=$( [[ -n "$built_after" ]] && awk -F, '{print NF}' <<<"$built_after" || echo 0 )
   n_self_after=$( [[ -n "$selfb_after" ]] && awk -F, '{print NF}' <<<"$selfb_after" || echo 0 )
-  echo "  self-built blocks after stop (value==0):  $n_self_after  [slots: $selfb_after]"
+  echo "  self-built blocks after stop:             $n_self_after  [slots: $selfb_after]"
   echo "  builder-built blocks after stop:          $n_built_after  [slots: $built_after]"
 
   # 3) CB bid endpoint: 204 "no header available", never a 500, in the post-stop log
@@ -588,6 +562,9 @@ if [[ "$ASSERT_MODE" == "preserve" ]]; then
     || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build the epbs branch: \
 (cd /home/j/code/commit-boost-client && cargo build -p cb-km-tool --release) and set CB_KM_BIN"
 fi
+# Every builder-built count below rests on this classifier; check it against its
+# boundary cases before spending a devnet on it.
+python3 scripts/epbs-blocks.py self-test || die "scripts/epbs-blocks.py self-test failed"
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
 echo "cb-km:   $CB_KM_BIN"
@@ -789,30 +766,17 @@ CB_LOG=$(cb_logs)
 bid_calls=$(grep -c 'execution_payload_bid' <<<"$CB_LOG" || true)
 auction_wins=$(grep -c 'auction winner.*buildoor-mux' <<<"$CB_LOG" || true)
 
-# chain-side: builder-built blocks (signed_execution_payload_bid.value != 0)
-builder_built=$(python3 - "$BN" "$start_slot" "$end_slot" <<'PY'
-import sys,json,urllib.request
-bn,s0,s1=sys.argv[1],int(sys.argv[2]),int(sys.argv[3])
-built=[]
-for slot in range(s0,s1+1):
-    try:
-        with urllib.request.urlopen(f"{bn}/eth/v2/beacon/blocks/{slot}",timeout=5) as r:
-            body=json.load(r)['data']['message']['body']
-        bid=body.get('signed_execution_payload_bid',{}).get('message',{})
-        if bid.get('value','0') not in ('0','',None):
-            built.append(slot)
-    except Exception:
-        pass  # missed slot / 404
-print(len(built))
-print(",".join(map(str,built)))
-PY
-)
-n_built=$(sed -n 1p <<<"$builder_built")
-built_slots=$(sed -n 2p <<<"$builder_built")
+# chain-side: builder-built blocks (the bid names a registry builder)
+classified="$(classify_blocks "$start_slot" "$end_slot")"
+built_slots="$(sed -n 's/^builder=//p' <<<"$classified")"
+payment_only_slots="$(sed -n 's/^payment_only=//p' <<<"$classified")"
+n_built=$(count_csv "$built_slots")
+n_payment_only=$(count_csv "$payment_only_slots")
 
 echo "  BN -> CB bid calls (window+):     $bid_calls"
 echo "  buildoor auction wins via CB:     $auction_wins"
 echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
+echo "    paid only via execution_payment (value = 0): $n_payment_only"
 
 # builder-down diverges here: it only needs the builder PROVEN live (>=1
 # builder-built slot), then stops buildoor and asserts proposer liveness.

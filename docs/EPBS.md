@@ -36,7 +36,8 @@ submodule (sha-tagged, `scripts/ensure-cb-artifacts.sh`; ~a few min, once per su
 commit), then stands up the devnet. Needs `just` + Rust + Docker + Kurtosis.
 
 **Expected PASS:** `PASS: N/16 observed slots builder-built via commit-boost (buildoor)`,
-exit 0. On chain, each builder-built block carries `signed_execution_payload_bid.message.value != 0`.
+exit 0. On chain, each builder-built block carries a `signed_execution_payload_bid` whose
+`builder_index` names a registry builder rather than `BUILDER_INDEX_SELF_BUILD` (2**64 - 1).
 
 **Banked in this harness:**
 - `chainsafe/lodestar:v1.47.0-rc.0` - full VC → CB → buildoor flow, canonical on chain.
@@ -132,9 +133,14 @@ commit-boost in the loop.)
    - `BN → CB` bid calls (CB serves `/eth/v1/builder/execution_payload_bid/...`),
    - buildoor bids via CB (`auction winner relay_id="buildoor-mux"`, `version=Gloas`),
    - **builder-built blocks on chain**: each gloas block carries a
-     `signed_execution_payload_bid`; a builder-built block has
-     `message.value != 0` with `builder_index = 0` (buildoor). Self-built blocks
-     have `value = 0`.
+     `signed_execution_payload_bid`. A builder-built block's `builder_index` is
+     an index into the on-chain builder registry; a self-built block carries
+     `BUILDER_INDEX_SELF_BUILD` (2**64 - 1, which lodestar logs as
+     `builderIndex=Infinity`). The bid's `value` is not the marker: a builder
+     paying the proposer through `execution_payment` bids `value = 0` (buildoor
+     does whenever the proposer's `max_execution_payment` covers its bid).
+     `scripts/epbs-blocks.py` holds the classifier, and preflight runs its
+     boundary cases (`self-test`).
 
    PASS requires `>= MIN_BUILDER_SLOTS` builder-built slots in the window (plus at
    least one auction win and one bid call).
