@@ -13,3 +13,4 @@ scripts/kurtosis-configs/
 CB-Testnet.json
 .agent/
 configs/epbs/.cb-matrix
+.cb-worktrees/

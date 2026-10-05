@@ -64,6 +64,13 @@
 #                      First runs a CONTROL devnet WITHOUT the flag (skip with
 #                      TRUSTED_PAYMENT_CONTROL=0): cb-km apply must exit non-zero
 #                      with a 400 on every key, the VC naming the flag.
+#   --assert manual-config  run a CB commit that has no cb-km (CB_COMMIT) and write
+#                      each validator key's builder_config with the curl call in
+#                      that commit's docs/docs/get_started/epbs.md, run as written
+#                      with the sim's CB URL and buildoor's hostname auth data in
+#                      place of the page's example values. The CB config carries
+#                      only keys the commit's config code names. Then the default
+#                      builder-built assertion.
 # No flag = the default builder-built assertion (unchanged).
 #
 # --render-only DIR renders the mode's CB config + km overlay into DIR through the
@@ -72,7 +79,7 @@
 # CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|direct|trusted-payment] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -102,6 +109,12 @@ PRESET="${PRESET:-}"
 # never stale; see scripts/ensure-cb-artifacts.sh). Set explicitly to pin a
 # different CB image.
 CB_IMAGE="${CB_IMAGE:-}"
+# Build the CB image (and cb-km) from this commit instead of the submodule's
+# checkout; it must be in the submodule's repo (scripts/ensure-cb-artifacts.sh).
+# manual-config also reads the docs page and checks the config keys at it.
+# Empty = the submodule's HEAD.
+export CB_COMMIT="${CB_COMMIT:-}"
+CB_SUB="$REPO_ROOT/commit-boost-client"
 # Swap the CL/VC image to test a specific consensus client build against the sim
 # (e.g. CL_IMAGE=chainsafe/lodestar:v1.47.0-rc.0). Empty = use the args file's.
 CL_IMAGE="${CL_IMAGE:-}"
@@ -141,11 +154,11 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|direct|trusted-payment) : ;;
+  ""|p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   pipe) no_mode "the pipe refuses every private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|direct|trusted-payment)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
@@ -632,6 +645,77 @@ PY
   printf '\033[1;32mPASS: %s\033[0m\n' "$(tail -1 <<<"$report")"
 }
 
+# --- manual-config: builder config written the way the CB docs page says -------
+# A CB commit without cb-km documents the keymanager call an operator makes
+# instead. This mode makes that call, taken from the page at the commit under
+# test, so a documented call that does not route the proposer's bid requests to
+# CB fails the run.
+DOCS_PAGE="docs/docs/get_started/epbs.md"
+# the page's example values, swapped for the sim's before the call runs
+DOCS_CB_URL="http://cb.example.com:18550"
+DOCS_AUTH_DATA="0x6275696c6465722d612e6578616d706c652e636f6d"   # builder-a.example.com
+
+# the commit CB is built from: CB_COMMIT, else the submodule's checkout
+cb_commit() {
+  git -C "$CB_SUB" rev-parse --verify --quiet "${CB_COMMIT:-HEAD}^{commit}" \
+    || die "CB_COMMIT=$CB_COMMIT is not a commit in $CB_SUB (fetch it: git -C commit-boost-client fetch <repo> <branch>)"
+}
+
+# The first bash block under the page's "Validator builder config" heading, with
+# the sim's CB URL and buildoor's auth data in place of the example values. Fails
+# when the page lacks the call or the example values, so a docs change cannot
+# quietly turn the check into a call the page does not show.
+docs_builder_config_call() { # $1=commit
+  local page call host auth
+  page="$(git -C "$CB_SUB" show "$1:$DOCS_PAGE")" || die "no $DOCS_PAGE at $1"
+  call="$(awk '/^#+ /{s=($0 ~ /^### Validator builder config$/)} s && /^```bash$/{f=1; next} f && /^```$/{exit} f' <<<"$page")"
+  [[ "$call" == curl* && "$call" == *"/builder_config"* ]] \
+    || die "$DOCS_PAGE at $1 has no curl call to builder_config under 'Validator builder config'"
+  [[ "$call" == *"$DOCS_CB_URL"* && "$call" == *"$DOCS_AUTH_DATA"* ]] \
+    || die "the page's call no longer uses the example url $DOCS_CB_URL and auth_data $DOCS_AUTH_DATA; update DOCS_CB_URL/DOCS_AUTH_DATA"
+  # the page's rule: the hex of the relay URL's hostname
+  host="$(sed -E 's|^[a-z]+://([^@/]*@)?([^:/]+).*$|\2|' <<<"$BUILDOOR_RELAY_URL")"
+  auth="0x$(printf '%s' "$host" | xxd -p | tr -d '\n')"
+  call="${call//"$DOCS_CB_URL"/$CB_ENTRY_URL}"
+  printf '%s\n' "${call//"$DOCS_AUTH_DATA"/$auth}"
+}
+
+# Every key the rendered CB config sets must be a name in the commit's
+# crates/common/src, where Commit-Boost parses its config. A commit without
+# cb-km's guard ignores an unknown [pbs] or [[mux]] key, so a key it does not
+# know would load as if it took effect.
+check_config_keys() { # $1=cb-config.toml $2=commit
+  local key unknown=()
+  for key in $(sed 's/#.*$//' "$1" | grep -oE '(^|[{,])[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=' | grep -oE '[A-Za-z0-9_-]+' | sort -u); do
+    git -C "$CB_SUB" grep -qw -e "$key" "$2" -- crates/common/src || unknown+=("$key")
+  done
+  (( ${#unknown[@]} == 0 )) || die "cb-config.toml sets keys CB @ ${2:0:12} does not know: ${unknown[*]}"
+  echo "config keys: all known to CB @ ${2:0:12}"
+}
+
+# Each key the VC holds gets its builder config from the page's call, run as
+# written; a curl wrapper only records the status code and response body.
+write_documented_builder_configs() {
+  log "manual-config: each key's builder_config via the call in $DOCS_PAGE @ ${CB_SHA:0:12}"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local call="$RUN_DIR/builder-config-call.sh" resp="$RUN_DIR/builder-config-resp.txt" keys key code="" n=0
+  docs_builder_config_call "$CB_SHA" > "$call"
+  sed 's/^/    /' "$call"
+  keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
+    | python3 -c 'import sys,json;[print(k["validating_pubkey"]) for k in json.load(sys.stdin)["data"]]')" \
+    || die "manual-config: could not list the VC's keystores"
+  [[ -n "$keys" ]] || die "manual-config: the VC holds no keys"
+  for key in $keys; do
+    code="$(KEYMANAGER_URL="$VC_KM" TOKEN="$KM_TOKEN" PUBKEY="$key" RESP="$resp" bash -c \
+      'curl() { command curl -sS -o "$RESP" -w "%{http_code}" "$@"; }; . "$1"' _ "$call")" || true
+    [[ "$code" == 2* ]] || die "manual-config: the documented call for $key got HTTP $code: $(head -c 300 "$resp" 2>/dev/null)"
+    km_entry_urls "$key" | grep -qxF "$CB_ENTRY_URL" \
+      || die "manual-config: $key stores no $CB_ENTRY_URL entry after HTTP $code"
+    n=$(( n + 1 ))
+  done
+  echo "  $n keys written (HTTP $code), e.g. $key: $(km_get "$key")"
+}
+
 # ---- CB config + km overlay rendering ---------------------------------------
 # One code path for a live run, the pre-launch check and --render-only, so what
 # cb-km checks is what CB loads.
@@ -647,10 +731,19 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
   sed -e "s|__GENESIS_TIME__|$gen_time|" \
       -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
       configs/epbs/cb-config.toml.tmpl > "$out/cb-config.toml"
+  # manual-config runs no cb-km, so it gets no overlay
+  [[ "$ASSERT_MODE" == "manual-config" ]] || \
   sed -e "s|__VC_KM_URL__|$vc_km|" \
       -e "s|__TOKEN_PATH__|$(cd "$out" && pwd)/km-token.txt|" \
       configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
   grep -q '__' "$out/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
+
+  # manual-config: a commit without cb-km reads neither its p2p projection keys
+  # nor the pipe's advertised_urls
+  if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|advertised_urls) = /d' \
+      -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' "$out/cb-config.toml"
+  fi
 
   # trusted-payment: the [pbs] cap is the only max_execution_payment_gwei in the
   # file, so it is the effective cap for both relay entries; cb-km writes it onto
@@ -678,6 +771,16 @@ km_dry_run() { # $1=dir holding cb-config.toml + km-overlay.toml
 }
 
 # ---- render-only: one mode's CB config + overlay, checked by cb-km, no devnet --
+if [[ -n "$RENDER_ONLY" && "$ASSERT_MODE" == "manual-config" ]]; then
+  # no cb-km: check the keys against the commit and print the call the run makes
+  CB_SHA="$(cb_commit)"
+  render_cb_config "$RENDER_ONLY" 0 "http://127.0.0.1:5062"
+  check_config_keys "$RENDER_ONLY/cb-config.toml" "$CB_SHA"
+  docs_builder_config_call "$CB_SHA" > "$RENDER_ONLY/builder-config-call.sh"
+  echo "rendered manual-config @ ${CB_SHA:0:12}: $RENDER_ONLY/cb-config.toml $RENDER_ONLY/builder-config-call.sh"
+  sed 's/^/    /' "$RENDER_ONLY/builder-config-call.sh"
+  exit 0
+fi
 if [[ -n "$RENDER_ONLY" ]]; then
   if [[ -z "$CB_KM_BIN" ]]; then
     # the submodule's cb-km, rebuilt by cargo if it is not from the pinned commit
@@ -724,7 +827,8 @@ if [[ -z "$CB_IMAGE" ]]; then
   # Capture stdout (the two eval-able lines); the script streams build output to
   # stderr live. Hard-fail on a build error rather than silently continuing with
   # an empty CB_IMAGE (the "silence == success" trap).
-  cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh")" \
+  km_flag=""; [[ "$ASSERT_MODE" == "manual-config" ]] && km_flag="--no-km"
+  cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh" $km_flag)" \
     || die "provisioning CB artifacts from the submodule failed (see build output above)"
   km_override="$CB_KM_BIN"
   eval "$cb_art"   # sets CB_IMAGE + CB_KM_BIN
@@ -733,13 +837,15 @@ if [[ -z "$CB_IMAGE" ]]; then
 fi
 docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not present locally"
 
-if [[ -z "$CB_KM_BIN" ]]; then
-  if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
-  elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
-  elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
-  else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
+if [[ "$ASSERT_MODE" != "manual-config" ]]; then
+  if [[ -z "$CB_KM_BIN" ]]; then
+    if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
+    elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
+    elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
+    else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
+  fi
+  "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
 fi
-"$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
 # preserve mode needs the merged --preserve-entries flag (epbs branch)
 if [[ "$ASSERT_MODE" == "preserve" ]]; then
   "$CB_KM_BIN" apply --help 2>&1 | grep -q -- '--preserve-entries' \
@@ -752,10 +858,17 @@ python3 scripts/epbs-blocks.py self-test || die "scripts/epbs-blocks.py self-tes
 # Render this mode's CB config with placeholder chain values and let cb-km check
 # it now: a key it refuses would otherwise surface only once the devnet is up.
 render_cb_config "$RUN_DIR" 0 "http://127.0.0.1:5062"
-km_dry_run "$RUN_DIR"
+if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+  CB_SHA="$(cb_commit)"
+  check_config_keys "$RUN_DIR/cb-config.toml" "$CB_SHA"
+  docs_builder_config_call "$CB_SHA" >/dev/null
+  echo "docs:    $DOCS_PAGE @ ${CB_SHA:0:12}"
+else
+  km_dry_run "$RUN_DIR"
+fi
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
-echo "cb-km:   $CB_KM_BIN"
+echo "cb-km:   ${CB_KM_BIN:-none}"
 echo "CB img:  $CB_IMAGE"
 echo "CB join: $CB_LAUNCH"
 echo "assert:  ${ASSERT_MODE:-default (builder-built)}"
@@ -878,7 +991,7 @@ log "rendering CB config from live BN"
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
 echo "genesis_time=$GEN_TIME"
 render_cb_config "$RUN_DIR" "$GEN_TIME" "$VC_KM"
-km_dry_run "$RUN_DIR"
+[[ "$ASSERT_MODE" == "manual-config" ]] || km_dry_run "$RUN_DIR"
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
@@ -918,9 +1031,13 @@ if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
   assert_trusted_payment_refused
   exit 0
 fi
-log "cb-km apply (point 64 validators' builder_config at CB)"
-"$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
-echo "apply OK"
+if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+  write_documented_builder_configs
+else
+  log "cb-km apply (point 64 validators' builder_config at CB)"
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
+  echo "apply OK"
+fi
 # checked before the activation wait: a missing cap fails here, minutes earlier
 if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
   assert_cap_projected
@@ -1036,6 +1153,13 @@ if [[ "$ASSERT_MODE" == "p2p" ]]; then
   else
     echo "  p2p floor PROVEN: $p2p_rejected competing p2p bid(s) rejected below the floor; CB won every selection"
   fi
+fi
+
+# manual-config: the page's min_bid does not floor buildoor's p2p bid, so a
+# builder-built block may have come over p2p rather than through CB
+if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+  BN_LOG="$(bn_logs)"
+  echo "  BN selections via CB / via p2p:   $(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*cb-epbs' || true) / $(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*p2p' || true)"
 fi
 
 log "RESULT"

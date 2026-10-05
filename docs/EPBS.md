@@ -168,6 +168,7 @@ commit-boost in the loop.)
 | `KEEP` | `0` | `1` leaves the enclave + `cb-epbs` running for inspection |
 | `CB_LAUNCH` | `service` | `service` = CB as a first-class enclave service; `docker` = legacy raw `docker run` |
 | `CB_IMAGE` | `commit-boost/commit-boost:km-e2e-<submodule sha>` | the CB sidecar image |
+| `CB_COMMIT` | the submodule's HEAD | commit the CB image and `cb-km` are built from, in a worktree at `.cb-worktrees/<sha>`; must be in the submodule's repo (`git -C commit-boost-client fetch <repo> <branch>`) |
 | `CB_KM_BIN` | auto | path to the `cb-km` binary |
 | `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package@<pinned sha>` | ethereum-package to launch; pinned to a commit so a rerun is the same devnet |
 | `BUILDOOR_RELAY_URL` | the devnet buildoor (pubkey@host:port) | relay CB bids into, substituted into both relay entries of the CB config |
@@ -300,6 +301,19 @@ feature into a live regression check:
   `cb-km apply` exits non-zero with a 400 on every key, a direct POST of one
   projected doc returns 400 naming `--allowDangerousTrustedPayments`, and no key
   holds a cap. `TRUSTED_PAYMENT_CONTROL=0` skips it.
+- **`manual-config`**: the operator docs of a CB commit without `cb-km`, followed
+  literally. The run builds CB from `CB_COMMIT` with no `cb-km`, renders a CB config
+  with only keys that commit's `crates/common/src` names (no `min_bid_p2p_eth`,
+  `builder_boost_factor_p2p` or `advertised_urls`), and writes every key the VC holds
+  with the `curl` call under "Validator builder config" in that commit's
+  `docs/docs/get_started/epbs.md`. The call runs as written; only the page's example
+  `url` and `auth_data` are swapped for `http://cb-epbs:18550` and the hex of
+  buildoor's hostname, and the run fails if the page no longer has them. Each POST
+  must return 2xx and leave a CB entry on the key. Then the default builder-built
+  PASS. The page's `min_bid` does not floor buildoor's p2p bid, so the run also
+  prints how many selections came via CB and via p2p.
+  `CB_COMMIT=<sha> just epbs-sim-render manual-config <dir>` checks the keys and
+  writes the call to `<dir>/builder-config-call.sh` without a devnet.
 
 Retired, each rejected by the script with its reason:
 

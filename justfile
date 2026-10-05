@@ -261,6 +261,7 @@ epbs-sim:
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
 #   just epbs-sim-assert direct            a direct buildoor entry keeps blocks builder-built with CB down.
 #   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.
+#   just epbs-sim-assert manual-config     no cb-km: builder config written with the CB docs' curl call.
 # Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
 # no timing games on the ePBS bid path). No pipe mode: the pipe refuses every private
 # address, and a devnet has no other (docs/EPBS.md).
@@ -295,6 +296,15 @@ epbs-sim-builder-down:
 # skips it.
 epbs-sim-trusted-payment:
     ./scripts/run-epbs-sim.sh --assert trusted-payment
+
+# Run a CB commit without cb-km and write each key's builder_config with the curl
+# call in that commit's docs/docs/get_started/epbs.md, then assert builder-built
+# blocks via CB. CB_COMMIT picks the commit (default: the submodule's checkout);
+# it must be in the submodule's repo, and is built in .cb-worktrees/<sha>.
+#   CB_COMMIT=<sha> just epbs-sim-manual-config
+#   CB_COMMIT=<sha> just epbs-sim-render manual-config /tmp/epbs-render   # no devnet
+epbs-sim-manual-config:
+    ./scripts/run-epbs-sim.sh --assert manual-config
 
 # Upstream ethereum-package, pinned to a COMMIT. A bare
 # github.com/ethpandaops/ethereum-package resolves to upstream HEAD at launch
