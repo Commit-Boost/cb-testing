@@ -19,7 +19,7 @@ participants:
     validator_count: 64
 mev_type: buildoor
 buildoor_params:
-  image: ethpandaops/buildoor@sha256:501764a3c43e6289fa1b85df9e7489f1d2de24e1efe0a65c4d316bd340166991
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
   builder_api: true
   epbs_builder: true
   lifecycle: true
