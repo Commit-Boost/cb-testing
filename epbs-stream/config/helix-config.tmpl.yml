@@ -1,0 +1,57 @@
+# Helix relay config for the epbs-stream harness; up.sh fills in the placeholders.
+# is_local_dev skips Postgres writes; the simulator is the stub in ../stub, which
+# accepts every block, so the synthetic bids from gloas_inject pass simulation.
+instance_id: epbs-stream-helix
+is_local_dev: true
+postgres:
+  hostname: localhost
+  port: 5432
+  db_name: postgres
+  user: postgres
+  region: 0
+  region_name: "LOCAL"
+simulators:
+  - url: http://helix-simstub:8545
+    ssz_url: http://helix-simstub:8545
+beacon_clients:
+  - url: __BN_URL__
+broadcasters: []
+relays: []
+builders:
+  - pub_key: "__BUILDER_PK__"
+    builder_info:
+      collateral: "0"
+      is_optimistic: false
+      builder_id: "epbs-stream-synthetic"
+      builder_ids: null
+      api_key: null
+validator_preferences:
+  filtering: regional
+  trusted_builders: null
+  header_delay: false
+router_config:
+  enabled_routes: __ROUTES__
+  shutdown_delay_ms: 0
+header_stream:
+  stream_for_ms: __STREAM_FOR_MS__
+  interval_ms: 5
+  admit_all: true
+block_merging_config:
+  is_enabled: false
+target_get_payload_propagation_duration_ms: 0
+primev_config: null
+discord_webhook_url: null
+blacklist_provider: null
+is_submission_instance: true
+is_registration_instance: true
+gloas_builder_index: 0
+logging:
+  type: Console
+cores:
+  auctioneer: 20
+  tokio: [21, 22, 23, 24]
+  reg_workers: [25]
+  tcp_bid_submissions_tile: 26
+  decoder: [27]
+  top_bid: 28
+  housekeeper: null
