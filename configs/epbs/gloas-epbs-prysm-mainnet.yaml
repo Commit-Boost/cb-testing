@@ -1,8 +1,7 @@
-# ePBS (gloas) devnet against a MAINNET-preset PRYSM build, for --assert block-submission.
+# ePBS (gloas) devnet against a MAINNET-preset PRYSM build.
 # Identical to gloas-epbs-prysm.yaml except: mainnet preset + the mainnet-preset prysm
-# images. block-submission verifies CB SSZ-decoding the revealed gloas SignedBeaconBlock
-# at POST /eth/v1/builder/beacon_blocks; CB is compiled MainnetEthSpec, so the block it
-# decodes must be mainnet-preset too (a minimal block over-reads its decoder and 400s).
+# images. It was the --assert block-submission config while CB decoded the revealed block
+# and so needed a mainnet-preset one; CB now forwards it unparsed, so any preset works.
 #
 # No local build here: prysm's gloas VC builder API (PR #17397) is merged to
 # develop and released in v7.2.0, so a published mainnet-preset image carries it.

@@ -228,7 +228,7 @@ epbs-test cl_image preset="":
 # needs more than one image or extra flags (e.g. prysm = a beacon-chain image + a
 # validator image + --enable-builder), which the single-image CL_IMAGE cannot express.
 #   just epbs-test-config configs/epbs/gloas-epbs-prysm.yaml
-#   just epbs-test-config configs/epbs/gloas-epbs-prysm-mainnet.yaml block-submission
+#   just epbs-test-config configs/epbs/gloas-epbs-prysm.yaml block-submission
 epbs-test-config config mode="":
     ARGS_FILE={{config}} ./scripts/run-epbs-sim.sh {{ if mode == "" { "" } else { "--assert " + mode } }}
 
@@ -257,16 +257,26 @@ epbs-sim:
 # ePBS sim with an opt-in feature-level regression assertion.
 #   just epbs-sim-assert p2p               min_bid p2p floor rejects buildoor's p2p bid.
 #   just epbs-sim-assert preserve          --preserve-entries keeps a third-party entry.
-#   just epbs-sim-assert block-submission  CB's POST /beacon_blocks reveal endpoint fired.
+#   just epbs-sim-assert block-submission  CB forwards the POST /beacon_blocks reveal unparsed.
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
-#   just epbs-sim-assert request-auth      verify_builder_request_auth ON, 0 AuthSigVerify.
-#   just epbs-sim-assert ladder            timing games ON, the ladder delivers the bid, 0 ladder errors.
-#   just epbs-sim-assert trusted-payment   [pbs] cap + lodestar trusted payments; BN values CB's bid as CB ranks it.
+#   just epbs-sim-assert direct            a direct buildoor entry keeps blocks builder-built with CB down.
+#   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.
+# Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
+# no timing games on the ePBS bid path). No pipe mode: the pipe refuses every private
+# address, and a devnet has no other (docs/EPBS.md).
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
 
-# Assert CB's POST /eth/v1/builder/beacon_blocks reveal endpoint fired (>=1 block
-# accepted, no 5xx). Runs the full builder loop, then checks the reveal path.
+# Render one mode's CB config + km overlay into a directory and check them with
+# `cb-km apply --dry-run`. No docker, no kurtosis: cb-km is CB_KM_BIN, else the
+# submodule's, rebuilt by cargo when it is not from the pinned commit.
+#   just epbs-sim-render trusted-payment /tmp/epbs-render
+epbs-sim-render mode dir:
+    ./scripts/run-epbs-sim.sh {{ if mode == "default" { "" } else { "--assert " + mode } }} --render-only {{dir}}
+
+# Assert CB forwards the revealed block unparsed at POST /eth/v1/builder/beacon_blocks
+# (>=1 forward, no 4xx, none unanswered). Runs the full builder loop, then checks the
+# reveal path.
 epbs-sim-block-submission:
     ./scripts/run-epbs-sim.sh --assert block-submission
 
@@ -276,25 +286,13 @@ epbs-sim-block-submission:
 epbs-sim-builder-down:
     ./scripts/run-epbs-sim.sh --assert builder-down
 
-# Assert the request-auth signing domain agrees end to end: render CB with
-# verify_builder_request_auth = true and require builder-built blocks with zero
-# AuthSigVerify / 401 on the bid endpoint.
-epbs-sim-request-auth:
-    ./scripts/run-epbs-sim.sh --assert request-auth
-
-# Assert the timing-games ladder on the ePBS bid path: CB polls buildoor every
-# LADDER_FREQ_MS (default 300) and holds the latest valid bid. Requires the default
-# builder-built PASS, the ladder delivering the bid in >= MIN_BUILDER_SLOTS requests
-# with >= 2 rungs answered, and zero ladder errors.
-epbs-sim-ladder:
-    ./scripts/run-epbs-sim.sh --assert ladder
-
 # Assert a trusted execution-payment cap end to end: [pbs] max_execution_payment_gwei
-# set, lodestar VC with --allowDangerousTrustedPayments, buildoor paying through
-# execution_payment. Requires the cap on every stored builder_config entry, the BN
-# selecting CB's bid in >= MIN_BUILDER_SLOTS slots, and the BN's valuation equal to
-# CB's capped ranking. First runs a control devnet whose VC lacks the flag
-# (cb-km apply must 400 on every key); TRUSTED_PAYMENT_CONTROL=0 skips it.
+# = "unclamped", lodestar VC with --allowDangerousTrustedPayments, buildoor paying
+# through execution_payment. Requires 18446744073709551615 on every stored
+# builder_config entry, the BN selecting CB's bid in >= MIN_BUILDER_SLOTS slots, and
+# the BN valuing each at value + execution_payment. First runs a control devnet whose
+# VC lacks the flag (cb-km apply must 400 on every key); TRUSTED_PAYMENT_CONTROL=0
+# skips it.
 epbs-sim-trusted-payment:
     ./scripts/run-epbs-sim.sh --assert trusted-payment
 

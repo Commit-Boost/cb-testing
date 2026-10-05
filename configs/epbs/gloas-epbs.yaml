@@ -17,12 +17,9 @@
 # (8-slot epochs, buildoor activates ~slot 33). This is the FAST default for the
 # p2p/preserve/default assertion modes.
 #
-# NOTE the preset is a runtime knob: `PRESET=mainnet` (or `--assert block-submission`,
-# which defaults to it) makes scripts/run-epbs-sim.sh render this file with preset=mainnet.
-# mainnet preset is REQUIRED for the block-submission /beacon_blocks decode path: commit-boost
-# is compiled MainnetEthSpec, so a minimal-preset block (100-byte SyncAggregate vs mainnet's
-# 160) makes CB's SSZ decoder over-read and 400 every reveal (OffsetOutOfBounds). On mainnet
-# the on-wire block sizes match CB and the gloas SignedBeaconBlock decodes (202). Cost:
+# NOTE the preset is a runtime knob: `PRESET=mainnet` makes scripts/run-epbs-sim.sh render
+# this file with preset=mainnet. No mode needs it: commit-boost forwards the revealed block
+# to builders unparsed, so its compiled preset need not match the chain's. Cost of mainnet:
 # SLOTS_PER_EPOCH=32, so buildoor activates ~slot 128 and the run is ~30-45 min.
 participants:
   - el_type: geth
@@ -48,10 +45,7 @@ participants:
     # Bumping to 512 did NOT fix it (same 1-aggregate-per-block, still 0 justified at
     # epoch 2), so the count stays lean for the fast minimal modes. Consequence:
     # buildoor (activation needs a FINALIZED eligibility epoch) never activates under
-    # PRESET=mainnet here, so the live --assert block-submission path cannot reach
-    # builder-built slots in this harness. The /beacon_blocks decode fix itself is
-    # verified out-of-band by POSTing a real mainnet-preset gloas SignedBeaconBlock
-    # straight to CB (decodes; minimal-preset block 400s with OffsetOutOfBounds).
+    # PRESET=mainnet here, so keep this file on minimal.
     validator_count: 64
 mev_type: buildoor
 buildoor_params:

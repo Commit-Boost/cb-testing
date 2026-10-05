@@ -5,8 +5,10 @@
 # attestation aggregate per block; on mainnet's 32-slot epochs that leaves the
 # chain short of the 2/3 justification threshold, so it never finalizes, so
 # buildoor's builder deposit (activation needs a FINALIZED eligibility epoch)
-# never activates, so the live --assert block-submission path cannot reach
-# builder-built slots on the one preset whose block layout CB actually decodes.
+# never activates. That once kept --assert block-submission off builder-built
+# slots, while CB decoded the block and so needed the mainnet preset; CB now
+# forwards it unparsed, so the mode runs on minimal, and this file stays as the
+# mainnet-preset, cross-client harness.
 #
 # This config adds a second participant (lighthouse) to CARRY FINALIZATION: it
 # attests, and its proposer slots pack full aggregates, so the chain justifies and
@@ -23,7 +25,7 @@
 # keymanager VC by the fixed service names cl-1-lodestar-geth / vc-1-geth-lodestar.
 #
 # Run: ARGS_FILE=configs/epbs/gloas-epbs-2cl.yaml PRESET=mainnet \
-#      OBSERVE_SLOTS=40 MIN_BUILDER_SLOTS=6 bash scripts/run-epbs-sim.sh --assert block-submission
+#      OBSERVE_SLOTS=40 MIN_BUILDER_SLOTS=6 bash scripts/run-epbs-sim.sh
 participants:
   # --- participant #1: lodestar, the CB / buildoor path (keymanager builder_config) ---
   - el_type: geth

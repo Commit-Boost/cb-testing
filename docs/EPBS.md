@@ -91,13 +91,13 @@ commit-boost in the loop.)
 - **CB `/eth/v1/builder/beacon_blocks` reveal 500s are EXPECTED with buildoor.** The proposer POSTs its
   signed gloas block to CB, which fans it out to the builders; buildoor reveals the execution payload
   over P2P (native gloas transport) and does not HTTP-accept the forward, so CB returns 500
-  (`NoBuilderResponse`). The block is still canonical and the default assertion counts it. This 500 is a
-  *forward* outcome, not a decode failure - see `--assert block-submission` below, which turns on CB's
-  `strict_block_decode` and asserts the SSZ decode (which runs *before* the forward) succeeded.
+  (`NoBuilderResponse`). The block is still canonical and the default assertion counts it. CB forwards
+  the block's bytes unparsed, so this 500 says only that no relay accepted the forward - see
+  `--assert block-submission` below, which asserts the forward itself.
 - **CB's log level is `[logs.stdout] level` in its config, not `RUST_LOG`.** CB builds its log
   filter from the config file and never reads `RUST_LOG`, so the `RUST_LOG=debug` this harness used
-  to pass was ignored and CB logged at `info`. The template sets `level = "debug"` (per-header
-  receipts, the timing-games ladder lines); edit it there, not in the service env.
+  to pass was ignored and CB logged at `info`. The template sets `level = "debug"` (the per-header
+  receipts the harness counts buildoor's bids by); edit it there, not in the service env.
 - **`min_bid` / `builder_boost_factor` are NOT the CB-vs-local levers.** A bid rejected for a stale-cb-km
   pubkey mismatch looks identical to "lost on value" - check bid *acceptance* in the beacon-node log
   first. Per-entry `min_bid` empty means accept-any; the top-level `min_bid` is the p2p floor only.
@@ -115,11 +115,14 @@ commit-boost in the loop.)
    else (the genesis fork version, the deterministic 64-key mux derived from the
    fixed mnemonic, the buildoor relay + pubkey) is static. CB forwards ePBS bids
    without checking their signatures, so the template sets no bid signing-domain
-   keys. CB WARN-logs and then ignores any `[pbs]` or mux key it does not know;
-   the harness fails the run on such a warning, so a stale template key cannot
-   pass for a setting.
-3. **Add commit-boost** (`commit-boost/commit-boost:km-e2e`, branch `epbs`) as the
-   PBS sidecar, named `cb-epbs` (matching the advertised URL the VC will call).
+   keys. `cb-km` stops on any `[pbs]` or `[[mux]]` key Commit-Boost does not read
+   (CB itself refuses an unknown relay key), so the harness runs
+   `cb-km apply --dry-run` on the mode's rendered config before it launches the
+   devnet and again on the live render: a stale template key fails the run
+   before CB loads it. `--render-only DIR` (`just epbs-sim-render <mode> <dir>`)
+   runs only that check, with no docker or kurtosis.
+3. **Add commit-boost** (`commit-boost/commit-boost:km-e2e-<sha>`, built from the
+   pinned submodule) as the PBS sidecar, named `cb-epbs` (matching the advertised URL the VC will call).
    By default (`CB_LAUNCH=service`) it is a **first-class kurtosis enclave
    service**: the rendered CB config is uploaded as a files-artifact and CB is
    added with `kurtosis service add`, so it gets enclave DNS (`cb-epbs`
@@ -129,7 +132,9 @@ commit-boost in the loop.)
    the legacy raw `docker run` on the enclave network as a fallback.
 4. **`cb-km apply`** projects the CB mux config into per-validator keymanager
    `builder_config` docs and POSTs them to the VC's keymanager API - pointing all
-   64 validators' builder URL at commit-boost with `auth_data = buildoor`.
+   64 validators' builder URL at commit-boost with `auth_data` = the hex of
+   `buildoor`, the relay URL's hostname. CB forwards each bid request to the one
+   relay that hostname names and ranks nothing.
 5. **Wait for buildoor activation.** buildoor submits a builder *deposit* to the
    EIP-8282 registry on boot and only bids once that deposit is included and
    **activated** (an activation-queue delay, empirically ~epoch 4 / slot ~33 on
@@ -138,7 +143,7 @@ commit-boost in the loop.)
    first bid before it starts measuring.
 6. **Observe + assert** over a window of slots:
    - `BN → CB` bid calls (CB serves `/eth/v1/builder/execution_payload_bid/...`),
-   - buildoor bids via CB (`auction winner relay_id="buildoor-mux"`, `version=Gloas`),
+   - buildoor bids via CB (`received new header relay_id="buildoor-mux"`, `version=Gloas`),
    - **builder-built blocks on chain**: each gloas block carries a
      `signed_execution_payload_bid`. A builder-built block's `builder_index` is
      an index into the on-chain builder registry; a self-built block carries
@@ -150,7 +155,7 @@ commit-boost in the loop.)
      boundary cases (`self-test`).
 
    PASS requires `>= MIN_BUILDER_SLOTS` builder-built slots in the window (plus at
-   least one auction win and one bid call).
+   least one buildoor bid through CB and one bid call).
 
 ### Knobs (env vars)
 
@@ -162,12 +167,10 @@ commit-boost in the loop.)
 | `BUILDOOR_ACTIVATION_TIMEOUT` | `1200` | seconds to wait for the builder deposit to activate (`2400` on the mainnet preset) |
 | `KEEP` | `0` | `1` leaves the enclave + `cb-epbs` running for inspection |
 | `CB_LAUNCH` | `service` | `service` = CB as a first-class enclave service; `docker` = legacy raw `docker run` |
-| `CB_IMAGE` | `commit-boost/commit-boost:km-e2e` | the CB sidecar image |
+| `CB_IMAGE` | `commit-boost/commit-boost:km-e2e-<submodule sha>` | the CB sidecar image |
 | `CB_KM_BIN` | auto | path to the `cb-km` binary |
 | `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package@<pinned sha>` | ethereum-package to launch; pinned to a commit so a rerun is the same devnet |
 | `BUILDOOR_RELAY_URL` | the devnet buildoor (pubkey@host:port) | relay CB bids into, substituted into both relay entries of the CB config |
-| `LADDER_FREQ_MS` | `300` | `--assert ladder`: ms between timing-games rungs |
-| `TRUSTED_PAYMENT_CAP_GWEI` | `1000000000` | `--assert trusted-payment`: the `[pbs]` cap cb-km projects onto every entry |
 | `TRUSTED_PAYMENT_CONTROL` | `1` | `--assert trusted-payment`: `0` skips the control devnet (VC without the flag) |
 
 ### Prerequisites (auto-provisioned)
@@ -214,17 +217,17 @@ Everything that writes a `builder_config` is done by `cb-km` from the host - it
 could equally be `curl` or any orchestrator. `scripts/run-epbs-sim.sh`:
 
 - discovers the keymanager **port** kurtosis published and stages the **token**
-  into the overlay (`run-epbs-sim.sh` lines 111, 137, 141-143):
+  into the overlay (`render_cb_config` in `run-epbs-sim.sh`):
   ```bash
   VC_KM="$(kurtosis port print "$ENCLAVE" vc-1-geth-lodestar http-validator)"   # the km port
-  cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"                          # the bearer token
-  sed -e "s|__VC_KM_URL__|$VC_KM|" -e "s|__TOKEN_PATH__|$(pwd)/$RUN_DIR/km-token.txt|" \
-      configs/epbs/km-overlay.toml.tmpl > "$RUN_DIR/km-overlay.toml"
+  cp configs/epbs/km-token.txt "$out/km-token.txt"                              # the bearer token
+  sed -e "s|__VC_KM_URL__|$vc_km|" -e "s|__TOKEN_PATH__|$(cd "$out" && pwd)/km-token.txt|" \
+      configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
   ```
 - then invokes `cb-km`, which projects the CB mux config into one `builder_config`
   doc per validator and **POSTs** each to
   `$VC_KM/eth/v1/validator/<pubkey>/builder_config` with `Authorization: Bearer
-  <token>` (`run-epbs-sim.sh` line 182):
+  <token>` (`run-epbs-sim.sh`, step 5):
   ```bash
   "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
   ```
@@ -263,52 +266,68 @@ feature into a live regression check:
 - **`preserve`**: `cb-km apply --preserve-entries` keeps a third-party
   `builder_config` entry that a plain apply drops. Keymanager-API only; skips the
   builder loop.
-- **`block-submission`**: CB SSZ-decodes the revealed gloas `SignedBeaconBlock` at
-  `POST /eth/v1/builder/beacon_blocks`. The mode turns on CB's `strict_block_decode`
-  (default OFF = blind pipe, forwards the body unparsed), so CB parses the SSZ body
-  itself. Decode runs *before* the fan-out, so the status codes split cleanly:
-  **4xx = decode failed** (an SSZ over-read / `OffsetOutOfBounds`, or `NotGloasBlock`);
-  **5xx = decoded, then no builder HTTP-accepted the forward** (`NoBuilderResponse`,
-  EXPECTED with buildoor, which reveals over p2p); **2xx = decoded + forwarded**. PASS
-  requires `strict_block_decode` on, ≥1 block past the decode, and zero decode-4xx /
-  `OffsetOutOfBounds` (forward 5xx are reported, not failed). Defaults `PRESET=mainnet`
-  because CB is compiled `MainnetEthSpec` - a minimal-preset block over-reads and 400s.
-  **The block must also come from a client that finalizes on mainnet** so buildoor
-  activates and the proposer reaches builder-built (reveal-worthy) slots: prysm does
-  (verified, 17 blocks decoded, 0 4xx); the lodestar harness image does not
-  (`gloas-epbs.yaml` comment), so for lodestar the decode is verified out-of-band.
-- **`ladder`**: timing games on the ePBS bid path. The mode sets
-  `enable_timing_games = true` and `frequency_get_header_ms = LADDER_FREQ_MS` (default
-  300) on both buildoor relay entries, so CB polls buildoor in a ladder of rungs until
-  the proposer's deadline and holds the latest valid bid. PASS requires the default
-  builder-built PASS, the ladder running at that cadence on `buildoor-mux` (the relay
-  the keys route to), the ladder delivering the bid (`TG: holding the relay's latest
-  bid`) in at least `MIN_BUILDER_SLOTS` requests with two or more rungs answered in
-  each, and zero ladder errors (`TG: error sending header request`, `TG: no headers
-  received`). The ladder lines are debug-level, which the template enables.
-- **`trusted-payment`**: a trusted execution-payment cap end to end. The mode sets
-  `[pbs] max_execution_payment_gwei = TRUSTED_PAYMENT_CAP_GWEI` (default 1000000000,
-  i.e. 1 ETH) with no relay-level cap, so `[pbs]` holds the effective cap, and starts
-  the lodestar VC with `--allowDangerousTrustedPayments` (rendered into a copy of the
-  args file; participant 1 must be lodestar). buildoor splits its bid at the cap it
-  receives through builder preferences, so under the default cap it pays everything
-  through `execution_payment` and bids `value = 0`. PASS requires, right after
-  `cb-km apply`, the cap on every `builder_config` entry of every key; then the
-  default builder-built PASS (these are `value = 0` blocks, so this also exercises
-  the `builder_index` classifier); the BN selecting CB's bid with
+- **`block-submission`**: CB forwards the revealed gloas `SignedBeaconBlock` at
+  `POST /eth/v1/builder/beacon_blocks` as a blind pipe: it checks the request (a
+  gloas `Eth-Consensus-Version`, an SSZ body) and passes the bytes to every
+  configured relay unparsed. Its answer splits cleanly: **4xx = refused before the
+  forward** (400 without a gloas `Eth-Consensus-Version`, 415 for a non-SSZ body);
+  **5xx = forwarded, no relay accepted** (`NoBuilderResponse`, EXPECTED while buildoor
+  takes the block over p2p rather than HTTP); **2xx = forwarded and accepted**. PASS
+  requires the default builder-built PASS, ≥1 reveal forwarded (2xx or 5xx), zero 4xx,
+  and zero `builder did not answer the signed block` warnings (a forward that never
+  reached buildoor). CB decodes nothing, so any preset works; the minimal default is
+  enough.
+- **`builder-down`**: buildoor stop never stalls the proposer (the chain advances on
+  self-built blocks, CB answers 204, never 500).
+- **`direct`**: `direct_entries = true` in the overlay also points each key straight
+  at buildoor; with CB stopped, blocks stay builder-built through the direct entry.
+- **`trusted-payment`**: an unclamped trusted execution payment end to end. The mode
+  sets `[pbs] max_execution_payment_gwei = "unclamped"` with no relay-level cap, so
+  `[pbs]` holds the effective cap and cb-km writes the largest Uint64,
+  `18446744073709551615`, onto every entry. It starts the lodestar VC with
+  `--allowDangerousTrustedPayments` (rendered into a copy of the args file;
+  participant 1 must be lodestar) and tells buildoor to claim half of each bid as
+  `execution_payment` (`--builder-api-execution-payment-percent=50`). PASS requires,
+  right after `cb-km apply`, `18446744073709551615` on every `builder_config` entry
+  of every key; then the default builder-built PASS; the BN selecting CB's bid with
   `execution_payment > 0` in at least `MIN_BUILDER_SLOTS` slots; and for every slot
-  where the BN selected CB, CB's auction winner being that bid and CB's capped
-  ranking (`value + min(execution_payment, cap)`) equalling the BN's total for the CB
-  candidate (`Ranked builder bid candidates ... :total=`). Because buildoor never
-  bids above the cap it is told, the cap never clamps CB's ranking here: the check
-  proves CB and the BN agree on the cap and the formula, not the clamp itself.
+  where the BN selected CB, that bid being one CB received from `buildoor-mux` and the
+  BN's total for the CB candidate (`Ranked builder bid candidates ... :total=`) being
+  `value + execution_payment`, the whole payment counted. CB ranks nothing, so the
+  BN's valuation is the only one.
   **Control:** the mode first stands up a separate devnet whose VC lacks the flag
   (about 1-2 min, the run stops after `cb-km apply`) and asserts lodestar's refusal:
   `cb-km apply` exits non-zero with a 400 on every key, a direct POST of one
   projected doc returns 400 naming `--allowDangerousTrustedPayments`, and no key
-  holds the cap. `TRUSTED_PAYMENT_CONTROL=0` skips it.
-- Also: **`builder-down`** (buildoor stop never stalls the proposer) and
-  **`request-auth`** (`verify_builder_request_auth` ON, zero `AuthSigVerify`).
+  holds a cap. `TRUSTED_PAYMENT_CONTROL=0` skips it.
+
+Retired, each rejected by the script with its reason:
+
+- **`ladder`**: CB plays no timing games on the ePBS bid path; it sends each relay one
+  request.
+- **`request-auth`**: CB no longer verifies the request auth (`verify_builder_request_auth`
+  is gone, and cb-km refuses the key); the builder verifies it.
+
+**No `pipe` mode.** With `advertised_urls` set, CB forwards a request whose auth
+data names no configured relay to the builder it names (the transient pipe,
+`relay_id="pipe"` in its metrics). A devnet cannot exercise it:
+
+- CB refuses to dial a pipe target that resolves to a loopback, private,
+  link-local, CGNAT, broadcast or unspecified address (`400`, "the addressed
+  builder's host does not resolve in time or resolves to a disallowed address").
+  Every enclave service sits on a Docker bridge network in RFC 1918 space
+  (`172.16.0.0/12`), so every builder in the devnet is refused.
+- The only bypass is `cb_pbs::set_skip_pipe_target_check`, a thread-local setter
+  compiled in by the `testing-flags` feature and called from inside CB's own test
+  process. No config key, env var or flag reaches it, so even a `testing-flags`
+  image would refuse the enclave's addresses.
+- Hostname auth data, what cb-km writes, is dialed as `https://<hostname>` on port
+  443, and buildoor serves plain HTTP on 8080.
+
+CB's integration tests cover the pipe instead
+(`commit-boost-client/tests/tests/pbs_get_execution_payload_bid.rs`,
+`pbs_submit_builder_preferences.rs`): they turn the check off in-process and dial a
+mock builder on loopback.
 
 ## Known caveats
 

@@ -5,9 +5,11 @@
 # lodestar CL+VC with keymanager enabled, adds a commit-boost PBS sidecar as a
 # first-class kurtosis enclave service (CB_LAUNCH=service; docker = legacy path),
 # runs `cb-km apply` to point every validator's builder_config at commit-boost
-# (auth_data=buildoor), then observes the loop and asserts:
-#   BN -> CB execution_payload_bid calls, buildoor bids via CB (auction winner),
-#   and builder-built blocks on chain (the block's signed_execution_payload_bid
+# (auth_data = buildoor's hostname), then observes the loop and asserts:
+#   BN -> CB execution_payload_bid calls, buildoor bids via CB ("received new
+#   header" from buildoor-mux; CB forwards each request to the one relay its
+#   auth data names and ranks nothing), and builder-built blocks on chain (the
+#   block's signed_execution_payload_bid
 #   names a registry builder, not BUILDER_INDEX_SELF_BUILD; see
 #   scripts/epbs-blocks.py).
 #
@@ -27,32 +29,21 @@
 #                      assert BOTH our entry and the third-party entry survive
 #                      (a plain apply drops it). Keymanager-only: skips the
 #                      builder-activation wait + observe window.
-#   --assert block-submission  also assert CB DECODES the reveal at POST
+#   --assert block-submission  also assert the blind-pipe reveal at POST
 #                      /eth/v1/builder/beacon_blocks: the proposer reveals each
-#                      builder-built block through CB, which SSZ-decodes the gloas
-#                      SignedBeaconBlock and fans it out to buildoor. HARD-fails
-#                      unless >=1 reveal got a 2xx AND there were zero 4xx
-#                      (decode over-read / non-gloas body) AND zero 5xx AND zero
-#                      OffsetOutOfBounds in the lodestar log. Defaults to the
-#                      MAINNET preset (PRESET=mainnet): CB is compiled
-#                      MainnetEthSpec, so a minimal-preset block over-reads and
-#                      400s every reveal (OffsetOutOfBounds); mainnet block sizes
-#                      match CB and decode. On mainnet a non-2xx is a real
-#                      regression, so none are tolerated.
+#                      builder-built block through CB, which forwards the SSZ
+#                      bytes to buildoor unparsed. HARD-fails unless >=1 reveal
+#                      reached the forward (2xx = buildoor accepted, 5xx = it
+#                      answered without accepting) with zero 4xx (missing gloas
+#                      Eth-Consensus-Version, or a non-SSZ body) and zero
+#                      forwards buildoor never answered. CB decodes nothing, so
+#                      any preset works.
 #   --assert builder-down  after buildoor activates and >=1 builder-built slot is
 #                      seen, STOP buildoor and assert the proposer stays live: the
 #                      chain keeps advancing, the new blocks are self-built
 #                      (builder_index == BUILDER_INDEX_SELF_BUILD), and CB returns
 #                      204 "no header available" and NEVER 500. Proves builder
 #                      failure never stalls the proposer.
-#   --assert request-auth  render CB with verify_builder_request_auth = true and
-#                      assert the loop STILL produces builder-built blocks with
-#                      ZERO AuthSigVerify / 401 on the bid endpoint. Proves CB's
-#                      request-auth signing domain (genesis_fork_version + zero
-#                      genesis_validators_root, per builder-specs) agrees with the
-#                      real lodestar VC signer end to end. Independent of the bid
-#                      skip_sigverify progressive-SSZ blocker (the request-auth
-#                      message is a plain container, not a progressive one).
 #   --assert direct    apply with `direct_entries = true` in the km overlay, so
 #                      each validator also gets a builder_config entry pointing
 #                      straight at buildoor (same auth_data as the CB entry).
@@ -61,30 +52,27 @@
 #                      MIN_DIRECT_SLOTS slots, and after CB is STOPPED the chain
 #                      keeps producing builder-built blocks sourced directly
 #                      from buildoor (the redundancy the direct entry buys).
-#   --assert ladder    turn on timing games for buildoor (frequency_get_header_ms
-#                      = LADDER_FREQ_MS, default 300), so CB polls buildoor in a
-#                      ladder of rungs and holds the latest valid bid. HARD-fails
-#                      unless the default builder-built PASS holds, the ladder ran
-#                      at that cadence, it delivered the bid in >= MIN_BUILDER_SLOTS
-#                      requests with >= 2 rungs answered each, and CB logged ZERO
-#                      ladder errors ("TG: error sending header request" /
-#                      "TG: no headers received").
-#   --assert trusted-payment  set [pbs] max_execution_payment_gwei (the relays
-#                      carry none, so it is the effective cap) and start the
-#                      lodestar VC with --allowDangerousTrustedPayments, and tell
-#                      buildoor to claim half of each bid as execution_payment
+#   --assert trusted-payment  set [pbs] max_execution_payment_gwei = "unclamped"
+#                      (the relays carry none, so it is the effective cap), start
+#                      the lodestar VC with --allowDangerousTrustedPayments, and
+#                      tell buildoor to claim half of each bid as execution_payment
 #                      (--builder-api-execution-payment-percent). HARD-fails unless
-#                      cb-km stored the cap on every builder_config entry of every
-#                      key, the BN selects CB's execution-payment bid in >=
-#                      MIN_BUILDER_SLOTS slots, and for each of them the BN's
-#                      valuation equals CB's capped ranking of the same bid. First
-#                      runs a CONTROL devnet WITHOUT the flag (skip with
+#                      cb-km stored 18446744073709551615 on every builder_config
+#                      entry of every key, the BN selects CB's execution-payment
+#                      bid in >= MIN_BUILDER_SLOTS slots, and for each of them the
+#                      BN values the bid CB forwarded at value + execution_payment.
+#                      First runs a CONTROL devnet WITHOUT the flag (skip with
 #                      TRUSTED_PAYMENT_CONTROL=0): cb-km apply must exit non-zero
 #                      with a 400 on every key, the VC naming the flag.
 # No flag = the default builder-built assertion (unchanged).
 #
+# --render-only DIR renders the mode's CB config + km overlay into DIR through the
+# same code path as a live run (placeholder genesis time + keymanager URL), runs
+# `cb-km apply --dry-run` on them and exits: no docker, no kurtosis (cb-km is
+# CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
+#
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|direct|trusted-payment] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -106,10 +94,9 @@ EP_PACKAGE="${EP_PACKAGE:-github.com/ethpandaops/ethereum-package@6dd3f2613d1f9d
 ARGS_FILE="${ARGS_FILE:-configs/epbs/gloas-epbs.yaml}"
 # PRESET override for network_params.preset in the args file (minimal|mainnet).
 # Empty = use the file's value as-is. minimal = fast (8-slot epochs, buildoor
-# activates ~slot 33) and is enough for the p2p/preserve/default modes. mainnet =
-# REQUIRED for --assert block-submission's /beacon_blocks decode (CB is compiled
-# MainnetEthSpec; a minimal-preset block over-reads its decoder and 400s), at the
-# cost of 32-slot epochs (buildoor activates ~slot 128) and a ~30-45 min run.
+# activates ~slot 33) and is enough for every mode: CB forwards the revealed block
+# unparsed, so its compiled preset no longer has to match the chain's. mainnet =
+# 32-slot epochs (buildoor activates ~slot 128) and a ~30-45 min run.
 PRESET="${PRESET:-}"
 # Empty = provision from the pinned commit-boost-client submodule (sha-tagged,
 # never stale; see scripts/ensure-cb-artifacts.sh). Set explicitly to pin a
@@ -141,25 +128,26 @@ RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives he
 
 # opt-in assertion mode (default = today's builder-built assertion)
 ASSERT_MODE="${ASSERT_MODE:-}"
+RENDER_ONLY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --assert)   ASSERT_MODE="${2:-}"; shift 2 ;;
     --assert=*) ASSERT_MODE="${1#*=}"; shift ;;
+    --render-only)   RENDER_ONLY="${2:-}"; shift 2 ;;
+    --render-only=*) RENDER_ONLY="${1#*=}"; shift ;;
     -h|--help)  sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment) : ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  ""|p2p|preserve|block-submission|builder-down|direct|trusted-payment) : ;;
+  ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
+  request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
+  pipe) no_mode "the pipe refuses every private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|direct|trusted-payment)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
-# block-submission's /beacon_blocks decode only succeeds on the mainnet preset
-# (CB is compiled MainnetEthSpec). Default this mode to mainnet unless the caller
-# picked a preset explicitly.
-if [[ "$ASSERT_MODE" == "block-submission" && -z "$PRESET" ]]; then
-  PRESET=mainnet
-fi
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
 # activation poll room unless the caller already raised it above the default.
 if [[ "$PRESET" == "mainnet" && "$BUILDOOR_ACTIVATION_TIMEOUT" == "1200" ]]; then
@@ -176,19 +164,13 @@ BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor 
 # with CB stopped
 MIN_DIRECT_SLOTS="${MIN_DIRECT_SLOTS:-4}"
 CB_DOWN_SLOTS="${CB_DOWN_SLOTS:-12}"
-# ladder: ms between the timing-games rungs CB sends buildoor
-LADDER_FREQ_MS="${LADDER_FREQ_MS:-300}"
-# trusted-payment: the [pbs] max_execution_payment_gwei cb-km projects onto every
-# entry. The default covers buildoor's whole bid, so buildoor pays only through
-# execution_payment and bids value = 0.
-TRUSTED_PAYMENT_CAP_GWEI="${TRUSTED_PAYMENT_CAP_GWEI:-1000000000}"
+# trusted-payment: cb-km writes [pbs] max_execution_payment_gwei = "unclamped" as
+# the largest Uint64, so the BN counts the whole execution payment
+UNCLAMPED_CAP=18446744073709551615
 # trusted-payment: 1 = first run the control devnet, whose VC lacks the flag
 TRUSTED_PAYMENT_CONTROL="${TRUSTED_PAYMENT_CONTROL:-1}"
 # internal: "control" marks the control phase's own run of this script
 TRUSTED_PAYMENT_PHASE="${TRUSTED_PAYMENT_PHASE:-}"
-[[ "$LADDER_FREQ_MS" =~ ^[1-9][0-9]*$ ]] || { printf 'LADDER_FREQ_MS must be a positive integer: %s\n' "$LADDER_FREQ_MS" >&2; exit 2; }
-[[ "$TRUSTED_PAYMENT_CAP_GWEI" =~ ^[1-9][0-9]*$ ]] \
-  || { printf 'TRUSTED_PAYMENT_CAP_GWEI must be a positive integer: %s\n' "$TRUSTED_PAYMENT_CAP_GWEI" >&2; exit 2; }
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -301,92 +283,43 @@ classify_blocks() { # $1=s0 $2=s1
 # number of entries in a comma-separated slot list ("" -> 0)
 count_csv() { if [[ -n "$1" ]]; then awk -F, '{print NF}' <<<"$1"; else echo 0; fi; }
 
-# --- assert block-submission: CB SSZ-decodes the CL's gloas SignedBeaconBlock ------
-# The proposer reveals every builder-built (CB-won) block by POSTing the gloas
+# --- assert block-submission: CB forwards the reveal unparsed (blind pipe) -------
+# The proposer reveals every builder-built block by POSTing the gloas
 # SignedBeaconBlock to its builder URL (CB) at POST /eth/v1/builder/beacon_blocks.
-# block-submission mode enables strict_block_decode, so CB parses the SSZ body ITSELF
-# (default OFF = blind pipe, forwards the bytes unparsed) before fanning it out.
-#
-# Decode runs BEFORE the fan-out, and the two stages map onto CB's status cleanly:
-#   4xx -> decode/request REJECT: an SSZ over-read (OffsetOutOfBounds/DecodeError) or
-#          a non-gloas body (NotGloasBlock -> 400). This is the preset-mismatch
-#          failure: CB is compiled MainnetEthSpec, so a minimal-preset block
-#          over-reads and 400s every reveal; on the mainnet preset the sizes match
-#          and it decodes (hence block-submission defaults PRESET=mainnet).
-#   5xx -> decode SUCCEEDED, then no builder accepted the HTTP forward
-#          (NoBuilderResponse -> 500). EXPECTED with buildoor, which reveals over p2p
-#          and does not implement the /beacon_blocks forward; the decode still ran.
-#   2xx -> decoded AND a builder accepted the forward (a relay that implements it).
-# So "CB decoded" == it reached the fan-out == a 2xx or a 5xx, corroborated by CB's
-# post-decode access line ("new request ... strict=true slot=Some(N)"), logged only
-# once the SSZ body parsed. A blind-pipe run also reaches the fan-out WITHOUT
-# decoding, so the PASS additionally requires strict_block_decode = true in the
-# rendered config - otherwise a forward would not prove a decode.
-# PASS: strict on AND >=1 block reached the fan-out AND zero 4xx AND zero
-# OffsetOutOfBounds. Forward 5xx are reported, not failed (buildoor never HTTP-ACKs).
+# CB decodes nothing: it checks the request (a gloas Eth-Consensus-Version, an SSZ
+# body) and forwards the bytes to every configured relay. Its answer to the BN:
+#   4xx -> refused before the forward: 400 (no gloas Eth-Consensus-Version) or
+#          415 (not SSZ). A regression on either side of the hop.
+#   5xx -> forwarded, and no relay accepted (NoBuilderResponse). EXPECTED while
+#          buildoor does not HTTP-accept the reveal (it gets the block over p2p).
+#   2xx -> forwarded, and buildoor accepted.
+# A forward buildoor never answered (timeout, connection failure) is CB's
+# "builder did not answer the signed block" warning: the bytes never reached the
+# builder, the one failure the pipe owns.
+# PASS: >=1 reveal reached the forward (2xx or 5xx), zero 4xx, zero unanswered.
 assert_block_submission() {
-  log "assert block-submission: CB SSZ-decodes the CL's gloas SignedBeaconBlock at /beacon_blocks (strict_block_decode)"
-  local CB_LOG BN_LOG bb fwd_2xx decode_fail no_builder offset decoded_log reached strict_on
-  strict_on=$(grep -c '^strict_block_decode = true$' "$RUN_DIR/cb-config.toml" || true)
+  log "assert block-submission: CB forwards the CL's gloas SignedBeaconBlock unparsed at /beacon_blocks"
+  local CB_LOG bb fwd_2xx refused no_accept unanswered reached
   CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"   # strip ANSI so the status parses
-  BN_LOG="$(bn_logs)"
-  bb="$(grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | grep -oE 'Responded with [0-9]{3}')"
+  bb="$(grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | grep -oE 'Responded with [0-9]{3}' || true)"
   fwd_2xx=$(grep -c 'Responded with 2' <<<"$bb" || true)
-  decode_fail=$(grep -c 'Responded with 4' <<<"$bb" || true)
-  no_builder=$(grep -c 'Responded with 5' <<<"$bb" || true)
-  # decode is BEFORE the fan-out, so a forward (2xx or 5xx NoBuilderResponse) proves
-  # the SSZ body parsed - PROVIDED strict is on (a blind pipe forwards unparsed).
-  reached=$(( fwd_2xx + no_builder ))
-  # corroboration: the post-decode access line, emitted only after the body parsed
-  decoded_log=$(grep 'new request' <<<"$CB_LOG" | grep -c 'slot=Some(' || true)
-  offset=$(grep -cE 'OffsetOutOfBounds' <<<"$CB_LOG"$'\n'"$BN_LOG" || true)
-  echo "  strict_block_decode enabled:                    $strict_on (need 1)"
-  echo "  reached fan-out = decoded (2xx+5xx):            $reached"
-  echo "  corroborating 'slot=Some' decode log lines:     $decoded_log"
-  echo "  /beacon_blocks 2xx (decoded + forwarded):       $fwd_2xx"
-  echo "  /beacon_blocks 5xx (decoded, buildoor p2p - ok):$no_builder"
-  echo "  /beacon_blocks 4xx (decode/request REJECT):     $decode_fail"
-  echo "  OffsetOutOfBounds decode failures (CB+CL):      $offset"
-  if (( strict_on >= 1 && reached >= 1 && decode_fail == 0 && offset == 0 )); then
-    printf '\033[1;32mPASS: CB decoded %s gloas SignedBeaconBlock(s) (0 4xx, 0 OffsetOutOfBounds; %s forward 5xx = buildoor p2p, expected)\033[0m\n' "$reached" "$no_builder"
+  refused=$(grep -c 'Responded with 4' <<<"$bb" || true)
+  no_accept=$(grep -c 'Responded with 5' <<<"$bb" || true)
+  unanswered=$(grep -c 'builder did not answer the signed block' <<<"$CB_LOG" || true)
+  reached=$(( fwd_2xx + no_accept ))
+  echo "  reveals forwarded (2xx + 5xx):                  $reached (need >= 1)"
+  echo "  /beacon_blocks 2xx (buildoor accepted):         $fwd_2xx"
+  echo "  /beacon_blocks 5xx (no relay accepted - ok):    $no_accept"
+  echo "  /beacon_blocks 4xx (refused before forward):    $refused (need 0)"
+  echo "  forwards buildoor never answered:               $unanswered (need 0)"
+  if (( reached >= 1 && refused == 0 && unanswered == 0 )); then
+    printf '\033[1;32mPASS: CB forwarded %s gloas SignedBeaconBlock(s) unparsed (%s accepted, %s unaccepted, 0 refused, 0 unanswered)\033[0m\n' \
+      "$reached" "$fwd_2xx" "$no_accept"
     return 0
   fi
-  echo "  --- CB /beacon_blocks access lines (tail) ---"
+  echo "  --- CB /beacon_blocks lines (tail) ---"
   grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | tail -10 | sed 's/^/    /'
-  echo "  --- CL submit-to-builder failures (tail) ---"
-  grep -iE 'submit signed block to builder|OffsetOutOfBounds|status=4' <<<"$BN_LOG" | tail -6 | sed 's/^/    /'
-  die "block-submission failed (strict=$strict_on need1, decoded=$reached need>=1, 4xx=$decode_fail need0, OffsetOutOfBounds=$offset need0)"
-}
-
-# --- assert request-auth: builder loop survives verify_builder_request_auth ------
-# The config was rendered with verify_builder_request_auth = true. CB now checks
-# the caller's SignedBuilderRequestAuth signature against the proposer pubkey on
-# every bid request. If CB's request-auth domain disagrees with what the lodestar
-# VC signed, CB returns 401 (AuthSigVerify) and the loop dies. PASS = builder-built
-# blocks still land AND zero AuthSigVerify/401. A 401 is a REAL domain-mismatch
-# finding: dump the domain params CB used.
-assert_request_auth() { # $1=n_built
-  log "assert request-auth: builder loop survives verify_builder_request_auth = true"
-  local n_built="$1"
-  local CB_LOG; CB_LOG="$(cb_logs)"
-  local authfail
-  authfail=$(grep -c -E 'auth signature verification failed|AuthSigVerify' <<<"$CB_LOG" || true)
-  echo "  builder-built blocks on chain (verify on):  $n_built"
-  echo "  AuthSigVerify / 401 on the bid endpoint:    $authfail"
-  if (( n_built >= MIN_BUILDER_SLOTS && authfail == 0 )); then
-    printf '\033[1;32mPASS: request-auth verify ON, %s builder-built slots, 0 AuthSigVerify - CB domain agrees with lodestar\033[0m\n' "$n_built"
-    return 0
-  fi
-  if (( authfail > 0 )); then
-    printf '\033[1;31mFINDING: request-auth signature verification FAILED (%s x 401) - CB domain disagrees with lodestar VC\033[0m\n' "$authfail"
-    echo "  CB request-auth domain = compute_domain(DOMAIN_BUILDER_REQUEST_AUTH):"
-    echo "    genesis_fork_version = $(grep -oE 'genesis_fork_version = \"0x[0-9a-fA-F]+\"' "$RUN_DIR/cb-config.toml" | head -1)"
-    echo "    genesis_validators_root = 0x0000..0000 (zero root, per builder-specs request_auth)"
-    echo "  live BN GENESIS_FORK_VERSION = $(curl -sf "$BN/eth/v1/config/spec" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'].get('GENESIS_FORK_VERSION'))" 2>/dev/null || echo '?')"
-    echo "  live BN genesis_validators_root = $(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_validators_root'])" 2>/dev/null || echo '?')"
-    cb_logs | grep -E 'auth signature|AuthSigVerify|get_execution_payload_bid failed' | tail -20
-  fi
-  die "request-auth failed (built=$n_built need>=$MIN_BUILDER_SLOTS, authfail=$authfail need=0)"
+  die "block-submission failed (forwarded=$reached need>=1, 4xx=$refused need0, unanswered=$unanswered need0)"
 }
 
 # --- assert direct: the BN reaches buildoor through CB AND directly --------------
@@ -541,53 +474,6 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   die "builder-down: expected self-built blocks (self=$n_self_after) and >=1 CB 204 (204=$cb_204)"
 }
 
-# --- assert ladder: the timing-games ladder delivers the bid, error-free ---------
-# With timing games on, CB asks buildoor for a bid every LADDER_FREQ_MS until the
-# proposer's deadline and holds the LATEST valid answer. The ladder lines are
-# debug-level, which the template enables ([logs.stdout] level = "debug").
-# PASS: the ladder ran at the configured cadence on the relay the keys route to
-# (buildoor-mux), delivered the bid in >= MIN_BUILDER_SLOTS requests with >= 2
-# rungs answered in each (a ladder, not one request), and CB logged zero ladder
-# errors: "TG: error sending header request" (a rung failed with something other
-# than a timeout) or "TG: no headers received" (every rung failed).
-assert_ladder() {
-  log "assert ladder: timing games at ${LADDER_FREQ_MS}ms deliver buildoor's bid with no ladder errors"
-  local report rc=0
-  report="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' | python3 -c '
-import re,sys
-freq,need=int(sys.argv[1]),int(sys.argv[2])
-relay="relay_id=\"buildoor-mux\""
-runs,other_freq,held,headers,errors=0,0,set(),{},[]
-for line in sys.stdin:
-    req=re.search(r"\breq_id=(\S+)",line)
-    req=req.group(1) if req else None
-    if "TG: sending multiple header requests" in line and relay in line:
-        f=re.search(r"\bsend_freq_ms=(\d+)",line)
-        if f and int(f.group(1))==freq: runs+=1
-        else: other_freq+=1
-    elif "TG: holding the relay" in line and relay in line and req:
-        held.add(req)
-    elif "received new header" in line and relay in line and req:
-        headers[req]=headers.get(req,0)+1
-    elif "TG: error sending header request" in line or "TG: no headers received" in line:
-        errors.append(line.strip())
-multi=sorted(headers.get(r,0) for r in held if headers.get(r,0)>=2)
-print("  ladder runs at send_freq_ms={0}:            {1} (other cadence: {2})".format(freq,runs,other_freq))
-print("  requests whose ladder delivered the bid:   {0} (need >= {1})".format(len(held),need))
-print("    of which with >= 2 rungs answered:       {0} (rungs answered: min {1}, max {2})".format(
-    len(multi),multi[0] if multi else 0,multi[-1] if multi else 0))
-print("  ladder errors (TG error / no headers):     {0} (need 0)".format(len(errors)))
-for e in errors[:5]: print("    "+e[:240])
-ok=runs>=1 and other_freq==0 and len(held)>=need and len(multi)>=need and not errors
-print("{0} ladder bids delivered, {1} with >= 2 rungs, at {2}ms, {3} ladder errors".format(
-    len(held),len(multi),freq,len(errors)))
-sys.exit(0 if ok else 1)
-' "$LADDER_FREQ_MS" "$MIN_BUILDER_SLOTS")" || rc=$?
-  sed '$d' <<<"$report"
-  (( rc == 0 )) || die "ladder: $(tail -1 <<<"$report")"
-  printf '\033[1;32mPASS: %s\033[0m\n' "$(tail -1 <<<"$report")"
-}
-
 # --- assert trusted-payment, control: a VC without the flag refuses the cap ------
 # Run in the control phase's own devnet, whose lodestar VC lacks
 # --allowDangerousTrustedPayments. lodestar's keymanager refuses any
@@ -635,15 +521,15 @@ assert_trusted_payment_refused() {
   die "control: want cb-km exit != 0 (got $rc), 400 on all $n_keys keys (got $refused), a direct 400 naming the flag (got $code), stored cap 0 (got $stored_cap)"
 }
 
-# --- assert trusted-payment: cb-km stored the cap on every entry -------------------
-# The relays carry no max_execution_payment_gwei, so [pbs] holds the effective cap
-# and cb-km must project it onto every builder_config entry of every key (a
-# relay-only projection leaves the entries uncapped, so the BN values the trusted
-# payment at 0 while CB ranks it in full).
+# --- assert trusted-payment: cb-km stored the unclamped cap on every entry ---------
+# The relays carry no max_execution_payment_gwei, so [pbs] "unclamped" holds the
+# effective cap and cb-km must write it, as the largest Uint64, onto every
+# builder_config entry of every key (a relay-only projection leaves the entries
+# uncapped, so the BN values the trusted payment at 0).
 assert_cap_projected() {
-  log "assert trusted-payment: cb-km stored max_execution_payment = $TRUSTED_PAYMENT_CAP_GWEI on every entry"
+  log "assert trusted-payment: cb-km stored max_execution_payment = $UNCLAMPED_CAP on every entry"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  python3 - "$VC_KM" "$KM_TOKEN" "$TRUSTED_PAYMENT_CAP_GWEI" <<'PY' || die "trusted-payment: the cap is missing from stored builder_config entries"
+  python3 - "$VC_KM" "$KM_TOKEN" "$UNCLAMPED_CAP" <<'PY' || die "trusted-payment: the cap is missing from stored builder_config entries"
 import json,sys,urllib.request
 km,token,cap=sys.argv[1],sys.argv[2],sys.argv[3]
 def get(path):
@@ -671,37 +557,36 @@ sys.exit(1 if bad or not keys else 0)
 PY
 }
 
-# --- assert trusted-payment: the BN selects CB's bid and values it as CB ranks it --
-# CB ranks a bid at value + min(execution_payment, cap) with cap = the relay's
-# max_execution_payment_gwei, else [pbs]'s (beacon-APIs #630); the BN values the
-# same bid with the cap stored on the builder_config entry. For each slot in the
-# window where the BN selected CB's bid ("Selected builder block ... bidSource=
-# <CB>"), CB's auction winner must be that bid (same value and
-# execution_payment) and CB's capped ranking of it must equal the BN's total for
-# the CB candidate ("Ranked builder bid candidates ... <CB>:total=N", debug).
-# buildoor splits its bid at the cap it is told, so with buildoor the cap never
-# clamps CB's ranking: this proves CB and the BN agree on the cap and the formula,
-# not the clamp itself. PASS: >= MIN_BUILDER_SLOTS CB selections carry
+# --- assert trusted-payment: the BN selects CB's bid and counts its whole payment --
+# CB ranks nothing: it forwards buildoor's bid as received. The BN values a bid at
+# value + min(execution_payment, cap) with the cap stored on the builder_config
+# entry (beacon-APIs #630), and "unclamped" stores the largest Uint64, so the
+# whole execution payment counts. For each slot in the window where the BN
+# selected CB's bid ("Selected builder block ... bidSource=<CB>"), the bid CB
+# received from buildoor-mux ("received new header", debug) must be that bid
+# (same value and execution_payment) and the BN's total for the CB candidate
+# ("Ranked builder bid candidates ... <CB>:total=N", debug) must be
+# value + execution_payment. PASS: >= MIN_BUILDER_SLOTS CB selections carry
 # execution_payment > 0 and no selected slot mismatches or lacks either side.
 assert_trusted_payment() { # $1,$2 = observed window
-  log "assert trusted-payment: the BN selects CB's execution-payment bid and values it as CB ranks it"
+  log "assert trusted-payment: the BN selects CB's execution-payment bid and counts the whole payment"
   cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/cb.log"
   bn_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/bn.log"
   local report rc=0
   report="$(python3 - "$RUN_DIR/cb.log" "$RUN_DIR/bn.log" "$1" "$2" "$CB_ENTRY_URL" \
-      "$TRUSTED_PAYMENT_CAP_GWEI" "$MIN_BUILDER_SLOTS" <<'PY'
+      "$UNCLAMPED_CAP" "$MIN_BUILDER_SLOTS" <<'PY'
 import re,sys
 from decimal import Decimal
 cb_log,bn_log=sys.argv[1],sys.argv[2]
 s0,s1,cb_url,cap,need=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5],int(sys.argv[6]),int(sys.argv[7])
 def gwei(eth): return int(Decimal(eth)*10**9)
-cb={}      # slot -> (value, execution_payment) of CB's auction winner, gwei
+cb={}      # slot -> {(value, execution_payment)} of the bids buildoor gave CB, gwei
 for line in open(cb_log,errors="replace"):
-    if "auction winner" not in line or 'relay_id="buildoor-mux"' not in line: continue
+    if "received new header" not in line or 'relay_id="buildoor-mux"' not in line: continue
     slot=re.search(r"\bslot=(\d+)",line)
     v=re.search(r'trustless_bid_eth="([0-9.]+)"',line)
     ep=re.search(r'execution_payment_eth="([0-9.]+)"',line)
-    if slot and v and ep: cb[int(slot.group(1))]=(gwei(v.group(1)),gwei(ep.group(1)))
+    if slot and v and ep: cb.setdefault(int(slot.group(1)),set()).add((gwei(v.group(1)),gwei(ep.group(1))))
 ranked,selected={},{}
 source=re.compile(r"bidSource="+re.escape(cb_url)+r"(?=[,\s]|$)")
 for line in open(bn_log,errors="replace"):
@@ -719,25 +604,25 @@ with_ep=[s for s in selected if selected[s][1]>0]
 problems,agree=[],[]
 for slot in sorted(selected):
     if slot not in cb:
-        problems.append("slot {0}: the BN selected CB's bid but CB logged no auction winner".format(slot)); continue
-    if cb[slot]!=selected[slot]:
-        problems.append("slot {0}: CB's winner value/execution_payment {1} != the BN's selected {2}".format(slot,cb[slot],selected[slot])); continue
-    rank=cb[slot][0]+min(cb[slot][1],cap)
+        problems.append("slot {0}: the BN selected CB's bid but CB logged no bid from buildoor-mux".format(slot)); continue
+    if selected[slot] not in cb[slot]:
+        problems.append("slot {0}: the BN's selected value/execution_payment {1} is not a bid CB received {2}".format(slot,selected[slot],sorted(cb[slot]))); continue
+    v,ep=selected[slot]
+    want=v+min(ep,cap)
     if slot not in ranked:
         problems.append("slot {0}: no 'Ranked builder bid candidates' total for {1}".format(slot,cb_url)); continue
-    if ranked[slot]!=rank:
-        problems.append("slot {0}: CB capped ranking {1} != BN valuation {2}".format(slot,rank,ranked[slot])); continue
+    if ranked[slot]!=want:
+        problems.append("slot {0}: BN valuation {1} != value + execution_payment {2}".format(slot,ranked[slot],want)); continue
     agree.append(slot)
 print("  BN selected CB's bid in [{0},{1}]:           {2} slots".format(s0,s1,len(selected)))
 print("    with execution_payment > 0:               {0} (need >= {1})".format(len(with_ep),need))
-print("  CB capped ranking == BN valuation:          {0} of {1}".format(len(agree),len(selected)))
+print("  BN valuation == value + execution_payment:  {0} of {1}".format(len(agree),len(selected)))
 if agree:
-    s=agree[0]; v,ep=cb[s]
-    print("    e.g. slot {0}: CB value={1} execution_payment={2} cap={3} -> ranking {4}; BN total={5}".format(
-        s,v,ep,cap,v+min(ep,cap),ranked[s]))
+    s=agree[0]; v,ep=selected[s]
+    print("    e.g. slot {0}: value={1} execution_payment={2} -> BN total={3}".format(s,v,ep,ranked[s]))
 for p in problems[:8]: print("    "+p)
 ok=len(with_ep)>=need and not problems
-print("the BN selected CB's execution-payment bid in {0} slots; CB's capped ranking equals the BN's valuation in {1} of {2}".format(
+print("the BN selected CB's execution-payment bid in {0} slots and counted the whole payment in {1} of {2}".format(
     len(with_ep),len(agree),len(selected)))
 sys.exit(0 if ok else 1)
 PY
@@ -746,6 +631,66 @@ PY
   (( rc == 0 )) || die "trusted-payment: $(tail -1 <<<"$report")"
   printf '\033[1;32mPASS: %s\033[0m\n' "$(tail -1 <<<"$report")"
 }
+
+# ---- CB config + km overlay rendering ---------------------------------------
+# One code path for a live run, the pre-launch check and --render-only, so what
+# cb-km checks is what CB loads.
+render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
+  local out="$1" gen_time="$2" vc_km="$3"
+  # Strict-shape it before it reaches sed: it interpolates into a config the CB
+  # process trusts, so a malformed BN response must fail loud, not inject.
+  [[ "$gen_time" =~ ^[0-9]+$ ]] || die "genesis_time is not a plain integer: '$gen_time'"
+  rm -rf "$out"; mkdir -p "$out"
+  # km-token.txt is the well-known static ethereum-package keymanager token (public,
+  # sim-only). It is NOT a secret and must never be reused against a real VC. See docs/EPBS.md.
+  cp configs/epbs/km-token.txt "$out/km-token.txt"
+  sed -e "s|__GENESIS_TIME__|$gen_time|" \
+      -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
+      configs/epbs/cb-config.toml.tmpl > "$out/cb-config.toml"
+  sed -e "s|__VC_KM_URL__|$vc_km|" \
+      -e "s|__TOKEN_PATH__|$(cd "$out" && pwd)/km-token.txt|" \
+      configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
+  grep -q '__' "$out/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
+
+  # trusted-payment: the [pbs] cap is the only max_execution_payment_gwei in the
+  # file, so it is the effective cap for both relay entries; cb-km writes it onto
+  # every builder_config entry as the largest Uint64.
+  if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
+    sed -i 's|^skip_sigverify = .*$|&\nmax_execution_payment_gwei = "unclamped"|' "$out/cb-config.toml"
+    [[ "$(grep -c '^max_execution_payment_gwei = ' "$out/cb-config.toml")" == 1 ]] \
+      && grep -q '^max_execution_payment_gwei = "unclamped"$' "$out/cb-config.toml" \
+      || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
+  fi
+  # direct: a top-level key, so it must precede the [[vcs]] table or TOML scopes it there
+  if [[ "$ASSERT_MODE" == "direct" ]]; then
+    sed -i '1i direct_entries = true' "$out/km-overlay.toml"
+  fi
+}
+
+# cb-km refuses a [pbs] or [[mux]] key Commit-Boost does not read, and CB refuses
+# an unknown relay key, so a dry run proves the rendered pair loads. The projected
+# docs land in $1/km-dry-run.txt.
+km_dry_run() { # $1=dir holding cb-config.toml + km-overlay.toml
+  "$CB_KM_BIN" apply --config "$1/cb-config.toml" --overlay "$1/km-overlay.toml" --dry-run \
+    > "$1/km-dry-run.txt" 2>&1 \
+    || { tail -20 "$1/km-dry-run.txt"; die "cb-km apply --dry-run refused $1/cb-config.toml"; }
+  echo "cb-km dry run: $(sed -r 's/\x1b\[[0-9;]*m//g' "$1/km-dry-run.txt" | grep -oE 'dry-run: .*' | tail -1)"
+}
+
+# ---- render-only: one mode's CB config + overlay, checked by cb-km, no devnet --
+if [[ -n "$RENDER_ONLY" ]]; then
+  if [[ -z "$CB_KM_BIN" ]]; then
+    # the submodule's cb-km, rebuilt by cargo if it is not from the pinned commit
+    cb_art="$(bash "$REPO_ROOT/scripts/ensure-cb-artifacts.sh" --km-only)" \
+      || die "provisioning cb-km from the submodule failed (see build output above)"
+    eval "$cb_art"   # sets CB_KM_BIN
+  fi
+  [[ -x "$CB_KM_BIN" ]] || die "cb-km at $CB_KM_BIN is not executable"
+  render_cb_config "$RENDER_ONLY" 0 "http://127.0.0.1:5062"
+  echo "rendered ${ASSERT_MODE:-default}: $RENDER_ONLY/cb-config.toml $RENDER_ONLY/km-overlay.toml"
+  km_dry_run "$RENDER_ONLY"
+  exit 0
+fi
 
 # ---- cleanup ----------------------------------------------------------------
 cleanup() {
@@ -804,6 +749,10 @@ fi
 # Every builder-built count below rests on this classifier; check it against its
 # boundary cases before spending a devnet on it.
 python3 scripts/epbs-blocks.py self-test || die "scripts/epbs-blocks.py self-test failed"
+# Render this mode's CB config with placeholder chain values and let cb-km check
+# it now: a key it refuses would otherwise surface only once the devnet is up.
+render_cb_config "$RUN_DIR" 0 "http://127.0.0.1:5062"
+km_dry_run "$RUN_DIR"
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
 echo "cb-km:   $CB_KM_BIN"
@@ -826,7 +775,7 @@ fi
 
 # PRESET override: render a copy of the args file with network_params.preset
 # swapped, and launch from that. Leaves the committed args file untouched, so the
-# preset is a pure runtime knob (minimal = fast default; mainnet = block-submission).
+# preset is a pure runtime knob (minimal = fast default).
 if [[ -n "$PRESET" ]]; then
   RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
   sed -E "s/^([[:space:]]*preset:[[:space:]]*).*/\1$PRESET/" "$ARGS_FILE" > "$RENDERED_ARGS"
@@ -927,70 +876,9 @@ echo "head slot = $head_slot"
 # ---- 3. render CB config + overlay from the live chain -----------------------
 log "rendering CB config from live BN"
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
-# Strict-shape it before it reaches sed: it interpolates into a config the CB
-# process trusts, so a malformed BN response must fail loud, not inject.
-[[ "$GEN_TIME" =~ ^[0-9]+$ ]] || die "genesis_time is not a plain integer: '$GEN_TIME'"
 echo "genesis_time=$GEN_TIME"
-
-rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
-# km-token.txt is the well-known static ethereum-package keymanager token (public,
-# sim-only). It is NOT a secret and must never be reused against a real VC. See docs/EPBS.md.
-cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"
-sed -e "s|__GENESIS_TIME__|$GEN_TIME|" \
-    -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
-    configs/epbs/cb-config.toml.tmpl > "$RUN_DIR/cb-config.toml"
-sed -e "s|__VC_KM_URL__|$VC_KM|" \
-    -e "s|__TOKEN_PATH__|$(pwd)/$RUN_DIR/km-token.txt|" \
-    configs/epbs/km-overlay.toml.tmpl > "$RUN_DIR/km-overlay.toml"
-grep -q '__' "$RUN_DIR/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
-
-# request-auth mode: turn ON the request-auth signature check (default off in the
-# template). CB verifies the caller's SignedBuilderRequestAuth against the
-# proposer pubkey using the builder-specs request-auth domain
-# (compute_domain(DOMAIN_BUILDER_REQUEST_AUTH) = genesis_fork_version + zero root).
-# This is orthogonal to skip_sigverify (that gates the BID signature, which the
-# devnet's progressive-SSZ hashing still blocks); the request-auth message is a
-# plain container, so its root agrees across clients.
-if [[ "$ASSERT_MODE" == "request-auth" ]]; then
-  sed -i 's|^skip_sigverify = .*$|&\nverify_builder_request_auth = true|' "$RUN_DIR/cb-config.toml"
-  grep -q '^verify_builder_request_auth = true$' "$RUN_DIR/cb-config.toml" \
-    || die "request-auth: failed to enable verify_builder_request_auth in cb-config.toml"
-  echo "request-auth: verify_builder_request_auth = true"
-fi
-
-# block-submission mode: turn ON strict_block_decode so CB SSZ-decodes the revealed
-# gloas SignedBeaconBlock ITSELF (default OFF = blind pipe: it forwards the body
-# unparsed and block validity is the builder's job). This is the code path under
-# test; without it the decode never runs. The decode happens BEFORE the fan-out to
-# builders, so it is exercised even though buildoor rejects the HTTP forward (it
-# reveals the payload over p2p, not via /beacon_blocks).
-if [[ "$ASSERT_MODE" == "block-submission" ]]; then
-  sed -i 's|^skip_sigverify = .*$|&\nstrict_block_decode = true|' "$RUN_DIR/cb-config.toml"
-  grep -q '^strict_block_decode = true$' "$RUN_DIR/cb-config.toml" \
-    || die "block-submission: failed to enable strict_block_decode in cb-config.toml"
-  echo "block-submission: strict_block_decode = true"
-fi
-
-# ladder mode: timing games on both buildoor relay entries (the mux entry is the
-# one the 64 keys route to), so CB polls buildoor every LADDER_FREQ_MS until the
-# proposer's deadline and holds the latest valid bid.
-if [[ "$ASSERT_MODE" == "ladder" ]]; then
-  sed -i -E 's|^id = "buildoor(-mux)?"$|&\nenable_timing_games = true\nfrequency_get_header_ms = '"$LADDER_FREQ_MS"'|' "$RUN_DIR/cb-config.toml"
-  [[ "$(grep -c "^frequency_get_header_ms = $LADDER_FREQ_MS\$" "$RUN_DIR/cb-config.toml")" == 2 ]] \
-    || die "ladder: failed to enable timing games on both buildoor relay entries in cb-config.toml"
-  echo "ladder: enable_timing_games = true, frequency_get_header_ms = $LADDER_FREQ_MS on both relay entries"
-fi
-
-# trusted-payment mode: the [pbs] cap is the only max_execution_payment_gwei in
-# the file, so it is the effective cap for both relay entries; cb-km projects it
-# onto every builder_config entry and CB ranks bids with it.
-if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
-  sed -i "s|^skip_sigverify = .*$|&\nmax_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI|" "$RUN_DIR/cb-config.toml"
-  [[ "$(grep -c '^max_execution_payment_gwei = ' "$RUN_DIR/cb-config.toml")" == 1 ]] \
-    && grep -q "^max_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI\$" "$RUN_DIR/cb-config.toml" \
-    || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
-  echo "trusted-payment: [pbs] max_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI (no relay-level cap)"
-fi
+render_cb_config "$RUN_DIR" "$GEN_TIME" "$VC_KM"
+km_dry_run "$RUN_DIR"
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
@@ -1024,16 +912,8 @@ else
   docker ps --format '{{.Names}}' | grep -qx "$CB_NAME" || { docker logs "$CB_NAME" 2>&1 | tail -20; die "CB container exited on boot"; }
   echo "CB up: $(docker ps --filter name=^${CB_NAME}$ --format '{{.Status}}')"
 fi
-# CB WARN-logs each [pbs] or mux key it does not know and then ignores it, so a
-# stale or misspelled template key would change nothing while reading as set.
-unknown_fields="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' | grep -E 'unknown field .* is ignored' || true)"
-[[ -z "$unknown_fields" ]] \
-  || { echo "$unknown_fields"; die "CB ignores config keys it does not know (fix configs/epbs/cb-config.toml.tmpl)"; }
-echo "CB config: no unknown keys"
 
 # ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
-# top-level key: it must precede the [[vcs]] table or TOML scopes it to that table
-[[ "$ASSERT_MODE" == "direct" ]] && sed -i '1i direct_entries = true' "$RUN_DIR/km-overlay.toml"
 if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
   assert_trusted_payment_refused
   exit 0
@@ -1061,9 +941,9 @@ fi
 log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 buildoor_live=0
 for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
-  # key on info-level signals (per-header receipt is debug and may be filtered):
-  # either buildoor's header reached CB or it won CB's auction.
-  if cb_logs | grep -qE 'auction winner.*buildoor-mux|received (new )?header.*buildoor-mux'; then buildoor_live=1; break; fi
+  # buildoor's bid reached CB (the per-header receipt is debug, which the
+  # template enables)
+  if cb_logs | grep 'received new header' | grep -qF 'relay_id="buildoor-mux"'; then buildoor_live=1; break; fi
   cur=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0)
   printf '  head=%s waiting for first buildoor bid via CB...\r' "$cur"
   sleep 6
@@ -1086,10 +966,11 @@ echo
 
 # ---- 7. assert --------------------------------------------------------------
 log "verifying the loop"
-# CB-side: bid requests + buildoor auction wins in the observed window
+# CB-side: bid requests + the bids buildoor returned through CB. CB ranks
+# nothing: each request goes to the one relay its auth data names.
 CB_LOG=$(cb_logs)
 bid_calls=$(grep -c 'execution_payload_bid' <<<"$CB_LOG" || true)
-auction_wins=$(grep -c 'auction winner.*buildoor-mux' <<<"$CB_LOG" || true)
+buildoor_bids=$(grep 'received new header' <<<"$CB_LOG" | grep -cF 'relay_id="buildoor-mux"' || true)
 
 # chain-side: builder-built blocks (the bid names a registry builder)
 classified="$(classify_blocks "$start_slot" "$end_slot")"
@@ -1099,15 +980,15 @@ n_built=$(count_csv "$built_slots")
 n_payment_only=$(count_csv "$payment_only_slots")
 
 echo "  BN -> CB bid calls (window+):     $bid_calls"
-echo "  buildoor auction wins via CB:     $auction_wins"
+echo "  buildoor bids via CB:             $buildoor_bids"
 echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 echo "    paid only via execution_payment (value = 0): $n_payment_only"
 
 # builder-down diverges here: it only needs the builder PROVEN live (>=1
 # builder-built slot), then stops buildoor and asserts proposer liveness.
 if [[ "$ASSERT_MODE" == "builder-down" ]]; then
-  (( n_built >= 1 && auction_wins >= 1 )) \
-    || { cb_logs | tail -20; die "builder-down precondition: buildoor never built a block (built=$n_built, wins=$auction_wins)"; }
+  (( n_built >= 1 && buildoor_bids >= 1 )) \
+    || { cb_logs | tail -20; die "builder-down precondition: buildoor never built a block (built=$n_built, bids=$buildoor_bids)"; }
   echo "  precondition OK: buildoor built >=1 block before stop"
   assert_builder_down "$start_slot"
   exit 0
@@ -1158,24 +1039,19 @@ if [[ "$ASSERT_MODE" == "p2p" ]]; then
 fi
 
 log "RESULT"
-if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
+if (( n_built >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
   printf '\033[1;32mPASS: %s/%s observed slots builder-built via commit-boost (buildoor)\033[0m\n' \
     "$n_built" "$OBSERVE_SLOTS"
   if [[ "$ASSERT_MODE" == "p2p" ]]; then
     printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
       "$p2p_rejected" "$cb_selected"
   fi
-  # request-auth: the loop passed with verify_builder_request_auth ON, so also
-  # assert zero AuthSigVerify. block-submission: also assert the reveal endpoint fired.
-  [[ "$ASSERT_MODE" == "request-auth" ]]     && { assert_request_auth "$n_built"; }
+  # block-submission: also assert the reveal went through the blind pipe
   [[ "$ASSERT_MODE" == "block-submission" ]] && { assert_block_submission; }
-  [[ "$ASSERT_MODE" == "ladder" ]]           && { assert_ladder; }
   [[ "$ASSERT_MODE" == "trusted-payment" ]]  && { assert_trusted_payment "$start_slot" "$end_slot"; }
   exit 0
 else
   cb_logs | tail -30
   (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0)"
-  # request-auth: the loop dying WHILE verify is on is the domain-mismatch finding.
-  [[ "$ASSERT_MODE" == "request-auth" ]] && assert_request_auth "$n_built"
-  die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, wins=$auction_wins, bids=$bid_calls)"
+  die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, buildoor bids=$buildoor_bids, bid calls=$bid_calls)"
 fi

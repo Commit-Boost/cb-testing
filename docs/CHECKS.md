@@ -23,10 +23,10 @@ known fork, not a scheduled one; check the epoch, not the presence of the name.
 `0` or `1`. See [EPBS.md](EPBS.md). It needs a gloas-capable CL image; at the time of writing no
 released CL implements gloas, so the CL image is the variable under test.
 Its verdicts are not `cb-verify` checks: they are the `scripts/run-epbs-sim.sh --assert <mode>`
-modes listed under "Assertion modes" in EPBS.md. Two of them cover ePBS paths no classic scenario
-reaches: `ladder` (timing games on the `execution_payload_bid` path, where `cb-timing-games` only
-covers `get_header`) and `trusted-payment` (a `max_execution_payment_gwei` cap projected by `cb-km`
-and applied by the beacon node).
+modes listed under "Assertion modes" in EPBS.md. `trusted-payment` covers an ePBS path no classic
+scenario reaches: an `"unclamped"` `max_execution_payment_gwei` projected by `cb-km` and applied by
+the beacon node. `ladder` is retired, since CB plays no timing games on the ePBS bid path, and so is
+`request-auth`, since CB no longer verifies the request auth.
 
 ## The verdict model (read this first — it is load-bearing)
 
