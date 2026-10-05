@@ -69,8 +69,9 @@ built from.
 the same devnet. To start or stop the bids by hand, run
 `kurtosis service stop|start epbs-stream helix-inject`.
 
-`negative.sh` sends hand-made websocket upgrades with a bad `X-Request-Auth`. It exits
-non-zero unless all five are refused.
+`negative.sh` sends hand-made websocket upgrades with a bad `X-Request-Auth` (missing, not
+base64, over the 5612-char cap, signed for another slot, a corrupted or a non-proposer signature)
+or a path pubkey that is not the slot's proposer. It exits non-zero unless all seven are refused.
 
 ### Settings (env)
 
@@ -120,7 +121,7 @@ cb-epbs's network namespace. `analyze.py` prints a per-slot table and these verd
   - Helix's deadline and CB's fall within about 1 ms of each other. When CB's fires first,
     it closes the socket. Helix's close frame then arrives after CB's FIN and draws a RST
     from CB's kernel. That ordering is benign, because CB has already returned.
-- **negative:** 5/5 bad-auth upgrades get a 4xx and no `101`.
+- **negative:** 7/7 bad upgrades get a 4xx carrying the intended check's message, and no `101`.
 
 Each scenario writes `run/scenario-<utc>/`. It holds the service logs, `cb-metrics-*.txt`,
 `cb-helix.pcap` with its tshark export `cb-helix.tsv`, `negative.out`, `images.txt` and

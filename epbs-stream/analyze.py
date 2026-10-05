@@ -7,7 +7,7 @@
   b. bid slots: CB still picks stream-carried bids (`auction winner ... transport="stream"`)
   c. the stream ends with a close frame: in the capture, the relay sends a WebSocket close on
      every no-bid stream, and CB logs a clean end ("no bid") for each no-bid request
-  negative: negative.sh refused all five bad-auth upgrades with a 4xx
+  negative: negative.sh refused all seven bad upgrades with a 4xx
 
 Usage: analyze.py <scenario-dir>
 """
@@ -170,7 +170,7 @@ def main():
     print(f"   whole capture: {len(all_streams)} bid streams, {all_close} ended by a relay close frame  -> {'PASS' if ok['c'] else 'FAIL'}")
 
     neg = (d / "negative.out").read_text() if (d / "negative.out").exists() else ""
-    ok["negative"] = "PASS: 5/5" in neg
+    ok["negative"] = "PASS: 7/7" in neg
     print(f"\nnegative.sh: {(neg.strip().splitlines() or ['missing'])[-1]}")
 
     print("\nRESULT " + " ".join(f"{k}={'PASS' if v else 'FAIL'}" for k, v in ok.items()))
