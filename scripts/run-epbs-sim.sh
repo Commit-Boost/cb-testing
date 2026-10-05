@@ -633,19 +633,16 @@ echo "head slot = $head_slot"
 # ---- 3. render CB config + overlay from the live chain -----------------------
 log "rendering CB config from live BN"
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
-GVR=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_validators_root'])")
-# Strict-shape both before they reach sed: they interpolate into a config the CB
+# Strict-shape it before it reaches sed: it interpolates into a config the CB
 # process trusts, so a malformed BN response must fail loud, not inject.
 [[ "$GEN_TIME" =~ ^[0-9]+$ ]] || die "genesis_time is not a plain integer: '$GEN_TIME'"
-[[ "$GVR" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "genesis_validators_root is not a 32-byte hex root: '$GVR'"
-echo "genesis_time=$GEN_TIME  genesis_validators_root=$GVR"
+echo "genesis_time=$GEN_TIME"
 
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 # km-token.txt is the well-known static ethereum-package keymanager token (public,
 # sim-only). It is NOT a secret and must never be reused against a real VC. See docs/EPBS.md.
 cp configs/epbs/km-token.txt "$RUN_DIR/km-token.txt"
 sed -e "s|__GENESIS_TIME__|$GEN_TIME|" \
-    -e "s|__GENESIS_VALIDATORS_ROOT__|$GVR|" \
     -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
     configs/epbs/cb-config.toml.tmpl > "$RUN_DIR/cb-config.toml"
 sed -e "s|__VC_KM_URL__|$VC_KM|" \
@@ -689,11 +686,11 @@ if [[ "$CB_LAUNCH" == "service" ]]; then
   # `kurtosis enclave inspect` - no manual container to track.
   kurtosis files upload "$ENCLAVE" "$RUN_DIR" --name "$CB_ARTIFACT" >/dev/null \
     || die "kurtosis files upload of $RUN_DIR failed"
-  # NOTE: --env is ONE comma-separated string, so RUST_LOG must not contain a
-  # comma; RUST_LOG=debug gives the cb_pbs bid/auction lines the asserts grep for.
+  # CB's log level is [logs.stdout] level in the rendered config; CB does not
+  # read RUST_LOG.
   kurtosis service add "$ENCLAVE" "$CB_NAME" "$CB_IMAGE" \
     --files "/cb:$CB_ARTIFACT" \
-    --env "CB_CONFIG=/cb/cb-config.toml,RUST_LOG=debug" \
+    --env "CB_CONFIG=/cb/cb-config.toml" \
     --ports "pbs=http:18550" \
     --cmd pbs >/dev/null \
     || { cb_logs | tail -20; die "kurtosis service add for CB failed"; }
@@ -707,12 +704,17 @@ else
   docker run -d --name "$CB_NAME" --network "$NET" \
     -v "$(pwd)/$RUN_DIR:/cb:ro" \
     -e CB_CONFIG=/cb/cb-config.toml \
-    -e RUST_LOG=info,cb_pbs=debug \
     "$CB_IMAGE" pbs >/dev/null
   sleep 4
   docker ps --format '{{.Names}}' | grep -qx "$CB_NAME" || { docker logs "$CB_NAME" 2>&1 | tail -20; die "CB container exited on boot"; }
   echo "CB up: $(docker ps --filter name=^${CB_NAME}$ --format '{{.Status}}')"
 fi
+# CB WARN-logs each [pbs] or mux key it does not know and then ignores it, so a
+# stale or misspelled template key would change nothing while reading as set.
+unknown_fields="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' | grep -E 'unknown field .* is ignored' || true)"
+[[ -z "$unknown_fields" ]] \
+  || { echo "$unknown_fields"; die "CB ignores config keys it does not know (fix configs/epbs/cb-config.toml.tmpl)"; }
+echo "CB config: no unknown keys"
 
 # ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
 # top-level key: it must precede the [[vcs]] table or TOML scopes it to that table

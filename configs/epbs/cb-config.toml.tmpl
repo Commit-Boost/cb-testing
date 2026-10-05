@@ -3,12 +3,11 @@ chain = { genesis_time_secs = __GENESIS_TIME__, slot_time_secs = 6, genesis_fork
 [pbs]
 host = "0.0.0.0"
 port = 18550
-# The domain overrides below are correct, verified offline against an on-chain
-# bid. Bid signature verification is off for the ePBS sim on purpose.
+# CB forwards ePBS bids without checking their signatures (the beacon node
+# verifies them against the builder registry), so no signing-domain keys are set.
+# skip_sigverify only gates the legacy get_header path; it stays as the line the
+# --assert modes insert their [pbs] keys after.
 skip_sigverify = true
-# devnet bid signing-domain overrides (from BN /eth/v1/config/spec + /eth/v1/beacon/genesis)
-gloas_fork_version = "0x80000038"
-genesis_validators_root = "__GENESIS_VALIDATORS_ROOT__"
 # projection-only (KM tooling): key-level min_bid floors p2p bids above the
 # 0.101 ETH p2p bid; entries keep their explicit low min_bid so CB bids survive
 min_bid_p2p_eth = "0.2"
@@ -91,3 +90,8 @@ validator_pubkeys = [
 [[mux.relays]]
 id = "buildoor-mux"
 url = "__BUILDOOR_RELAY_URL__"
+
+# CB takes its log level from here; it does not read RUST_LOG. debug adds the
+# per-header receipts and the timing-games ladder lines.
+[logs.stdout]
+level = "debug"

@@ -94,6 +94,10 @@ commit-boost in the loop.)
   (`NoBuilderResponse`). The block is still canonical and the default assertion counts it. This 500 is a
   *forward* outcome, not a decode failure - see `--assert block-submission` below, which turns on CB's
   `strict_block_decode` and asserts the SSZ decode (which runs *before* the forward) succeeded.
+- **CB's log level is `[logs.stdout] level` in its config, not `RUST_LOG`.** CB builds its log
+  filter from the config file and never reads `RUST_LOG`, so the `RUST_LOG=debug` this harness used
+  to pass was ignored and CB logged at `info`. The template sets `level = "debug"` (per-header
+  receipts, the timing-games ladder lines); edit it there, not in the service env.
 - **`min_bid` / `builder_boost_factor` are NOT the CB-vs-local levers.** A bid rejected for a stale-cb-km
   pubkey mismatch looks identical to "lost on value" - check bid *acceptance* in the beacon-node log
   first. Per-entry `min_bid` empty means accept-any; the top-level `min_bid` is the p2p floor only.
@@ -107,10 +111,13 @@ commit-boost in the loop.)
    buildoor as the ePBS builder. `minimal` preset, 6s slots, `gloas_fork_epoch: 0`,
    64 validators with `keymanager_enabled`, one builder.
 2. **Render the CB config** (`configs/epbs/cb-config.toml.tmpl`) from the live
-   beacon node: the two per-run values - `genesis_time` and
-   `genesis_validators_root` - are substituted; everything else (fork versions,
-   the deterministic 64-key mux derived from the fixed mnemonic, the buildoor
-   relay + pubkey) is static.
+   beacon node: the one per-run value, `genesis_time`, is substituted; everything
+   else (the genesis fork version, the deterministic 64-key mux derived from the
+   fixed mnemonic, the buildoor relay + pubkey) is static. CB forwards ePBS bids
+   without checking their signatures, so the template sets no bid signing-domain
+   keys. CB WARN-logs and then ignores any `[pbs]` or mux key it does not know;
+   the harness fails the run on such a warning, so a stale template key cannot
+   pass for a setting.
 3. **Add commit-boost** (`commit-boost/commit-boost:km-e2e`, branch `epbs`) as the
    PBS sidecar, named `cb-epbs` (matching the advertised URL the VC will call).
    By default (`CB_LAUNCH=service`) it is a **first-class kurtosis enclave
