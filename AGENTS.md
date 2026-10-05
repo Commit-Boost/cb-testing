@@ -28,6 +28,8 @@ Rust workspace (one lib, three bins):
   buildoor + commit-boost and asserts builder-built blocks flow VC -> CB -> buildoor end to end. Read this to
   test a CL's gloas builder API (see its "Testing a CL" section), or before touching `scripts/run-epbs-sim.sh`
   or `configs/epbs/`. The CB artifacts (image + `cb-km`) auto-build from the pinned submodule, sha-tagged.
+  Feature checks are opt-in `--assert <mode>` runs (`just epbs-sim-assert <mode>`, e.g. `ladder`,
+  `trusted-payment`), listed under its "Assertion modes".
 - **README.md** - user-facing quick start (user-facing quick start).
 
 Internal back-room (agent working material, not part of the public docs surface):

@@ -166,6 +166,9 @@ commit-boost in the loop.)
 | `CB_KM_BIN` | auto | path to the `cb-km` binary |
 | `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package@<pinned sha>` | ethereum-package to launch; pinned to a commit so a rerun is the same devnet |
 | `BUILDOOR_RELAY_URL` | the devnet buildoor (pubkey@host:port) | relay CB bids into, substituted into both relay entries of the CB config |
+| `LADDER_FREQ_MS` | `300` | `--assert ladder`: ms between timing-games rungs |
+| `TRUSTED_PAYMENT_CAP_GWEI` | `1000000000` | `--assert trusted-payment`: the `[pbs]` cap cb-km projects onto every entry |
+| `TRUSTED_PAYMENT_CONTROL` | `1` | `--assert trusted-payment`: `0` skips the control devnet (VC without the flag) |
 
 ### Prerequisites (auto-provisioned)
 
@@ -274,6 +277,36 @@ feature into a live regression check:
   activates and the proposer reaches builder-built (reveal-worthy) slots: prysm does
   (verified, 17 blocks decoded, 0 4xx); the lodestar harness image does not
   (`gloas-epbs.yaml` comment), so for lodestar the decode is verified out-of-band.
+- **`ladder`**: timing games on the ePBS bid path. The mode sets
+  `enable_timing_games = true` and `frequency_get_header_ms = LADDER_FREQ_MS` (default
+  300) on both buildoor relay entries, so CB polls buildoor in a ladder of rungs until
+  the proposer's deadline and holds the latest valid bid. PASS requires the default
+  builder-built PASS, the ladder running at that cadence on `buildoor-mux` (the relay
+  the keys route to), the ladder delivering the bid (`TG: holding the relay's latest
+  bid`) in at least `MIN_BUILDER_SLOTS` requests with two or more rungs answered in
+  each, and zero ladder errors (`TG: error sending header request`, `TG: no headers
+  received`). The ladder lines are debug-level, which the template enables.
+- **`trusted-payment`**: a trusted execution-payment cap end to end. The mode sets
+  `[pbs] max_execution_payment_gwei = TRUSTED_PAYMENT_CAP_GWEI` (default 1000000000,
+  i.e. 1 ETH) with no relay-level cap, so `[pbs]` holds the effective cap, and starts
+  the lodestar VC with `--allowDangerousTrustedPayments` (rendered into a copy of the
+  args file; participant 1 must be lodestar). buildoor splits its bid at the cap it
+  receives through builder preferences, so under the default cap it pays everything
+  through `execution_payment` and bids `value = 0`. PASS requires, right after
+  `cb-km apply`, the cap on every `builder_config` entry of every key; then the
+  default builder-built PASS (these are `value = 0` blocks, so this also exercises
+  the `builder_index` classifier); the BN selecting CB's bid with
+  `execution_payment > 0` in at least `MIN_BUILDER_SLOTS` slots; and for every slot
+  where the BN selected CB, CB's auction winner being that bid and CB's capped
+  ranking (`value + min(execution_payment, cap)`) equalling the BN's total for the CB
+  candidate (`Ranked builder bid candidates ... :total=`). Because buildoor never
+  bids above the cap it is told, the cap never clamps CB's ranking here: the check
+  proves CB and the BN agree on the cap and the formula, not the clamp itself.
+  **Control:** the mode first stands up a separate devnet whose VC lacks the flag
+  (about 1-2 min, the run stops after `cb-km apply`) and asserts lodestar's refusal:
+  `cb-km apply` exits non-zero with a 400 on every key, a direct POST of one
+  projected doc returns 400 naming `--allowDangerousTrustedPayments`, and no key
+  holds the cap. `TRUSTED_PAYMENT_CONTROL=0` skips it.
 - Also: **`builder-down`** (buildoor stop never stalls the proposer) and
   **`request-auth`** (`verify_builder_request_auth` ON, zero `AuthSigVerify`).
 

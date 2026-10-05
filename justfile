@@ -260,6 +260,8 @@ epbs-sim:
 #   just epbs-sim-assert block-submission  CB's POST /beacon_blocks reveal endpoint fired.
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
 #   just epbs-sim-assert request-auth      verify_builder_request_auth ON, 0 AuthSigVerify.
+#   just epbs-sim-assert ladder            timing games ON, the ladder delivers the bid, 0 ladder errors.
+#   just epbs-sim-assert trusted-payment   [pbs] cap + lodestar trusted payments; BN values CB's bid as CB ranks it.
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
 
@@ -279,6 +281,22 @@ epbs-sim-builder-down:
 # AuthSigVerify / 401 on the bid endpoint.
 epbs-sim-request-auth:
     ./scripts/run-epbs-sim.sh --assert request-auth
+
+# Assert the timing-games ladder on the ePBS bid path: CB polls buildoor every
+# LADDER_FREQ_MS (default 300) and holds the latest valid bid. Requires the default
+# builder-built PASS, the ladder delivering the bid in >= MIN_BUILDER_SLOTS requests
+# with >= 2 rungs answered, and zero ladder errors.
+epbs-sim-ladder:
+    ./scripts/run-epbs-sim.sh --assert ladder
+
+# Assert a trusted execution-payment cap end to end: [pbs] max_execution_payment_gwei
+# set, lodestar VC with --allowDangerousTrustedPayments, buildoor paying through
+# execution_payment. Requires the cap on every stored builder_config entry, the BN
+# selecting CB's bid in >= MIN_BUILDER_SLOTS slots, and the BN's valuation equal to
+# CB's capped ranking. First runs a control devnet whose VC lacks the flag
+# (cb-km apply must 400 on every key); TRUSTED_PAYMENT_CONTROL=0 skips it.
+epbs-sim-trusted-payment:
+    ./scripts/run-epbs-sim.sh --assert trusted-payment
 
 # Upstream ethereum-package, pinned to a COMMIT. A bare
 # github.com/ethpandaops/ethereum-package resolves to upstream HEAD at launch

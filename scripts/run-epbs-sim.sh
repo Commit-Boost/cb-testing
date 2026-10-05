@@ -61,10 +61,29 @@
 #                      MIN_DIRECT_SLOTS slots, and after CB is STOPPED the chain
 #                      keeps producing builder-built blocks sourced directly
 #                      from buildoor (the redundancy the direct entry buys).
+#   --assert ladder    turn on timing games for buildoor (frequency_get_header_ms
+#                      = LADDER_FREQ_MS, default 300), so CB polls buildoor in a
+#                      ladder of rungs and holds the latest valid bid. HARD-fails
+#                      unless the default builder-built PASS holds, the ladder ran
+#                      at that cadence, it delivered the bid in >= MIN_BUILDER_SLOTS
+#                      requests with >= 2 rungs answered each, and CB logged ZERO
+#                      ladder errors ("TG: error sending header request" /
+#                      "TG: no headers received").
+#   --assert trusted-payment  set [pbs] max_execution_payment_gwei (the relays
+#                      carry none, so it is the effective cap) and start the
+#                      lodestar VC with --allowDangerousTrustedPayments. buildoor
+#                      then pays through execution_payment. HARD-fails unless
+#                      cb-km stored the cap on every builder_config entry of every
+#                      key, the BN selects CB's execution-payment bid in >=
+#                      MIN_BUILDER_SLOTS slots, and for each of them the BN's
+#                      valuation equals CB's capped ranking of the same bid. First
+#                      runs a CONTROL devnet WITHOUT the flag (skip with
+#                      TRUSTED_PAYMENT_CONTROL=0): cb-km apply must exit non-zero
+#                      with a 400 on every key, the VC naming the flag.
 # No flag = the default builder-built assertion (unchanged).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth|direct]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -130,8 +149,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|request-auth|direct) : ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth|direct)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  ""|p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment) : ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|request-auth|direct|ladder|trusted-payment)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
 # block-submission's /beacon_blocks decode only succeeds on the mainnet preset
@@ -156,6 +175,19 @@ BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor 
 # with CB stopped
 MIN_DIRECT_SLOTS="${MIN_DIRECT_SLOTS:-4}"
 CB_DOWN_SLOTS="${CB_DOWN_SLOTS:-12}"
+# ladder: ms between the timing-games rungs CB sends buildoor
+LADDER_FREQ_MS="${LADDER_FREQ_MS:-300}"
+# trusted-payment: the [pbs] max_execution_payment_gwei cb-km projects onto every
+# entry. The default covers buildoor's whole bid, so buildoor pays only through
+# execution_payment and bids value = 0.
+TRUSTED_PAYMENT_CAP_GWEI="${TRUSTED_PAYMENT_CAP_GWEI:-1000000000}"
+# trusted-payment: 1 = first run the control devnet, whose VC lacks the flag
+TRUSTED_PAYMENT_CONTROL="${TRUSTED_PAYMENT_CONTROL:-1}"
+# internal: "control" marks the control phase's own run of this script
+TRUSTED_PAYMENT_PHASE="${TRUSTED_PAYMENT_PHASE:-}"
+[[ "$LADDER_FREQ_MS" =~ ^[1-9][0-9]*$ ]] || { printf 'LADDER_FREQ_MS must be a positive integer: %s\n' "$LADDER_FREQ_MS" >&2; exit 2; }
+[[ "$TRUSTED_PAYMENT_CAP_GWEI" =~ ^[1-9][0-9]*$ ]] \
+  || { printf 'TRUSTED_PAYMENT_CAP_GWEI must be a positive integer: %s\n' "$TRUSTED_PAYMENT_CAP_GWEI" >&2; exit 2; }
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -508,6 +540,212 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   die "builder-down: expected self-built blocks (self=$n_self_after) and >=1 CB 204 (204=$cb_204)"
 }
 
+# --- assert ladder: the timing-games ladder delivers the bid, error-free ---------
+# With timing games on, CB asks buildoor for a bid every LADDER_FREQ_MS until the
+# proposer's deadline and holds the LATEST valid answer. The ladder lines are
+# debug-level, which the template enables ([logs.stdout] level = "debug").
+# PASS: the ladder ran at the configured cadence on the relay the keys route to
+# (buildoor-mux), delivered the bid in >= MIN_BUILDER_SLOTS requests with >= 2
+# rungs answered in each (a ladder, not one request), and CB logged zero ladder
+# errors: "TG: error sending header request" (a rung failed with something other
+# than a timeout) or "TG: no headers received" (every rung failed).
+assert_ladder() {
+  log "assert ladder: timing games at ${LADDER_FREQ_MS}ms deliver buildoor's bid with no ladder errors"
+  local report rc=0
+  report="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' | python3 -c '
+import re,sys
+freq,need=int(sys.argv[1]),int(sys.argv[2])
+relay="relay_id=\"buildoor-mux\""
+runs,other_freq,held,headers,errors=0,0,set(),{},[]
+for line in sys.stdin:
+    req=re.search(r"\breq_id=(\S+)",line)
+    req=req.group(1) if req else None
+    if "TG: sending multiple header requests" in line and relay in line:
+        f=re.search(r"\bsend_freq_ms=(\d+)",line)
+        if f and int(f.group(1))==freq: runs+=1
+        else: other_freq+=1
+    elif "TG: holding the relay" in line and relay in line and req:
+        held.add(req)
+    elif "received new header" in line and relay in line and req:
+        headers[req]=headers.get(req,0)+1
+    elif "TG: error sending header request" in line or "TG: no headers received" in line:
+        errors.append(line.strip())
+multi=sorted(headers.get(r,0) for r in held if headers.get(r,0)>=2)
+print("  ladder runs at send_freq_ms={0}:            {1} (other cadence: {2})".format(freq,runs,other_freq))
+print("  requests whose ladder delivered the bid:   {0} (need >= {1})".format(len(held),need))
+print("    of which with >= 2 rungs answered:       {0} (rungs answered: min {1}, max {2})".format(
+    len(multi),multi[0] if multi else 0,multi[-1] if multi else 0))
+print("  ladder errors (TG error / no headers):     {0} (need 0)".format(len(errors)))
+for e in errors[:5]: print("    "+e[:240])
+ok=runs>=1 and other_freq==0 and len(held)>=need and len(multi)>=need and not errors
+print("{0} ladder bids delivered, {1} with >= 2 rungs, at {2}ms, {3} ladder errors".format(
+    len(held),len(multi),freq,len(errors)))
+sys.exit(0 if ok else 1)
+' "$LADDER_FREQ_MS" "$MIN_BUILDER_SLOTS")" || rc=$?
+  sed '$d' <<<"$report"
+  (( rc == 0 )) || die "ladder: $(tail -1 <<<"$report")"
+  printf '\033[1;32mPASS: %s\033[0m\n' "$(tail -1 <<<"$report")"
+}
+
+# --- assert trusted-payment, control: a VC without the flag refuses the cap ------
+# Run in the control phase's own devnet, whose lodestar VC lacks
+# --allowDangerousTrustedPayments. lodestar's keymanager refuses any
+# builder_config entry with max_execution_payment > 0 (400, naming the flag), so
+# cb-km apply of the capped config must exit non-zero with a 400 on every key,
+# and no key may end up holding the cap. A direct POST of one projected doc ties
+# the 400 to the flag, not to some other rejection.
+assert_trusted_payment_refused() {
+  log "trusted-payment control: cb-km apply of a capped config, VC WITHOUT --allowDangerousTrustedPayments"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local out rc=0
+  out="$("$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" 2>&1 \
+    | sed -r 's/\x1b\[[0-9;]*m//g')" || rc=$?
+  local n_keys refused
+  n_keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
+    | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')" \
+    || die "control: could not list the VC's keystores"
+  # || true: no match is a 0 here, not a reason for set -e to end the run
+  refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: .*failed: 400' <<<"$out" \
+    | grep -oE 'POST 0x[0-9a-f]{96}' | sort -u | wc -l || true)"
+  echo "  cb-km apply exit code:            $rc (need non-zero)"
+  echo "  keys refused with HTTP 400:       $refused of $n_keys (need all)"
+  { grep -m1 -E 'failed: 400' <<<"$out" || true; } | cut -c1-240 | sed 's/^/    e.g. /'
+
+  # one projected doc, POSTed by hand to read the VC's reason
+  local emit_dir="$RUN_DIR/emitted" key doc code body stored_cap
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --emit "$emit_dir" >/dev/null 2>&1 \
+    || die "control: cb-km apply --emit failed"
+  read -r key doc < <(python3 -c 'import json,sys;k=json.load(open(sys.argv[1]))["keys"][0];print(k["pubkey"],k["file"])' "$emit_dir/manifest.json") \
+    || die "control: no projected doc in $emit_dir/manifest.json"
+  body="$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $KM_TOKEN" -H 'Content-Type: application/json' \
+    --data @"$emit_dir/$doc" "$VC_KM/eth/v1/validator/$key/builder_config")"
+  code="$(tail -1 <<<"$body")"; body="$(sed '$d' <<<"$body")"
+  stored_cap="$(km_get "$key" | python3 -c \
+    'import sys,json;d=json.load(sys.stdin)["data"];print(max([int(e.get("max_execution_payment") or 0) for e in d.get("builders") or []],default=0))')" \
+    || die "control: could not read $key's stored builder_config"
+  echo "  direct POST of $key's projected doc: HTTP $code $body"
+  echo "  largest cap stored on that key:   $stored_cap (need 0)"
+
+  log "RESULT"
+  if (( rc != 0 && n_keys >= 1 && refused == n_keys )) && [[ "$code" == 400 && "$body" == *allowDangerousTrustedPayments* && "$stored_cap" == 0 ]]; then
+    printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, cb-km apply exited %s with a 400 on all %s keys and stored no cap\033[0m\n' "$rc" "$n_keys"
+    return 0
+  fi
+  die "control: want cb-km exit != 0 (got $rc), 400 on all $n_keys keys (got $refused), a direct 400 naming the flag (got $code), stored cap 0 (got $stored_cap)"
+}
+
+# --- assert trusted-payment: cb-km stored the cap on every entry -------------------
+# The relays carry no max_execution_payment_gwei, so [pbs] holds the effective cap
+# and cb-km must project it onto every builder_config entry of every key (a
+# relay-only projection leaves the entries uncapped, so the BN values the trusted
+# payment at 0 while CB ranks it in full).
+assert_cap_projected() {
+  log "assert trusted-payment: cb-km stored max_execution_payment = $TRUSTED_PAYMENT_CAP_GWEI on every entry"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  python3 - "$VC_KM" "$KM_TOKEN" "$TRUSTED_PAYMENT_CAP_GWEI" <<'PY' || die "trusted-payment: the cap is missing from stored builder_config entries"
+import json,sys,urllib.request
+km,token,cap=sys.argv[1],sys.argv[2],sys.argv[3]
+def get(path):
+    req=urllib.request.Request(km+path,headers={"Authorization":"Bearer "+token})
+    with urllib.request.urlopen(req,timeout=10) as r:
+        return json.load(r)
+keys=[k["validating_pubkey"] for k in get("/eth/v1/keystores")["data"]]
+entries,bad,sample=0,[],None
+for k in keys:
+    doc=get("/eth/v1/validator/{0}/builder_config".format(k))["data"]
+    sample=sample or (k,doc)
+    builders=doc.get("builders") or []
+    if not builders:
+        bad.append((k,"no builder entries"))
+    for e in builders:
+        entries+=1
+        if str(e.get("max_execution_payment"))!=cap:
+            bad.append((k,"{0}: max_execution_payment={1}".format(e.get("url"),e.get("max_execution_payment"))))
+print("  keys: {0}, entries: {1}, entries without the cap: {2}".format(len(keys),entries,len(bad)))
+if sample:
+    print("    e.g. {0}: {1}".format(sample[0][:20]+"...",json.dumps(sample[1])))
+for k,why in bad[:5]:
+    print("    {0}: {1}".format(k,why))
+sys.exit(1 if bad or not keys else 0)
+PY
+}
+
+# --- assert trusted-payment: the BN selects CB's bid and values it as CB ranks it --
+# CB ranks a bid at value + min(execution_payment, cap) with cap = the relay's
+# max_execution_payment_gwei, else [pbs]'s (beacon-APIs #630); the BN values the
+# same bid with the cap stored on the builder_config entry. For each slot in the
+# window where the BN selected CB's bid ("Selected builder block ... bidSource=
+# <CB>"), CB's auction winner must be that bid (same value and
+# execution_payment) and CB's capped ranking of it must equal the BN's total for
+# the CB candidate ("Ranked builder bid candidates ... <CB>:total=N", debug).
+# buildoor splits its bid at the cap it is told, so with buildoor the cap never
+# clamps CB's ranking: this proves CB and the BN agree on the cap and the formula,
+# not the clamp itself. PASS: >= MIN_BUILDER_SLOTS CB selections carry
+# execution_payment > 0 and no selected slot mismatches or lacks either side.
+assert_trusted_payment() { # $1,$2 = observed window
+  log "assert trusted-payment: the BN selects CB's execution-payment bid and values it as CB ranks it"
+  cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/cb.log"
+  bn_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/bn.log"
+  local report rc=0
+  report="$(python3 - "$RUN_DIR/cb.log" "$RUN_DIR/bn.log" "$1" "$2" "$CB_ENTRY_URL" \
+      "$TRUSTED_PAYMENT_CAP_GWEI" "$MIN_BUILDER_SLOTS" <<'PY'
+import re,sys
+from decimal import Decimal
+cb_log,bn_log=sys.argv[1],sys.argv[2]
+s0,s1,cb_url,cap,need=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5],int(sys.argv[6]),int(sys.argv[7])
+def gwei(eth): return int(Decimal(eth)*10**9)
+cb={}      # slot -> (value, execution_payment) of CB's auction winner, gwei
+for line in open(cb_log,errors="replace"):
+    if "auction winner" not in line or 'relay_id="buildoor-mux"' not in line: continue
+    slot=re.search(r"\bslot=(\d+)",line)
+    v=re.search(r'trustless_bid_eth="([0-9.]+)"',line)
+    ep=re.search(r'execution_payment_eth="([0-9.]+)"',line)
+    if slot and v and ep: cb[int(slot.group(1))]=(gwei(v.group(1)),gwei(ep.group(1)))
+ranked,selected={},{}
+source=re.compile(r"bidSource="+re.escape(cb_url)+r"(?=[,\s]|$)")
+for line in open(bn_log,errors="replace"):
+    m=re.search(r"\bslot=(\d+)",line)
+    if not m or not s0<=int(m.group(1))<=s1: continue
+    slot=int(m.group(1))
+    if "Ranked builder bid candidates" in line:
+        t=re.search(re.escape(cb_url)+r":total=(\d+)",line)
+        if t: ranked[slot]=int(t.group(1))
+    elif "Selected builder block" in line and source.search(line):
+        v=re.search(r"\bbidValue=(\d+)",line)
+        ep=re.search(r"\bbidExecutionPayment=(\d+)",line)
+        if v and ep: selected[slot]=(int(v.group(1)),int(ep.group(1)))
+with_ep=[s for s in selected if selected[s][1]>0]
+problems,agree=[],[]
+for slot in sorted(selected):
+    if slot not in cb:
+        problems.append("slot {0}: the BN selected CB's bid but CB logged no auction winner".format(slot)); continue
+    if cb[slot]!=selected[slot]:
+        problems.append("slot {0}: CB's winner value/execution_payment {1} != the BN's selected {2}".format(slot,cb[slot],selected[slot])); continue
+    rank=cb[slot][0]+min(cb[slot][1],cap)
+    if slot not in ranked:
+        problems.append("slot {0}: no 'Ranked builder bid candidates' total for {1}".format(slot,cb_url)); continue
+    if ranked[slot]!=rank:
+        problems.append("slot {0}: CB capped ranking {1} != BN valuation {2}".format(slot,rank,ranked[slot])); continue
+    agree.append(slot)
+print("  BN selected CB's bid in [{0},{1}]:           {2} slots".format(s0,s1,len(selected)))
+print("    with execution_payment > 0:               {0} (need >= {1})".format(len(with_ep),need))
+print("  CB capped ranking == BN valuation:          {0} of {1}".format(len(agree),len(selected)))
+if agree:
+    s=agree[0]; v,ep=cb[s]
+    print("    e.g. slot {0}: CB value={1} execution_payment={2} cap={3} -> ranking {4}; BN total={5}".format(
+        s,v,ep,cap,v+min(ep,cap),ranked[s]))
+for p in problems[:8]: print("    "+p)
+ok=len(with_ep)>=need and not problems
+print("the BN selected CB's execution-payment bid in {0} slots; CB's capped ranking equals the BN's valuation in {1} of {2}".format(
+    len(with_ep),len(agree),len(selected)))
+sys.exit(0 if ok else 1)
+PY
+)" || rc=$?
+  sed '$d' <<<"$report"
+  (( rc == 0 )) || die "trusted-payment: $(tail -1 <<<"$report")"
+  printf '\033[1;32mPASS: %s\033[0m\n' "$(tail -1 <<<"$report")"
+}
+
 # ---- cleanup ----------------------------------------------------------------
 cleanup() {
   local rc=$?
@@ -573,6 +811,18 @@ echo "CB join: $CB_LAUNCH"
 echo "assert:  ${ASSERT_MODE:-default (builder-built)}"
 echo "enclave: $ENCLAVE   observe: ${OBSERVE_SLOTS} slots   pass>=${MIN_BUILDER_SLOTS}"
 
+# trusted-payment: the control needs a VC WITHOUT --allowDangerousTrustedPayments,
+# and the flag is fixed for the VC's lifetime, so the control is its own devnet:
+# a run of this script in the control phase (it stops after cb-km apply, ~1-2
+# min, and removes its enclave) before this run launches with the flag.
+if [[ "$ASSERT_MODE" == "trusted-payment" && -z "$TRUSTED_PAYMENT_PHASE" && "$TRUSTED_PAYMENT_CONTROL" == "1" ]]; then
+  log "trusted-payment control phase (own devnet, VC without --allowDangerousTrustedPayments)"
+  TRUSTED_PAYMENT_PHASE=control KEEP=0 CB_IMAGE="$CB_IMAGE" CB_KM_BIN="$CB_KM_BIN" \
+    bash "$REPO_ROOT/scripts/run-epbs-sim.sh" --assert trusted-payment \
+    || die "trusted-payment control phase failed (its output is above)"
+  log "trusted-payment control phase passed; launching the devnet with the flag"
+fi
+
 # PRESET override: render a copy of the args file with network_params.preset
 # swapped, and launch from that. Leaves the committed args file untouched, so the
 # preset is a pure runtime knob (minimal = fast default; mainnet = block-submission).
@@ -594,6 +844,40 @@ if [[ -n "$CL_IMAGE" ]]; then
     || die "CL_IMAGE render failed: no 'cl_image:' line to override in $ARGS_FILE"
   ARGS_FILE="$RENDERED_ARGS"
   echo "cl/vc:   $CL_IMAGE (rendered -> $ARGS_FILE)"
+fi
+
+# trusted-payment: lodestar's VC refuses a builder_config entry whose
+# max_execution_payment is above 0 unless started with
+# --allowDangerousTrustedPayments. Render a copy of the args file with the flag
+# added to the first vc_extra_params list (participant 1 = the VC cb-km
+# targets). The control phase launches without it, and checks it is absent.
+if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
+  tp_flag=add; [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]] && tp_flag=absent
+  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+  python3 - "$ARGS_FILE" "$RENDERED_ARGS" "$tp_flag" <<'PY' || die "trusted-payment: cannot use $ARGS_FILE (see above)"
+import re,sys
+src,dst,want=sys.argv[1],sys.argv[2],sys.argv[3]
+flag="--allowDangerousTrustedPayments"
+lines=open(src).read().splitlines(keepends=True)
+cl=next((m.group(1) for m in (re.match(r"\s*(?:-\s+)?cl_type:\s*(\S+)",l) for l in lines) if m),None)
+if cl!="lodestar":
+    sys.exit("participant 1 runs cl_type {0!r}; {1} is a lodestar VC flag".format(cl,flag))
+if any(flag in l for l in lines):
+    if want=="absent": sys.exit("the args file already passes {0}; the control needs a VC without it".format(flag))
+elif want=="add":
+    i=next((i for i,l in enumerate(lines) if re.match(r"\s*vc_extra_params:\s*$",l)),None)
+    item=re.match(r"(\s*)-\s",lines[i+1]) if i is not None and i+1<len(lines) else None
+    if not item: sys.exit("no vc_extra_params list to add {0} to".format(flag))
+    lines.insert(i+1,item.group(1)+"- "+flag+"\n")
+open(dst,"w").write("".join(lines))
+PY
+  ARGS_FILE="$RENDERED_ARGS"
+  if [[ "$tp_flag" == add ]]; then
+    grep -q -- '- --allowDangerousTrustedPayments$' "$ARGS_FILE" || die "trusted-payment: flag render failed"
+    echo "vc flag: --allowDangerousTrustedPayments (rendered -> $ARGS_FILE)"
+  else
+    echo "vc flag: none (control phase)"
+  fi
 fi
 
 # clean any stale run (docker-path container is a separate object; the enclave rm
@@ -677,6 +961,27 @@ if [[ "$ASSERT_MODE" == "block-submission" ]]; then
   echo "block-submission: strict_block_decode = true"
 fi
 
+# ladder mode: timing games on both buildoor relay entries (the mux entry is the
+# one the 64 keys route to), so CB polls buildoor every LADDER_FREQ_MS until the
+# proposer's deadline and holds the latest valid bid.
+if [[ "$ASSERT_MODE" == "ladder" ]]; then
+  sed -i -E 's|^id = "buildoor(-mux)?"$|&\nenable_timing_games = true\nfrequency_get_header_ms = '"$LADDER_FREQ_MS"'|' "$RUN_DIR/cb-config.toml"
+  [[ "$(grep -c "^frequency_get_header_ms = $LADDER_FREQ_MS\$" "$RUN_DIR/cb-config.toml")" == 2 ]] \
+    || die "ladder: failed to enable timing games on both buildoor relay entries in cb-config.toml"
+  echo "ladder: enable_timing_games = true, frequency_get_header_ms = $LADDER_FREQ_MS on both relay entries"
+fi
+
+# trusted-payment mode: the [pbs] cap is the only max_execution_payment_gwei in
+# the file, so it is the effective cap for both relay entries; cb-km projects it
+# onto every builder_config entry and CB ranks bids with it.
+if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
+  sed -i "s|^skip_sigverify = .*$|&\nmax_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI|" "$RUN_DIR/cb-config.toml"
+  [[ "$(grep -c '^max_execution_payment_gwei = ' "$RUN_DIR/cb-config.toml")" == 1 ]] \
+    && grep -q "^max_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI\$" "$RUN_DIR/cb-config.toml" \
+    || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
+  echo "trusted-payment: [pbs] max_execution_payment_gwei = $TRUSTED_PAYMENT_CAP_GWEI (no relay-level cap)"
+fi
+
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
   log "adding commit-boost PBS as a first-class enclave service ($CB_NAME)"
@@ -719,9 +1024,17 @@ echo "CB config: no unknown keys"
 # ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
 # top-level key: it must precede the [[vcs]] table or TOML scopes it to that table
 [[ "$ASSERT_MODE" == "direct" ]] && sed -i '1i direct_entries = true' "$RUN_DIR/km-overlay.toml"
+if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
+  assert_trusted_payment_refused
+  exit 0
+fi
 log "cb-km apply (point 64 validators' builder_config at CB)"
 "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
 echo "apply OK"
+# checked before the activation wait: a missing cap fails here, minutes earlier
+if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
+  assert_cap_projected
+fi
 
 # preserve mode is a pure keymanager-API check: it needs the applied docs but not
 # the builder loop, so run it now and finish (skip activation wait + observe).
@@ -846,6 +1159,8 @@ if (( n_built >= MIN_BUILDER_SLOTS && auction_wins >= 1 && bid_calls >= 1 && p2p
   # assert zero AuthSigVerify. block-submission: also assert the reveal endpoint fired.
   [[ "$ASSERT_MODE" == "request-auth" ]]     && { assert_request_auth "$n_built"; }
   [[ "$ASSERT_MODE" == "block-submission" ]] && { assert_block_submission; }
+  [[ "$ASSERT_MODE" == "ladder" ]]           && { assert_ladder; }
+  [[ "$ASSERT_MODE" == "trusted-payment" ]]  && { assert_trusted_payment "$start_slot" "$end_slot"; }
   exit 0
 else
   cb_logs | tail -30
