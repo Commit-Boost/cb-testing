@@ -71,8 +71,9 @@
 #                      "TG: no headers received").
 #   --assert trusted-payment  set [pbs] max_execution_payment_gwei (the relays
 #                      carry none, so it is the effective cap) and start the
-#                      lodestar VC with --allowDangerousTrustedPayments. buildoor
-#                      then pays through execution_payment. HARD-fails unless
+#                      lodestar VC with --allowDangerousTrustedPayments, and tell
+#                      buildoor to claim half of each bid as execution_payment
+#                      (--builder-api-execution-payment-percent). HARD-fails unless
 #                      cb-km stored the cap on every builder_config entry of every
 #                      key, the BN selects CB's execution-payment bid in >=
 #                      MIN_BUILDER_SLOTS slots, and for each of them the BN's
@@ -869,11 +870,20 @@ elif want=="add":
     item=re.match(r"(\s*)-\s",lines[i+1]) if i is not None and i+1<len(lines) else None
     if not item: sys.exit("no vc_extra_params list to add {0} to".format(flag))
     lines.insert(i+1,item.group(1)+"- "+flag+"\n")
+    # buildoor pays everything through value unless told to claim part of the
+    # bid as execution_payment
+    pay="--builder-api-execution-payment-percent=50"
+    b=next((i for i,l in enumerate(lines) if re.match(r"buildoor_params:\s*$",l)),None)
+    e=next((i for i in range(b+1,len(lines)) if re.match(r"\s+extra_args:\s*$",lines[i])),None) if b is not None else None
+    item=re.match(r"(\s*)-\s",lines[e+1]) if e is not None and e+1<len(lines) else None
+    if not item: sys.exit("no buildoor_params.extra_args list to add {0} to".format(pay))
+    lines.insert(e+1,item.group(1)+"- "+pay+"\n")
 open(dst,"w").write("".join(lines))
 PY
   ARGS_FILE="$RENDERED_ARGS"
   if [[ "$tp_flag" == add ]]; then
     grep -q -- '- --allowDangerousTrustedPayments$' "$ARGS_FILE" || die "trusted-payment: flag render failed"
+    grep -q -- '- --builder-api-execution-payment-percent=50$' "$ARGS_FILE" || die "trusted-payment: buildoor flag render failed"
     echo "vc flag: --allowDangerousTrustedPayments (rendered -> $ARGS_FILE)"
   else
     echo "vc flag: none (control phase)"
