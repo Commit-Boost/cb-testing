@@ -3,12 +3,13 @@
 # a stub simulator + Commit-Boost (get_header = "stream" on the Helix entries) + the
 # synthetic gloas bid injector. Leaves the enclave running; down.sh removes it.
 #
-#   up.sh [all|launch|services|inject|relay]
+#   up.sh [all|launch|services|inject|relay|cb]
 #
 #   launch    kurtosis run ethereum-package with the rendered devnet args
 #   services  stub simulator, helix-relay, commit-boost, then cb-km apply
 #   inject    gloas_inject (INJECT_ARGS overrides its schedule)
 #   relay     replace helix-relay with $HELIX_IMAGE, keeping its config (e.g. to A/B a fix)
+#   cb        replace cb-epbs with $CB_IMAGE, keeping its config, and re-run $CB_KM_BIN apply
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -24,7 +25,7 @@ CB_KM_BIN="${CB_KM_BIN:-$(command -v cb-km || true)}"
 KEYS="$HARNESS/keys"
 stage="${1:-all}"
 
-case $stage in all|launch|services|inject|relay) ;; *) die "unknown stage '$stage'" ;; esac
+case $stage in all|launch|services|inject|relay|cb) ;; *) die "unknown stage '$stage'" ;; esac
 
 if [[ $stage == all || $stage == launch ]]; then
   log "render devnet args ($DEVNET_ARGS: preset mainnet, ${SECONDS_PER_SLOT}s slots)"
@@ -56,6 +57,21 @@ add_relay() {
     --env "RELAY_KEY=$(cat "$KEYS/relay.sk"),ADMIN_TOKEN=epbs-stream,POSTGRES_PASSWORD=unused,RUST_LOG=info" \
     --ports "api=http:4040,metrics=http:9500" >/dev/null
   echo "helix-relay: $HELIX_IMAGE"
+}
+
+add_cb() {
+  kurtosis service add "$ENCLAVE" cb-epbs "$CB_IMAGE" --files "/cb:cb-cfg" \
+    --env "CB_CONFIG=/cb/cb-config.toml,CB_METRICS_PORT=10000" \
+    --ports "pbs=http:18550,metrics=http:10000" --cmd pbs >/dev/null
+  echo "cb-epbs: $CB_IMAGE"
+  sleep 4
+  kurtosis service logs "$ENCLAVE" cb-epbs 2>&1 | strip_ansi | tail -5 | cut -c1-200
+}
+
+km_apply() {
+  log "cb-km apply (VC builder_config -> cb-epbs) with $CB_KM_BIN"
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/cb-km-apply.log" 2>&1
+  echo "cb-km: $(grep -c '^accepted' "$RUN_DIR/cb-km-apply.log") keys accepted"
 }
 
 if [[ $stage == all || $stage == services ]]; then
@@ -108,15 +124,17 @@ EOF
 
   log "commit-boost"
   kurtosis files upload "$ENCLAVE" "$RUN_DIR/cb" --name cb-cfg >/dev/null
-  kurtosis service add "$ENCLAVE" cb-epbs "$CB_IMAGE" --files "/cb:cb-cfg" \
-    --env "CB_CONFIG=/cb/cb-config.toml,CB_METRICS_PORT=10000" \
-    --ports "pbs=http:18550,metrics=http:10000" --cmd pbs >/dev/null
-  sleep 4
-  kurtosis service logs "$ENCLAVE" cb-epbs 2>&1 | strip_ansi | tail -5 | cut -c1-200
+  add_cb
+  km_apply
+fi
 
-  log "cb-km apply (VC builder_config -> cb-epbs)"
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/cb-km-apply.log" 2>&1
-  echo "cb-km: $(grep -c '^accepted' "$RUN_DIR/cb-km-apply.log") keys accepted"
+if [[ $stage == cb ]]; then
+  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km-tool --release in the CB checkout)"
+  docker image inspect "$CB_IMAGE" >/dev/null || die "missing image CB_IMAGE=$CB_IMAGE"
+  log "replace cb-epbs"
+  kurtosis service rm "$ENCLAVE" cb-epbs >/dev/null
+  add_cb
+  km_apply
 fi
 
 if [[ $stage == relay ]]; then

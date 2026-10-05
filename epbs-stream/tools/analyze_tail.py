@@ -8,8 +8,15 @@ winner and its transport), and what the capture in CB's namespace shows (binary 
 that reached CB before CB's FIN, frames that arrived after it, per-frame one-way delay
 from Helix's `streamed bid` log line to the frame's arrival at CB).
 
+The X-Timeout-Ms and Date-Milliseconds CB put on the wire come from cb-helix-upgrades.tsv
+when the run wrote one; CB's own budget (`max_timeout_ms`) is shown beside it, since a CB
+that subtracts a downlink trip sends less than its budget. With symmetric delay (ips.txt
+`uplink=1`) CB's FIN reaches the capture D after CB sent it, so `wire<FIN` overcounts;
+`wire<end` counts frames that arrived before CB's own end-of-read log line instead.
+
 Usage: analyze_tail.py <out-dir>
 """
+import json
 import re
 import statistics
 import sys
@@ -48,7 +55,8 @@ def helix_streams(path):
     """Gloas bid streams, in log order. `streamed bid` / `bid stream closed` carry no slot,
     so each attaches to the most recent accept."""
     accept_re = re.compile(
-        r"accepting execution payload bid stream ms_into_slot=(\d+) .*?timeout_ms=(\d+) handshake_ms=(\d+) "
+        # Helix 2a8f7d5e logs "accepting execution payload bid stream", 7d3fc659 "accepting bid stream"
+        r"accepting (?:execution payload )?bid stream ms_into_slot=(\d+) .*?timeout_ms=(\d+) handshake_ms=(\d+) "
         r".*?start_in_ms=(\d+) window_ms=(\d+) .*?slot=(\d+)")
     sent_re = re.compile(r"execution_payload_bid_stream: streamed bid block_hash=(0x[0-9a-f]+) execution_payment=(\d+)")
     closed_re = re.compile(r"execution_payload_bid_stream: bid stream closed delivered=(\d+) hit_deadline=(\w+)")
@@ -109,6 +117,25 @@ def cb_requests(path):
     return by_slot
 
 
+def upgrades(path):
+    """Per slot: the X-Timeout-Ms and Date-Milliseconds of the stream upgrade CB sent."""
+    out = {}
+    if not path.exists():
+        return out
+    for row in path.read_text().splitlines():
+        f = (row.split("\t") + [""] * 4)[:4]
+        m = re.search(r"execution_payload_bid_stream/(\d+)/", f[2])
+        if not m:
+            continue
+        hdrs = {}
+        for line in f[3].split("|"):
+            k, _, v = line.replace("\\r\\n", "").partition(":")
+            hdrs[k.strip().lower()] = v.strip()
+        out[int(m.group(1))] = {"xto": int(hdrs["x-timeout-ms"]) if "x-timeout-ms" in hdrs else None,
+                                "date_ms": int(hdrs["date-milliseconds"]) if "date-milliseconds" in hdrs else None}
+    return out
+
+
 def capture(path):
     """Per websocket connection: slot, relay->CB binary-frame arrivals, close, CB FIN, RSTs."""
     conns = defaultdict(lambda: {"slot": None, "frames": [], "close": None, "cb_fin": None, "rst": set(),
@@ -146,6 +173,12 @@ def main():
     hx = helix_streams(d / "helix-relay.log")
     cb = cb_requests(d / "cb-epbs.log")
     cap = capture(d / "cb-helix.tsv")
+    up = upgrades(d / "cb-helix-upgrades.tsv")
+    ips = (d / "ips.txt").read_text() if (d / "ips.txt").exists() else ""
+    uplink = "uplink=1" in ips
+    genesis = int(json.loads((d / "genesis.json").read_text())["data"]["genesis_time"])
+    sps = int(json.loads((d / "spec.json").read_text())["data"]["SECONDS_PER_SLOT"])
+    print(f"# delay: {'SYMMETRIC (D each way, connect RTT 2D)' if uplink else 'downlink only (relay -> CB)'}")
 
     rows = []
     for slot in sorted(delays):
@@ -154,12 +187,21 @@ def main():
             rows.append({"slot": slot, "D": delays[slot], "missing": "helix" if not h else "cb"})
             continue
         fin = p["cb_fin"] if p else None
+        w = up.get(slot, {})
+        end = c["t_stream_end"]
+        slot_ms = lambda t: None if t is None else t * 1000 - (genesis + slot * sps) * 1000
         on_wire = len(p["frames"]) if p else None
         before_fin = sum(1 for t in p["frames"] if fin is None or t < fin) if p else None
         owd = [(a - s[0]) * 1000 for a, s in zip(p["frames"], h["sent"])] if p else []
         rows.append({
             "slot": slot, "D": delays[slot],
-            "x_timeout": c["x_timeout_ms"], "hx_timeout": h["timeout_ms"], "handshake": h["handshake_ms"],
+            "x_timeout": c["x_timeout_ms"], "xto_wire": w.get("xto"), "hx_timeout": h["timeout_ms"],
+            "handshake": h["handshake_ms"],
+            # Helix's window end (Date-Milliseconds + X-Timeout-Ms) and CB's end of read, ms into the slot
+            "hx_end_ms": (None if w.get("xto") is None or w.get("date_ms") is None else
+                          slot_ms((w["date_ms"] + w["xto"]) / 1000)),
+            "cb_end_ms": slot_ms(end),
+            "before_end": sum(1 for t in p["frames"] if end is not None and t < end) if p else None,
             "start_in": h["start_in_ms"], "window": h["window_ms"], "ms_into_slot": h["ms_into_slot"],
             "sent": h["delivered"], "sent_logged": len(h["sent"]), "hit_deadline": h["hit_deadline"],
             "last_sent": h["sent"][-1][2] if h["sent"] else None,
@@ -179,15 +221,18 @@ def main():
                                     (h["t_closed"] - c["t_stream_end"]) * 1000),
         })
 
-    hdr = ("D_ms slot X-Timeout hx_timeout handshake start_in window | sent recv wire<FIN wire | "
-           "last_sent cb_stream http served winner status | owd_med owd_max close-FIN_ms rst | pred_recv hxEnd-cbEnd_ms")
+    hdr = ("D_ms slot cb_budget xto_wire hx_timeout handshake start_in window hxEnd@ms cbEnd@ms | sent recv "
+           "wire<end wire<FIN wire | last_sent cb_stream http served winner status | owd_med owd_max close-FIN_ms "
+           "rst | pred_recv hxEnd-cbEnd_ms")
     print(hdr)
     for r in rows:
         if "missing" in r:
             print(f"{r['D']:>4} {r['slot']:>4}  (no {r['missing']} record)")
             continue
-        print(f"{r['D']:>4} {r['slot']:>4} {r['x_timeout']:>9} {r['hx_timeout']:>10} {r['handshake']:>9} "
-              f"{r['start_in']:>8} {r['window']:>6} | {r['sent']:>4} {r['recv']!s:>4} {r['before_fin']!s:>8} "
+        print(f"{r['D']:>4} {r['slot']:>4} {r['x_timeout']:>9} {r['xto_wire']!s:>8} {r['hx_timeout']:>10} "
+              f"{r['handshake']:>9} {r['start_in']:>8} {r['window']:>6} {fmt(r['hx_end_ms'], '.0f'):>8} "
+              f"{fmt(r['cb_end_ms'], '.0f'):>8} | {r['sent']:>4} {r['recv']!s:>4} {r['before_end']!s:>8} "
+              f"{r['before_fin']!s:>8} "
               f"{r['on_wire']!s:>4} | {fmt(r['last_sent']):>9} {fmt(r['stream_bid']):>9} {fmt(r['http_bid']):>4} "
               f"{fmt(r['served']):>6} {r['winner']!s:>6} {r['status']:>6} | {fmt(r['owd_med'], '.1f'):>7} "
               f"{fmt(r['owd_max'], '.1f'):>7} {fmt(r['close_vs_fin'], '.1f'):>12} {r['rst']:>3} | {r['pred_recv']!s:>9} "
@@ -195,7 +240,8 @@ def main():
 
     print("\nper delay (control = the final D=0 stretch):")
     print("D_ms   slots  sent(mean) recv(mean) recv/sent  served==last_sent  stream_won  http_won  "
-          "stream_status  owd_med(ms)  handshake(mean)  start_in(mean)  recv==pred  hxEnd-cbEnd(median ms)")
+          "stream_status  owd_med(ms)  handshake(mean)  start_in(mean)  recv==pred  hxEnd-cbEnd(median ms)  "
+          "xto_wire(mean)  cb_budget(mean)  served(mean)")
     groups = defaultdict(list)
     seen_ranges = [tuple(int(x) for x in row.split("\t")) for row in (d / "delays.tsv").read_text().split("\n") if row.strip()]
     for i, (delay, first, last) in enumerate(seen_ranges):
@@ -217,7 +263,9 @@ def main():
               f"{same:>10}/{len(rs):<6} {sw:>10} {hw:>9}  {dict(st)!s:<14} "
               f"{fmt(statistics.median(owds) if owds else None, '.1f'):>10} {mean('handshake'):>15.1f} {mean('start_in'):>15.1f} "
               f"{sum(1 for r in rs if r['recv'] == r['pred_recv']):>8}/{len(rs):<3} "
-              f"{fmt(statistics.median(r['hx_end_minus_cb_end'] for r in rs if r['hx_end_minus_cb_end'] is not None), '.2f'):>10}")
+              f"{fmt(statistics.median(r['hx_end_minus_cb_end'] for r in rs if r['hx_end_minus_cb_end'] is not None), '.2f'):>10} "
+              f"{fmt(statistics.mean(r['xto_wire'] for r in rs if r['xto_wire'] is not None) if any(r['xto_wire'] is not None for r in rs) else None, '.1f'):>15} "
+              f"{mean('x_timeout'):>15.1f} {fmt(statistics.mean(r['served'] for r in rs if r['served'] is not None) if any(r['served'] is not None for r in rs) else None, '.3f'):>12}")
 
 
 if __name__ == "__main__":

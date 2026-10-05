@@ -64,9 +64,10 @@ laid over the same tree so that both use one set of types. It works in a shared 
 `epbs-stream.inject-commit` labels, and the relay's `info` metric reports the commit it was
 built from.
 
-`up.sh` runs in stages: `launch`, `services`, `inject` and `relay`. `relay` swaps
+`up.sh` runs in stages: `launch`, `services`, `inject`, `relay` and `cb`. `relay` swaps
 `helix-relay` for `$HELIX_IMAGE` and keeps its config, for an A/B test of a Helix change on
-the same devnet. To start or stop the bids by hand, run
+the same devnet. `cb` does the same for `cb-epbs` with `$CB_IMAGE`, then re-runs `cb-km apply`
+with `$CB_KM_BIN`, for an A/B test of a CB change. To start or stop the bids by hand, run
 `kurtosis service stop|start epbs-stream helix-inject`.
 
 `negative.sh` sends hand-made websocket upgrades with a bad `X-Request-Auth` (missing, not
@@ -131,8 +132,10 @@ Each scenario writes `run/scenario-<utc>/`. It holds the service logs, `cb-metri
 
 - `stream_tail.sh`: adds relay->CB delay (tc netem in a sidecar on helix-relay's egress toward CB
   only), steps it through `DELAYS`, holds each for `SLOTS_PER` slots, verifies each step with ping and
-  a one-way UDP probe (`owd.py`), and captures the CB<->relay traffic. `analyze_tail.py <out-dir>`
-  prints frames sent vs received, last-sent vs served bid, and the winning transport per delay.
+  a one-way UDP probe (`owd.py`), and captures the CB<->relay traffic. `UPLINK=1` adds the same delay
+  on CB's egress toward the relay, so the delay is symmetric and CB's TCP connect RTT is 2D.
+  `analyze_tail.py <out-dir>` prints frames sent vs received, last-sent vs served bid, the winning
+  transport, and the X-Timeout-Ms CB put on the wire next to Helix's window, per slot and per delay.
   Run it against an enclave from `up.sh` with the injector posting rising bids.
 - `verify_bids.py`: pulls every SignedExecutionPayloadBid Helix served from the capture and verifies
   its BLS signature against the relay key under the builder domain. CB's ePBS validation does not
