@@ -16,6 +16,7 @@ RESUME_SLOTS="${RESUME_SLOTS:-4}"
 EDGE_MS="${EDGE_MS:-3000}"
 OUT="${OUT:-$RUN_DIR/scenario-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"  # docker -v needs an absolute path for the tshark export
 CB_METRICS="$(port_url cb-epbs metrics)/metrics"
 
 snapshot() {
