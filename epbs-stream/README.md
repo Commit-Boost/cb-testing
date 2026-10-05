@@ -126,3 +126,14 @@ cb-epbs's network namespace. `analyze.py` prints a per-slot table and these verd
 Each scenario writes `run/scenario-<utc>/`. It holds the service logs, `cb-metrics-*.txt`,
 `cb-helix.pcap` with its tshark export `cb-helix.tsv`, `negative.out`, `images.txt` and
 `summary.txt`.
+
+## Extra tools (`tools/`)
+
+- `stream_tail.sh`: adds relay->CB delay (tc netem in a sidecar on helix-relay's egress toward CB
+  only), steps it through `DELAYS`, holds each for `SLOTS_PER` slots, verifies each step with ping and
+  a one-way UDP probe (`owd.py`), and captures the CB<->relay traffic. `analyze_tail.py <out-dir>`
+  prints frames sent vs received, last-sent vs served bid, and the winning transport per delay.
+  Run it against an enclave from `up.sh` with the injector posting rising bids.
+- `verify_bids.py`: pulls every SignedExecutionPayloadBid Helix served from the capture and verifies
+  its BLS signature against the relay key under the builder domain. CB's ePBS validation does not
+  check bid signatures, so a green CB log says nothing about signing.
