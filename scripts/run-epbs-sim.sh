@@ -387,7 +387,7 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   # 3) CB bid endpoint: 204 "no header available", never a 500, in the post-stop log
   local CB_TAIL; CB_TAIL="$(cb_logs | tail -n +$(( cb_watermark + 1 )))"
   local cb_204 cb_500
-  cb_204=$(grep -c 'no header available for slot' <<<"$CB_TAIL" || true)
+  cb_204=$(grep -cE 'no header available for slot|no bid for slot' <<<"$CB_TAIL" || true)
   cb_500=$(grep 'get_execution_payload_bid failed' <<<"$CB_TAIL" | grep -c -E 'Internal|internal server error' || true)
   echo "  CB 204 'no header available' after stop:   $cb_204"
   echo "  CB 500 (Internal) after stop:              $cb_500"
