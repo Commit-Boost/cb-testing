@@ -996,7 +996,7 @@ NET="kt-${ENCLAVE}"
 # Discover the CL/VC service names (client-agnostic: cl-1-<cl>-<el>, vc-1-<el>-<cl>),
 # so the loop works for lodestar, prysm, etc. without hardcoding the client.
 BN_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'cl-1-[a-z0-9-]+' | head -1)"
-VC_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'vc-1-[a-z0-9-]+' | head -1)"
+VC_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'vc-1-[a-z0-9-]+' | head -1 || true)"
 # A validator inside the beacon process (grandine: ethereum-package launches no
 # separate grandine VC) serves the keymanager API on the CL service itself.
 [[ -n "$VC_SVC" ]] || VC_SVC="$BN_SVC"
