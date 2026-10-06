@@ -586,16 +586,18 @@ cb_commit() {
     || die "CB_COMMIT=$CB_COMMIT is not a commit in $CB_SUB (fetch it: git -C commit-boost-client fetch <repo> <branch>)"
 }
 
-# The first bash block under the page's "Validator builder config" heading, with
+# The first bash block under the page's builder config heading (anchor
+# validator-builder-config; titled "Validator builder config" before PR 1's docs
+# rewrite and "Point each validator key at Commit-Boost" after it), with
 # the sim's CB URL and buildoor's auth data in place of the example values. Fails
 # when the page lacks the call or the example values, so a docs change cannot
 # quietly turn the check into a call the page does not show.
 docs_builder_config_call() { # $1=commit
   local page call host auth
   page="$(git -C "$CB_SUB" show "$1:$DOCS_PAGE")" || die "no $DOCS_PAGE at $1"
-  call="$(awk '/^#+ /{s=($0 ~ /^### Validator builder config$/)} s && /^```bash$/{f=1; next} f && /^```$/{exit} f' <<<"$page")"
+  call="$(awk '/^#+ /{s=($0 ~ /validator-builder-config|Validator builder config|Point each validator key at Commit-Boost/)} s && /^```bash$/{f=1; next} f && /^```$/{exit} f' <<<"$page")"
   [[ "$call" == curl* && "$call" == *"/builder_config"* ]] \
-    || die "$DOCS_PAGE at $1 has no curl call to builder_config under 'Validator builder config'"
+    || die "$DOCS_PAGE at $1 has no curl call to builder_config under its builder config heading"
   [[ "$call" == *"$DOCS_CB_URL"* && "$call" == *"$DOCS_AUTH_DATA"* ]] \
     || die "the page's call no longer uses the example url $DOCS_CB_URL and auth_data $DOCS_AUTH_DATA; update DOCS_CB_URL/DOCS_AUTH_DATA"
   # the page's rule: the hex of the relay URL's hostname
