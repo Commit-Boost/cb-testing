@@ -3,12 +3,7 @@ chain = { genesis_time_secs = __GENESIS_TIME__, slot_time_secs = __SLOT_SECS__, 
 [pbs]
 host = "0.0.0.0"
 port = 18550
-# The domain overrides below are correct, verified offline against an on-chain
-# bid. Bid signature verification is off for the ePBS sim on purpose.
 skip_sigverify = true
-# devnet bid signing-domain overrides (from BN /eth/v1/config/spec + /eth/v1/beacon/genesis)
-gloas_fork_version = "0x80000038"
-genesis_validators_root = "__GENESIS_VALIDATORS_ROOT__"
 # projection-only (KM tooling): key-level min_bid floors p2p bids above the
 # 0.101 ETH p2p bid; entries keep their explicit low min_bid so CB bids survive
 min_bid_p2p_eth = "0.2"
