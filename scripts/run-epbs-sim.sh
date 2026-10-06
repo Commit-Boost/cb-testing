@@ -1013,9 +1013,13 @@ fi
 log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 buildoor_live=0
 for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
-  # buildoor's bid reached CB (the per-header receipt is debug, which the
-  # template enables)
-  if cb_logs | grep 'received new header' | grep -qF 'relay_id="buildoor-mux"'; then buildoor_live=1; break; fi
+  # buildoor's bid reached CB: the debug per-relay receipt (CB with the bid
+  # stream), or the bid CB returns to the beacon node, which is the only receipt
+  # line before it. grep -c reads the whole log: grep -q exits on the first
+  # match, the log reader upstream dies of SIGPIPE, and pipefail fails the test.
+  if (( $(cb_logs | grep -cE 'received new header.*relay_id="buildoor|received header .*trustless_bid_eth' || true) > 0 )); then
+    buildoor_live=1; break
+  fi
   cur=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0)
   printf '  head=%s waiting for first buildoor bid via CB...\r' "$cur"
   sleep 6
