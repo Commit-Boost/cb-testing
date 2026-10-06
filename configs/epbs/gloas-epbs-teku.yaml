@@ -24,6 +24,11 @@ participants:
     vc_image: ethpandaops/teku:glamsterdam-devnet-8-c190221
     cl_log_level: debug
     vc_log_level: debug
+    # A lone node has no peers to sync from: teku stays in "syncing" ("No connected
+    # peers ... Remaining in syncing state until a peer connects") and never
+    # proposes. A target of 0 peers (teku --Xhelp) lets it treat itself as in sync.
+    cl_extra_params:
+      - --Xstartup-target-peer-count=0
     # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
     supernode: true
     keymanager_enabled: true
