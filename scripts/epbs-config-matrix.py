@@ -36,6 +36,9 @@ Subcommands:
       block's bid is one CB returned for that slot), builder-other (a builder's bid
       CB did not return: p2p or a direct builder), self, missed; write slots.json
       and table.txt, print the table
+  reclassify <out-dir> <groups.json> <cb.log>
+      recompute the outcomes and table of a finished run from its slots.json and
+      CB log, without the devnet
 """
 
 import json
@@ -45,6 +48,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
+from decimal import Decimal
 
 BUILDER_INDEX_SELF_BUILD = 2**64 - 1
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -252,35 +256,54 @@ def lines_by_slot(path, pattern):
     return by
 
 
+def eth_to_gwei(eth):
+    return int(Decimal(eth) * 10**9)
+
+
 def cb_evidence(path):
-    """CB's log: per slot, the bids it returned; per validator, the preferences the BN sent."""
-    bids = defaultdict(set)       # slot -> {full or abbreviated block_hash}
-    bid_vals = defaultdict(list)  # slot -> [(value_eth, payment_eth, hash)]
-    requests = Counter()          # validator -> bid requests
-    prefs = defaultdict(Counter)  # validator -> Counter(max_execution_payment)
+    """CB's log: per slot, the bids it returned to the beacon node as (value gwei,
+    execution_payment gwei, block_hash); per validator, its bid requests and the
+    max_execution_payment its beacon node advertised in builder preferences."""
+    bids = defaultdict(list)
+    requests = Counter()
+    prefs = defaultdict(Counter)
     for raw in open(path, errors="replace"):
         line = ANSI.sub("", raw)
         slot = re.search(r"\bslot=(\d+)", line)
         val = re.search(r"\bvalidator=(0x[0-9a-f]{96})", line)
         if "received header" in line or "received new header" in line:
-            h = re.search(r"block_hash=(0x[0-9a-fA-F]+(?:…[0-9a-fA-F]+)?)", line)
+            h = re.search(r"block_hash=(0x[0-9a-fA-F]+(?:\u2026[0-9a-fA-F]+)?)", line)
             v = re.search(r'trustless_bid_eth="([0-9.]+)"', line)
             p = re.search(r'execution_payment_eth="([0-9.]+)"', line)
-            if slot and h:
-                bids[int(slot.group(1))].add(h.group(1).lower())
-                if "received header" in line and v and p:
-                    bid_vals[int(slot.group(1))].append((v.group(1), p.group(1), h.group(1).lower()))
+            if slot and h and v and p:
+                bid = (eth_to_gwei(v.group(1)), eth_to_gwei(p.group(1)), h.group(1).lower())
+                if bid not in bids[int(slot.group(1))]:
+                    bids[int(slot.group(1))].append(bid)
         elif "new request" in line and val:
             if "execution_payload_bid" in line:
                 requests[val.group(1)] += 1
             elif "builder_preferences" in line:
                 m = re.search(r"\bmax_execution_payment=(\d+)", line)
                 prefs[val.group(1)][m.group(1) if m else "?"] += 1
-    return bids, bid_vals, requests, prefs
+    return bids, requests, prefs
 
 
 def abbrev(h):
-    return h[:6] + "…" + h[-4:]
+    return h[:6] + "\u2026" + h[-4:]
+
+
+def outcome(bid, cb_bids):
+    """self, via-cb or builder-other for a block's bid. via-cb needs the hash AND
+    the value and execution_payment of a bid CB returned for the slot: buildoor
+    bids the same payload over p2p at another value, so a hash alone also
+    matches its p2p bid."""
+    if int(bid["builder_index"]) == BUILDER_INDEX_SELF_BUILD:
+        return "self"
+    h, v, p = bid["block_hash"].lower(), int(bid["value"]), int(bid["execution_payment"])
+    for cv, cp, ch in cb_bids:
+        if ch in (h, abbrev(h)) and (cv, cp) == (v, p):
+            return "via-cb"
+    return "builder-other"
 
 
 def classify(argv):
@@ -297,7 +320,7 @@ def classify(argv):
                 duties[int(d["slot"])] = d["pubkey"]
         except Exception as e:
             duty_errors.append("epoch {0}: {1}".format(epoch, e))
-    cb_bids, cb_vals, cb_requests, cb_prefs = cb_evidence(cb_log)
+    cb_bids, cb_requests, cb_prefs = cb_evidence(cb_log)
     bn_lines = lines_by_slot(bn_log, BN_PATTERNS)
     vc_lines = lines_by_slot(vc_log, VC_PATTERNS)
     slots, errors = [], []
@@ -309,13 +332,7 @@ def classify(argv):
             pub = validators.get(int(msg["proposer_index"]))
             bid = msg["body"]["signed_execution_payload_bid"]["message"]
             row.update(proposer=pub, bid={k: bid.get(k) for k in ("builder_index", "value", "execution_payment", "block_hash")})
-            h = bid["block_hash"].lower()
-            if int(bid["builder_index"]) == BUILDER_INDEX_SELF_BUILD:
-                row["outcome"] = "self"
-            elif h in cb_bids.get(slot, ()) or abbrev(h) in cb_bids.get(slot, ()):
-                row["outcome"] = "via-cb"
-            else:
-                row["outcome"] = "builder-other"
+            row["outcome"] = outcome(bid, cb_bids.get(slot, []))
         except urllib.error.HTTPError as e:
             if e.code != 404:
                 errors.append("slot {0}: HTTP {1}".format(slot, e.code))
@@ -325,16 +342,27 @@ def classify(argv):
             errors.append("slot {0}: {1}: {2}".format(slot, type(e).__name__, e))
             continue
         row["group"] = group_of.get(row["proposer"], "?")
-        row["cb_bids"] = cb_vals.get(slot, [])
+        row["cb_bids"] = cb_bids.get(slot, [])
         row["bn_lines"] = bn_lines.get(slot, [])
         row["vc_lines"] = vc_lines.get(slot, [])
         slots.append(row)
 
+    header = "window {0}..{1}: {2} slots classified, {3} not classified".format(first, last, len(slots), len(errors))
+    short = report(slots, groups, cb_requests, cb_prefs, header, duty_errors + errors, out_dir)
+    return 0 if not errors and not short else 1
+
+
+def report(slots, groups, cb_requests, cb_prefs, header, notes, out_dir):
+    """Write table.txt, slots.json and evidence-per-group.txt; return the groups
+    with fewer than CM_MIN_PROPOSALS blocks."""
     outcomes = ["via-cb", "builder-other", "self", "missed"]
     table = defaultdict(Counter)
+    other = defaultdict(Counter)  # group -> value/execution_payment of the builder-other bids
     for row in slots:
         table[row["group"]][row["outcome"]] += 1
-    lines = ["window {0}..{1}: {2} slots classified, {3} not classified".format(first, last, len(slots), len(errors))]
+        if row["outcome"] == "builder-other":
+            other[row["group"]]["{0}/{1}".format(row["bid"]["value"], row["bid"]["execution_payment"])] += 1
+    lines = [header]
     hdr = "{0:<15} {1:>4} {2:>9} {3:>7} {4:>13} {5:>5} {6:>6}  {7:<26} {8}".format(
         "group", "keys", "proposals", "via-cb", "builder-other", "self", "missed", "spec expectation", "observed matches spec")
     lines += [hdr, "-" * len(hdr)]
@@ -349,6 +377,9 @@ def classify(argv):
         lines.append("{0:<15} {1:>4} {2:>9} {3:>7} {4:>13} {5:>5} {6:>6}  {7:<26} {8}".format(
             g["name"], len(g["keys"]), proposed, c["via-cb"], c["builder-other"], c["self"], c["missed"],
             " or ".join(g["expect"]) or "-", match))
+    if other:
+        lines.append("builder-other bids (value/execution_payment gwei): " + "; ".join(
+            "{0} {1}".format(g, dict(c)) for g, c in other.items()))
     lines.append("")
     lines.append("CB per group: bid requests from the BN, max_execution_payment the BN advertised (builder preferences)")
     for g in groups:
@@ -358,7 +389,7 @@ def classify(argv):
             prefs.update(cb_prefs.get(k, {}))
         lines.append("  {0:<15} requests={1:<5} preferences max_execution_payment={2}".format(
             g["name"], reqs, dict(prefs) or "none seen"))
-    for e in duty_errors + errors:
+    for e in notes:
         lines.append("  note: " + e)
     need = int(os.environ.get("CM_MIN_PROPOSALS", "0"))
     short = [g["name"] for g in groups
@@ -369,7 +400,7 @@ def classify(argv):
     print(out)
     open(out_dir + "/table.txt", "w").write(out + "\n")
     json.dump(slots, open(out_dir + "/slots.json", "w"), indent=1)
-    # one proposal per group with the client's own lines for that slot
+    # two proposals per group with the client's own lines for those slots
     ev = []
     for g in groups:
         rows = [r for r in slots if r["group"] == g["name"] and r["outcome"] != "missed"]
@@ -379,7 +410,22 @@ def classify(argv):
             ev += ["    BN: " + l for l in r["bn_lines"][:6]]
             ev += ["    VC: " + l for l in r["vc_lines"][:3]]
     open(out_dir + "/evidence-per-group.txt", "w").write("\n".join(ev) + "\n")
-    return 0 if not errors and not short else 1
+    return short
+
+
+def reclassify(out_dir, groups_path, cb_log):
+    """Recompute every outcome from a finished run's slots.json and CB log, without
+    the devnet: the blocks' bids are in slots.json."""
+    groups = json.load(open(groups_path))
+    slots = json.load(open(out_dir + "/slots.json"))
+    cb_bids, cb_requests, cb_prefs = cb_evidence(cb_log)
+    for row in slots:
+        row["cb_bids"] = cb_bids.get(row["slot"], [])
+        if row["outcome"] != "missed":
+            row["outcome"] = outcome(row["bid"], row["cb_bids"])
+    first, last = slots[0]["slot"], slots[-1]["slot"]
+    header = "window {0}..{1}: {2} slots classified (reclassified from slots.json)".format(first, last, len(slots))
+    return 1 if report(slots, groups, cb_requests, cb_prefs, header, [], out_dir) else 0
 
 
 def slots_per_epoch(bn, _cache={}):
@@ -398,6 +444,8 @@ def main():
         stored(*argv)
     elif cmd == "classify":
         sys.exit(classify(argv))
+    elif cmd == "reclassify":
+        sys.exit(reclassify(*argv))
     else:
         sys.exit("unknown subcommand " + cmd)
 
