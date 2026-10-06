@@ -261,6 +261,7 @@ epbs-sim:
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
 #   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.
 #   just epbs-sim-assert manual-config     no cb-km: builder config written with the CB docs' curl call.
+#   just epbs-sim-assert config-matrix     per-group builder config values: what the VC stores and applies.
 # Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
 # no timing games on the ePBS bid path).
 # Retired: direct (cb-km no longer writes direct builder entries; the BN falls back to p2p bids when CB is down).

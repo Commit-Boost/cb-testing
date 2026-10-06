@@ -162,7 +162,7 @@ commit-boost in the loop.)
 | var | default | meaning |
 |-----|---------|---------|
 | `ENCLAVE` | `epbs-sim` | kurtosis enclave name |
-| `OBSERVE_SLOTS` | `16` | slots to watch once buildoor is active |
+| `OBSERVE_SLOTS` | `16` (`64` for `config-matrix`) | slots to watch once buildoor is active |
 | `MIN_BUILDER_SLOTS` | `8` | PASS threshold (allows some missed slots) |
 | `BUILDOOR_ACTIVATION_TIMEOUT` | `1200` | seconds to wait for the builder deposit to activate (`2400` on the mainnet preset) |
 | `KEEP` | `0` | `1` leaves the enclave + `cb-epbs` running for inspection |
@@ -173,6 +173,12 @@ commit-boost in the loop.)
 | `EP_PACKAGE` | `github.com/ethpandaops/ethereum-package@<pinned sha>` | ethereum-package to launch; pinned to a commit so a rerun is the same devnet |
 | `BUILDOOR_RELAY_URL` | the devnet buildoor (pubkey@host:port) | relay CB bids into, substituted into both relay entries of the CB config |
 | `TRUSTED_PAYMENT_CONTROL` | `1` | `--assert trusted-payment`: `0` skips the control devnet (VC without the flag) |
+| `VC_EXTRA_PARAMS` | empty | extra params for participant 1's VC, space-separated, rendered into a copy of the args file (e.g. `--builder.selection=maxprofit`) |
+| `WAIT_BUILDOOR` | `1` | `0` observes without waiting for buildoor's first bid via CB, for a beacon node that never requests bids |
+| `OBSERVE_FROM_SLOT` | `0` | wait for this head slot before the observation window opens (e.g. past a gloas fork at epoch 1) |
+| `CM_OUT` | `configs/epbs/.run/config-matrix` | `--assert config-matrix`: where its evidence lands |
+| `CM_MIN_PROPOSALS` | `3` | `--assert config-matrix`: fewest blocks each group must propose for the observation to count |
+| `CM_BUILDOOR_ARGS` | a 0.4 ETH bid, half as `execution_payment`, ignoring the proposer's advertised cap | `--assert config-matrix`: buildoor's bid flags |
 
 ### Prerequisites (auto-provisioned)
 
@@ -313,6 +319,42 @@ feature into a live regression check:
   prints how many selections came via CB and via p2p.
   `CB_COMMIT=<sha> just epbs-sim-render manual-config <dir>` checks the keys and
   writes the call to `<dir>/builder-config-call.sh` without a devnet.
+- **`config-matrix`**: how a validator client stores and applies each builder
+  config value, measured, not asserted. The 64 keys split round robin into seven
+  `[[mux]]` groups (`scripts/epbs-config-matrix.py` defines them), each with its
+  own relay entry, and the `[pbs]` p2p projection keys are dropped so each group's
+  key level is its own:
+
+  | group | values | discriminates |
+  |---|---|---|
+  | `g-default` | none | the VC's defaults for every value cb-km leaves unset |
+  | `g-boost0` | `builder_boost_factor = 0` | boost 0 applied: the local block wins |
+  | `g-boost0-entry` | entry boost 0, `builder_boost_factor_p2p = 100` | whether the entry or the key-level boost governs CB's bid |
+  | `g-boost-high` | `builder_boost_factor = 1000` | a boost above 100 is accepted |
+  | `g-minbid-high` | `min_bid_eth = "1.0"` | `min_bid` above CB's bid |
+  | `g-unclamped` | `min_bid_eth = "0.3"`, relay cap `"unclamped"` | the execution payment counted: the bid clears the floor only with it |
+  | `g-cap0` | `min_bid_eth = "0.3"`, relay cap `0` | the same bid at value alone, below the floor |
+
+  buildoor bids 0.4 ETH, half as `execution_payment` whatever the proposer
+  advertised (`--builder-api-ignore-preference-limit`), so the beacon node's own cap
+  decides what counts; its p2p bid (about 0.101 ETH) is the other competitor and the
+  empty devnet's local block is worth about 0. After `cb-km apply` (a VC refusing a
+  group's values is recorded, not fatal) the run stores every key's GET doc next to
+  the doc cb-km wrote and prints, per group, the fields the VC filled in or changed.
+  It then classifies every slot of `OBSERVE_SLOTS` (default 64) by its proposer's
+  group: `via-cb` (the block's bid is one CB returned for that slot),
+  `builder-other` (a bid CB did not return: p2p or a direct builder), `self` or
+  `missed`, beside the outcome the keymanager spec implies. Per slot it keeps the
+  client's own bid-selection lines and, per group, CB's bid requests and the
+  `max_execution_payment` the beacon node advertised in builder preferences. Last it
+  checks cb-km against the live VC: `--dry-run` writes nothing, a plain apply drops
+  a third-party entry, `--preserve-entries` keeps it, and `--prune` is refused when
+  a mux uses a URL loader. Evidence lands in `CM_OUT` (`table.txt`, `slots.json`,
+  `stored.txt`, `stored-docs.json`, `evidence-per-group.txt`, `km-checks/`, `logs/`,
+  the clients' `inspect-*.txt`). Fails only when a group proposed fewer than
+  `CM_MIN_PROPOSALS` blocks, a slot could not be classified, or a cb-km check
+  failed. For nimbus, whose beacon node never requests bids, run it with
+  `WAIT_BUILDOOR=0 OBSERVE_FROM_SLOT=34 OBSERVE_SLOTS=16 CM_MIN_PROPOSALS=0`.
 
 Retired, each rejected by the script with its reason:
 

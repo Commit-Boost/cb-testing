@@ -63,6 +63,25 @@
 #                      place of the page's example values. The CB config carries
 #                      only keys the commit's config code names. Then the default
 #                      builder-built assertion.
+#   --assert config-matrix  measure how the VC stores and applies each builder
+#                      config value, per client. The 64 keys split into seven
+#                      [[mux]] groups with different values (scripts/epbs-config-
+#                      matrix.py lists them and what each discriminates); cb-km
+#                      writes them, buildoor bids value 0.2 ETH + execution_payment
+#                      0.2 ETH whatever the proposer advertised, and every slot of
+#                      OBSERVE_SLOTS (64) is classified by its proposer's group as
+#                      via CB, another builder's bid, self-built or missed. Records
+#                      the stored doc of every key next to the doc cb-km wrote, the
+#                      client's own per-slot bid-selection lines and CB's bid
+#                      requests and builder preferences per group, all under CM_OUT.
+#                      Then checks cb-km: --dry-run writes nothing, a plain apply
+#                      drops a third-party entry, --preserve-entries keeps it, and
+#                      --prune is refused when a mux has a URL loader. Reports the
+#                      client's behaviour without judging it; fails only when the
+#                      observation is incomplete (a group with fewer than
+#                      CM_MIN_PROPOSALS blocks, an unclassified slot) or a cb-km
+#                      check fails. cb-km apply may exit non-zero here (a VC that
+#                      refuses a group's values); its output is recorded.
 # No flag = the default builder-built assertion (unchanged).
 #
 # --render-only DIR renders the mode's CB config + km overlay into DIR through the
@@ -71,7 +90,7 @@
 # CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -126,10 +145,25 @@ CB_KM_BIN="${CB_KM_BIN:-}"
 # supplying its pubkey too. Default = the devnet's buildoor.
 BUILDOOR_RELAY_URL="${BUILDOOR_RELAY_URL:-http://0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416@buildoor:8080}"
 BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-1200}"  # s to wait for the builder deposit to activate (queue delay varies run to run, seen out to ~slot 100)
-OBSERVE_SLOTS="${OBSERVE_SLOTS:-16}"     # slots to watch once buildoor is active
+OBSERVE_SLOTS="${OBSERVE_SLOTS:-}"       # slots to watch once buildoor is active (16; config-matrix 64)
 MIN_BUILDER_SLOTS="${MIN_BUILDER_SLOTS:-8}"  # PASS threshold (builder-built via CB; allows some missed slots)
 KEEP="${KEEP:-0}"                        # 1 = leave the enclave + CB running
 RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives here
+# Extra params for participant 1's VC, space-separated, rendered into a copy of the
+# args file (e.g. VC_EXTRA_PARAMS=--builder.selection=maxprofit on lodestar).
+VC_EXTRA_PARAMS="${VC_EXTRA_PARAMS:-}"
+# 0 = do not wait for buildoor's first bid via CB before observing: for a client
+# whose beacon node never requests bids (config-matrix on nimbus)
+WAIT_BUILDOOR="${WAIT_BUILDOOR:-1}"
+# observe from this head slot at the earliest (e.g. past a gloas fork at epoch 1)
+OBSERVE_FROM_SLOT="${OBSERVE_FROM_SLOT:-0}"
+# config-matrix: where the evidence lands, the fewest blocks each group must
+# propose for the observation to count, and buildoor's bid: a 0.4 ETH bid, half
+# claimed as execution_payment whatever max_execution_payment the proposer
+# advertised, so the beacon node's own cap alone decides what counts
+CM_OUT="${CM_OUT:-$RUN_DIR/config-matrix}"
+CM_MIN_PROPOSALS="${CM_MIN_PROPOSALS:-3}"
+CM_BUILDOOR_ARGS="${CM_BUILDOOR_ARGS:---builder-api-subsidy=400000000 --builder-api-execution-payment-percent=50 --builder-api-ignore-preference-limit}"
 
 # opt-in assertion mode (default = today's builder-built assertion)
 ASSERT_MODE="${ASSERT_MODE:-}"
@@ -146,13 +180,15 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config) : ;;
+  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "the pipe refuses every private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
+# config-matrix needs enough slots for every group to propose several times
+[[ -n "$OBSERVE_SLOTS" ]] || { [[ "$ASSERT_MODE" == "config-matrix" ]] && OBSERVE_SLOTS=64 || OBSERVE_SLOTS=16; }
 
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
 # activation poll room unless the caller already raised it above the default.
@@ -643,6 +679,122 @@ write_documented_builder_configs() {
   echo "  $n keys written (HTTP $code), e.g. $key: $(km_get "$key")"
 }
 
+# --- config-matrix: per-group builder config, what the VC stores and applies ---
+CM_PY="$REPO_ROOT/scripts/epbs-config-matrix.py"
+cm_group_key() { # $1=group index $2=key index -> that key of cm-groups.json
+  python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[int(sys.argv[2])]["keys"][int(sys.argv[3])])' \
+    "$RUN_DIR/cm-groups.json" "$1" "$2"
+}
+
+# cb-km apply of every group. A VC may refuse a group's values (lodestar refuses
+# a nonzero max_execution_payment without --allowDangerousTrustedPayments), which
+# makes apply exit non-zero: that is a measurement here, so the exit code and the
+# refusals are recorded, and only an apply that wrote no key at all stops the run.
+cm_apply() {
+  log "config-matrix: cb-km apply, one mux per group"
+  mkdir -p "$CM_OUT"
+  cp "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" "$RUN_DIR/cm-groups.json" "$RUN_DIR/km-dry-run.txt" "$CM_OUT/"
+  local rc=0 accepted errors
+  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" \
+    > "$CM_OUT/km-apply.txt" 2>&1 || rc=$?
+  echo "$rc" > "$CM_OUT/km-apply.rc"
+  accepted=$(grep -c '^accepted: ' "$CM_OUT/km-apply.txt" || true)
+  errors=$(grep -c '^ERROR: ' "$CM_OUT/km-apply.txt" || true)
+  echo "  cb-km apply exit $rc: $accepted keys accepted, $errors errors"
+  { grep -m2 '^ERROR: ' "$CM_OUT/km-apply.txt" || true; } | cut -c1-300 | sed 's/^/    /'
+  (( accepted >= 1 )) || die "config-matrix: cb-km apply wrote no key (see $CM_OUT/km-apply.txt)"
+  log "config-matrix: what each VC stores (GET) against what cb-km wrote"
+  python3 "$CM_PY" stored "$VC_KM" "$RUN_DIR/km-token.txt" "$RUN_DIR/cm-groups.json" \
+    "$RUN_DIR/km-dry-run.txt" "$CM_OUT/stored-docs.json" | tee "$CM_OUT/stored.txt" \
+    || echo "WARN: reading the stored docs failed (see above); the observation goes on"
+}
+
+# cb-km's own flags against the live VC, once the observation is over:
+#   --dry-run          a projection that would change a key prints it and writes nothing
+#   plain apply        drops a third-party entry on a key (K2)
+#   --preserve-entries keeps the third-party entry beside CB's (K1)
+#   --prune            refused when a mux uses a URL loader, before any VC is contacted
+cm_km_checks() {
+  log "config-matrix: cb-km --dry-run, plain apply, --preserve-entries and --prune"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local d="$CM_OUT/km-checks" K1 K2 before after rc code ok fails=0
+  mkdir -p "$d"; : > "$d/summary.txt"
+  check() { # $1=name $2=0 pass / non-zero fail $3=detail
+    local v=PASS; [[ "$2" == 0 ]] || { v=FAIL; fails=$(( fails + 1 )); }
+    printf '  %-34s %s  %s\n' "$1" "$v" "$3" | tee -a "$d/summary.txt"
+  }
+  K1="$(cm_group_key 0 0)"; K2="$(cm_group_key 0 1)"   # two g-default keys
+
+  # --dry-run: a config giving g-default boost 55 is printed, not written
+  sed '/^id = "g-default"$/a builder_boost_factor = 55' "$RUN_DIR/cb-config.toml" > "$d/dry-config.toml"
+  # each check runs as `{ ...; } || ok=1`, so a failing condition is a FAIL row, not a set -e exit
+  before="$(km_get "$K1" || true)"
+  rc=0; "$CB_KM_BIN" apply --config "$d/dry-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run > "$d/dry-run.txt" 2>&1 || rc=$?
+  after="$(km_get "$K1" || true)"
+  printf '%s\n%s\n' "$before" "$after" > "$d/dry-run-get-before-after.json"
+  ok=0; { grep -q "^would apply $K1: .*\"builder_boost_factor\":\"55\"" "$d/dry-run.txt" && grep -q 'nothing sent' "$d/dry-run.txt" \
+    && [[ "$rc" == 0 && -n "$before" && "$before" == "$after" ]]; } || ok=1
+  check "--dry-run writes nothing" $ok "exit $rc; would apply boost 55 on $K1; stored doc unchanged: $([[ "$before" == "$after" ]] && echo yes || echo NO)"
+
+  # plain apply drops a third-party entry, --preserve-entries keeps it
+  local TP_URL="http://third-party-relay:19999" TP_AUTH="0x74686972647061727479"   # "thirdparty"
+  local TP_BP="0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416"
+  local TP_DOC="{\"builders\":[{\"url\":\"$TP_URL\",\"auth_data\":\"$TP_AUTH\",\"builder_pubkeys\":[\"$TP_BP\"]}]}"
+  code="$(km_post "$K2" "$TP_DOC")"
+  rc=0; "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" > "$d/apply-plain.txt" 2>&1 || rc=$?
+  km_get "$K2" > "$d/K2-after-plain-apply.json" || true
+  ok=0; { km_entry_urls "$K2" | grep -qxF "$CB_ENTRY_URL" && ! km_entry_urls "$K2" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
+  check "plain apply drops a 3rd-party entry" $ok "POST 3rd-party to $K2: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K2" | paste -sd,)"
+  code="$(km_post "$K1" "$TP_DOC")"
+  rc=0; "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --preserve-entries > "$d/apply-preserve.txt" 2>&1 || rc=$?
+  km_get "$K1" > "$d/K1-after-preserve.json" || true
+  ok=0; { km_entry_urls "$K1" | grep -qxF "$CB_ENTRY_URL" && km_entry_urls "$K1" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
+  check "--preserve-entries keeps it" $ok "POST 3rd-party to $K1: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K1" | paste -sd,)"
+
+  # --prune with a URL-loader mux: refused before any VC is contacted
+  { cat "$RUN_DIR/cb-config.toml"
+    printf '\n[[mux]]\nid = "url-loader"\nloader = { url = "http://127.0.0.1:9/keys.json" }\n\n'
+    printf '[[mux.relays]]\nid = "buildoor-url-loader"\nurl = "%s"\n' "$BUILDOOR_RELAY_URL"
+  } > "$d/url-loader-config.toml"
+  before="$(km_get "$K2" || true)"
+  rc=0; "$CB_KM_BIN" apply --config "$d/url-loader-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --prune > "$d/prune.txt" 2>&1 || rc=$?
+  after="$(km_get "$K2" || true)"
+  ok=0; { [[ "$rc" != 0 && "$before" == "$after" ]] && grep -q -- '--prune would clear' "$d/prune.txt" && ! grep -q '^accepted: ' "$d/prune.txt"; } || ok=1
+  check "--prune refused with a URL loader" $ok "exit $rc: $(sed -r 's/\x1b\[[0-9;]*m//g' "$d/prune.txt" | grep -m1 -- '--prune' | cut -c1-120)"
+  # the same config without --prune is accepted, so the refusal is about --prune
+  rc=0; "$CB_KM_BIN" apply --config "$d/url-loader-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run > "$d/url-loader-dry-run.txt" 2>&1 || rc=$?
+  ok=0; { [[ "$rc" == 0 ]] && grep -q 'projects none of its keys' "$d/url-loader-dry-run.txt"; } || ok=1
+  check "  same config, no --prune: loads" $ok "dry-run exit $rc: $(grep -m1 'WARN' "$d/url-loader-dry-run.txt" | cut -c1-110)"
+  return $(( fails > 0 ))
+}
+
+# After the observation window: save the clients' command lines and full logs,
+# classify every slot by its proposer's group, then run the cb-km checks.
+cm_report() { # $1,$2 = observed window
+  log "config-matrix: classify slots $1..$2 by the proposer's group"
+  mkdir -p "$CM_OUT/logs"
+  kurtosis enclave inspect "$ENCLAVE" > "$CM_OUT/inspect.txt" 2>&1 || true
+  local svc vc_log="$CM_OUT/logs/$VC_SVC.log" rc=0 km_rc=0
+  for svc in $(grep -oE '\b(cl-1-[a-z0-9-]+|vc-1-[a-z0-9-]+|buildoor[a-z0-9-]*)\b' "$CM_OUT/inspect.txt" | sort -u); do
+    kurtosis service inspect "$ENCLAVE" "$svc" > "$CM_OUT/inspect-$svc.txt" 2>&1 || true
+    kurtosis service logs -a "$ENCLAVE" "$svc" 2>&1 | sed -r 's/\x1b\[[0-9;]*m//g' > "$CM_OUT/logs/$svc.log" || true
+  done
+  cb_logs > "$CM_OUT/logs/$CB_NAME.log"
+  echo "$1 $2" > "$CM_OUT/window.txt"
+  CM_MIN_PROPOSALS="$CM_MIN_PROPOSALS" python3 "$CM_PY" classify "$BN" "$1" "$2" "$RUN_DIR/cm-groups.json" \
+    "$CM_OUT/logs/$CB_NAME.log" "$CM_OUT/logs/$BN_SVC.log" "$vc_log" "$CM_OUT" || rc=$?
+  cm_km_checks || km_rc=$?
+  log "RESULT"
+  if (( rc == 0 && km_rc == 0 )); then
+    printf '\033[1;32mPASS: config-matrix observed every group (>= %s blocks each) and the cb-km checks passed; evidence in %s\033[0m\n' \
+      "$CM_MIN_PROPOSALS" "$CM_OUT"
+    return 0
+  fi
+  (( rc == 0 )) || echo "  the observation is incomplete (see $CM_OUT/table.txt)"
+  (( km_rc == 0 )) || echo "  a cb-km check failed (see $CM_OUT/km-checks/summary.txt)"
+  return 1
+}
+
 # ---- CB config + km overlay rendering ---------------------------------------
 # One code path for a live run, the pre-launch dry run and --render-only, so
 # what cb-km dry-runs is what CB loads.
@@ -680,6 +832,13 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
     [[ "$(grep -c '^max_execution_payment_gwei = ' "$out/cb-config.toml")" == 1 ]] \
       && grep -q '^max_execution_payment_gwei = "unclamped"$' "$out/cb-config.toml" \
       || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
+  fi
+
+  # config-matrix: one mux per group of keys, each with its own values and relay
+  # entry; the group list lands beside the config
+  if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
+    python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" render-config "$out/cb-config.toml" "$out/cm-groups.json" \
+      || die "config-matrix: could not split the template's mux into groups"
   fi
 }
 
@@ -904,6 +1063,25 @@ PY
   echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid ${docs_min_bid:-(none)} (rendered -> $ARGS_FILE)"
 fi
 
+# VC_EXTRA_PARAMS (any mode) and config-matrix's buildoor bid, rendered into a copy
+# of the args file
+cm_args=()
+for p in $VC_EXTRA_PARAMS; do cm_args+=(--vc-param "$p"); done
+if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
+  for a in $CM_BUILDOOR_ARGS; do cm_args+=(--buildoor-arg "$a"); done
+fi
+if (( ${#cm_args[@]} )); then
+  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+  python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" render-args "$ARGS_FILE" "$RENDERED_ARGS" "${cm_args[@]}" \
+    || die "cannot add ${cm_args[*]} to $ARGS_FILE"
+  ARGS_FILE="$RENDERED_ARGS"
+  echo "args:    ${cm_args[*]} (rendered -> $ARGS_FILE)"
+fi
+if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
+  mkdir -p "$CM_OUT"
+  cp "$ARGS_FILE" "$CM_OUT/args.yaml"
+fi
+
 # clean any stale run (docker-path container is a separate object; the enclave rm
 # clears a service-path CB with the rest of the enclave)
 docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
@@ -988,6 +1166,8 @@ if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
 fi
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   write_documented_builder_configs
+elif [[ "$ASSERT_MODE" == "config-matrix" ]]; then
+  cm_apply
 else
   log "cb-km apply (point 64 validators' builder_config at CB)"
   "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
@@ -1010,9 +1190,10 @@ fi
 # bids once that deposit is included AND activated (an activation-queue delay,
 # empirically ~epoch 4 / slot ~33 on minimal). Until then CB gets 204 "no header
 # available". Poll CB's log for buildoor's first bid before observing.
-log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 buildoor_live=0
+[[ "$WAIT_BUILDOOR" == 1 ]] && log "waiting for buildoor activation (builder deposit -> registry -> active; ~epoch 4)"
 for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
+  [[ "$WAIT_BUILDOOR" == 1 ]] || { buildoor_live=1; break; }
   # buildoor's bid reached CB: the debug per-relay receipt (CB with the bid
   # stream), or the bid CB returns to the beacon node, which is the only receipt
   # line before it. grep -c reads the whole log: grep -q exits on the first
@@ -1026,19 +1207,34 @@ for i in $(seq 1 $(( BUILDOOR_ACTIVATION_TIMEOUT / 6 )) ); do
 done
 echo
 (( buildoor_live == 1 )) || { cb_logs | tail -15; die "buildoor never bid through CB within ${BUILDOOR_ACTIVATION_TIMEOUT}s"; }
-echo "buildoor is active - first bid seen"
+[[ "$WAIT_BUILDOOR" == 1 ]] && echo "buildoor is active - first bid seen"
 
 # ---- 6b. observe the loop ----------------------------------------------------
+# the chain's slot time (nimbus on the mainnet preset runs 12 s slots)
+SLOT_SEC=$(curl -sf "$BN/eth/v1/config/spec" | python3 -c \
+  "import sys,json;d=json.load(sys.stdin)['data'];print(int(d['SLOT_DURATION_MS'])//1000 if 'SLOT_DURATION_MS' in d else int(d['SECONDS_PER_SLOT']))" \
+  2>/dev/null || echo 6)
+if (( OBSERVE_FROM_SLOT > 0 )); then
+  log "waiting for head slot $OBSERVE_FROM_SLOT before observing"
+  while (( $(bn_head_slot) < OBSERVE_FROM_SLOT )); do printf '  head=%s\r' "$(bn_head_slot)"; sleep "$SLOT_SEC"; done
+  echo
+fi
 start_slot=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])")
 end_slot=$(( start_slot + OBSERVE_SLOTS ))
-log "observing slots ${start_slot}..${end_slot} ($(( OBSERVE_SLOTS * 6 ))s)"
+log "observing slots ${start_slot}..${end_slot} ($(( OBSERVE_SLOTS * SLOT_SEC ))s)"
 for i in $(seq 1 $(( OBSERVE_SLOTS + 3 ))); do
   cur=$(curl -sf "$BN/eth/v1/beacon/headers/head" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['header']['message']['slot'])" 2>/dev/null || echo 0)
   printf '  head=%s / target=%s\r' "$cur" "$end_slot"
   (( cur >= end_slot )) && break
-  sleep 6
+  sleep "$SLOT_SEC"
 done
 echo
+
+# config-matrix records and classifies instead of asserting the builder loop
+if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
+  cm_report "$start_slot" "$end_slot"
+  exit $?
+fi
 
 # ---- 7. assert --------------------------------------------------------------
 log "verifying the loop"
