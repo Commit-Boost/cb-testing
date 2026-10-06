@@ -196,12 +196,16 @@ die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # 200 lines, and the BN emits far more than that per slot at debug level, so a
 # plain tail almost never contains the once-per-slot bid-selection lines the
 # asserts grep for. Reading the full history makes the counts deterministic.
+# CB colors its stdout by default ([logs.stdout] color), which puts escape codes
+# between a field's name and its value, so the ANSI is stripped here: otherwise
+# a grep for relay_id="buildoor-mux" never matches and the activation wait
+# times out on a CB that is serving bids.
 cb_logs() {
   if [[ "$CB_LAUNCH" == "service" ]]; then
     kurtosis service logs -a "$ENCLAVE" "$CB_NAME" 2>&1 || true
   else
     docker logs "$CB_NAME" 2>&1 || true
-  fi
+  fi | sed -r 's/\x1b\[[0-9;]*m//g'
 }
 
 # Beacon node logs: bid selection (the min_bid p2p floor + the winning bidSource)
@@ -952,6 +956,33 @@ PY
   fi
 fi
 
+# manual-config: the page's call sets a min_bid, which the beacon node applies to
+# CB's entry too, and buildoor's builder-API bid is only its subsidy (0.0001 ETH
+# by default): every bid CB returns would be floored and the block built from
+# buildoor's 0.101 ETH p2p bid. Raise the builder-API subsidy above the page's
+# min_bid and the p2p bid, so a block built via CB shows the documented call
+# routes the proposer's bid requests through CB.
+MANUAL_CONFIG_SUBSIDY_GWEI=200000000
+if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+  docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1)"
+  (( ${docs_min_bid:-0} < MANUAL_CONFIG_SUBSIDY_GWEI )) \
+    || die "manual-config: the page's min_bid $docs_min_bid is not below the builder-API subsidy $MANUAL_CONFIG_SUBSIDY_GWEI"
+  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+  python3 - "$ARGS_FILE" "$RENDERED_ARGS" "--builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI" <<'PY' || die "manual-config: cannot use $ARGS_FILE (see above)"
+import re,sys
+src,dst,flag=sys.argv[1],sys.argv[2],sys.argv[3]
+lines=open(src).read().splitlines(keepends=True)
+b=next((i for i,l in enumerate(lines) if re.match(r"buildoor_params:\s*$",l)),None)
+e=next((i for i in range(b+1,len(lines)) if re.match(r"\s+extra_args:\s*$",lines[i])),None) if b is not None else None
+item=re.match(r"(\s*)-\s",lines[e+1]) if e is not None and e+1<len(lines) else None
+if not item: sys.exit("no buildoor_params.extra_args list to add {0} to".format(flag))
+lines.insert(e+1,item.group(1)+"- "+flag+"\n")
+open(dst,"w").write("".join(lines))
+PY
+  ARGS_FILE="$RENDERED_ARGS"
+  echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid $docs_min_bid (rendered -> $ARGS_FILE)"
+fi
+
 # clean any stale run (docker-path container is a separate object; the enclave rm
 # clears a service-path CB with the rest of the enclave)
 docker rm -f "$CB_NAME" >/dev/null 2>&1 || true
@@ -966,7 +997,10 @@ NET="kt-${ENCLAVE}"
 # so the loop works for lodestar, prysm, etc. without hardcoding the client.
 BN_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'cl-1-[a-z0-9-]+' | head -1)"
 VC_SVC="$(kurtosis enclave inspect "$ENCLAVE" 2>/dev/null | grep -oE 'vc-1-[a-z0-9-]+' | head -1)"
-[[ -n "$BN_SVC" && -n "$VC_SVC" ]] || die "could not discover cl-1-* / vc-1-* services in $ENCLAVE"
+# A validator inside the beacon process (grandine: ethereum-package launches no
+# separate grandine VC) serves the keymanager API on the CL service itself.
+[[ -n "$VC_SVC" ]] || VC_SVC="$BN_SVC"
+[[ -n "$BN_SVC" ]] || die "could not discover a cl-1-* service in $ENCLAVE"
 BN="$(kurtosis port print "$ENCLAVE" "$BN_SVC" http)"
 VC_KM="$(kurtosis port print "$ENCLAVE" "$VC_SVC" http-validator)"
 [[ -n "$BN" && -n "$VC_KM" ]] || die "could not discover BN / VC keymanager ports ($BN_SVC / $VC_SVC)"
