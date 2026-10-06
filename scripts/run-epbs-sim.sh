@@ -1243,7 +1243,9 @@ log "verifying the loop"
 # nothing: each request goes to the one relay its auth data names.
 CB_LOG=$(cb_logs)
 bid_calls=$(grep -c 'execution_payload_bid' <<<"$CB_LOG" || true)
-buildoor_bids=$(grep 'received new header' <<<"$CB_LOG" | grep -cF 'relay_id="buildoor-mux"' || true)
+# A CB from before #505's review logs "received new header" with the relay id;
+# later ones log "received header" for the bid they return (buildoor is the only relay)
+buildoor_bids=$(grep -cE 'received new header.*relay_id="buildoor-mux"|received header .*trustless_bid_eth' <<<"$CB_LOG" || true)
 
 # chain-side: builder-built blocks (the bid names a registry builder)
 classified="$(classify_blocks "$start_slot" "$end_slot")"
