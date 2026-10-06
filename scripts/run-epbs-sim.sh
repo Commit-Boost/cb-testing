@@ -129,6 +129,8 @@ CB_SUB="$REPO_ROOT/commit-boost-client"
 # Swap the CL/VC image to test a specific consensus client build against the sim
 # (e.g. CL_IMAGE=chainsafe/lodestar:v1.47.0-rc.0). Empty = use the args file's.
 CL_IMAGE="${CL_IMAGE:-}"
+# Kurtosis --image-download: "missing" uses a locally built image instead of pulling
+IMAGE_DOWNLOAD="${IMAGE_DOWNLOAD:-always}"
 CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the templates
 # How commit-boost joins the devnet:
 #   service (default) = a first-class kurtosis enclave service (proper enclave DNS,
@@ -184,7 +186,7 @@ case "$ASSERT_MODE" in
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
-  pipe) no_mode "the pipe refuses every private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
+  dial|pipe) no_mode "CB refuses to dial a private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
   *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 # config-matrix needs enough slots for every group to propose several times
@@ -1088,7 +1090,7 @@ kurtosis enclave rm -f "$ENCLAVE" >/dev/null 2>&1 || true
 
 # ---- 1. launch the gloas devnet ---------------------------------------------
 log "launching gloas devnet ($ARGS_FILE)"
-kurtosis run "$EP_PACKAGE" --enclave "$ENCLAVE" --args-file "$ARGS_FILE" --image-download always
+kurtosis run "$EP_PACKAGE" --enclave "$ENCLAVE" --args-file "$ARGS_FILE" --image-download "$IMAGE_DOWNLOAD"
 
 NET="kt-${ENCLAVE}"
 # Discover the CL/VC service names (client-agnostic: cl-1-<cl>-<el>, vc-1-<el>-<cl>),

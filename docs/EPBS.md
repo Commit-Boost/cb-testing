@@ -366,16 +366,15 @@ Retired, each rejected by the script with its reason:
   (its overlay refuses `direct_entries`). With CB down the beacon node already falls
   back to p2p bids and local blocks, so the entry mostly doubled bid requests.
 
-**No `pipe` mode.** CB forwards a request whose auth data matches no configured
-relay to the builder it names (the transient pipe,
-`relay_id="pipe"` in its metrics). A devnet cannot exercise it:
+**No `dial` mode.** CB dials the builder named by auth data that matches no
+configured relay (`relay_id="dial"` in its metrics). A devnet cannot exercise it:
 
-- CB refuses to dial a pipe target that resolves to a loopback, private,
+- CB refuses to dial a target that resolves to a loopback, private,
   link-local, CGNAT, broadcast or unspecified address (`400`, "the addressed
   builder's host does not resolve in time or resolves to a disallowed address").
   Every enclave service sits on a Docker bridge network in RFC 1918 space
   (`172.16.0.0/12`), so every builder in the devnet is refused.
-- The only bypass is `cb_pbs::set_skip_pipe_target_check`, a thread-local setter
+- The only bypass is `cb_pbs::set_skip_dial_target_check`, a thread-local setter
   compiled in by the `testing-flags` feature and called from inside CB's own test
   process. No config key, env var or flag reaches it, so even a `testing-flags`
   image would refuse the enclave's addresses.

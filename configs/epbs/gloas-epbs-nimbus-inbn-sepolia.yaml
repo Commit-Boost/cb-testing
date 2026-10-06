@@ -1,0 +1,46 @@
+# As gloas-epbs-nimbus-sepolia.yaml, with the validators inside the Nimbus beacon
+# node (no separate validator client), which then serves the keymanager API. Checks
+# whether the beacon node's own validators use the builder config stored through
+# that API.
+# ePBS (gloas) devnet against the NIMBUS release Sepolia runs for its gloas upgrade,
+# for the CB-in-loop matrix (scripts/run-epbs-cb-matrix.sh). Same loop and flags as
+# gloas-epbs-nimbus.yaml (see it for the separate validator client and the builder
+# flags). Nimbus's preset is compile-time and the release publishes only
+# mainnet-preset beacon node and validator client images, so this runs the mainnet
+# preset (buildoor activates around slot 128). ethereum-package refuses nimbus on
+# the mainnet preset below 12-second slots ("nimbus can't be run with slot times
+# below 12 seconds with mainnet preset"), so slots are 12 seconds here.
+# Gloas activates at epoch 1, not at genesis, as on Sepolia: with gloas at genesis
+# the beacon node answers every proposal with "Proposal parent payload is
+# missing" (500 on produceBlockV4) and the chain never leaves slot 0.
+# ethereum-package places genesis builders only when gloas is at genesis, so
+# builder_count is 0 and buildoor registers through its own deposit (lifecycle).
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: nimbus
+    cl_image: statusim/nimbus-eth2:multiarch-v26.10.0
+    use_separate_vc: false
+    cl_log_level: debug
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: mainnet
+  seconds_per_slot: 12
+  gloas_fork_epoch: 1
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 0
+  deploy_eip8282_contracts: true
+global_log_level: info
