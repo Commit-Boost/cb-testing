@@ -1,0 +1,39 @@
+# ePBS (gloas) devnet against the PRYSM release Sepolia runs for its gloas upgrade,
+# for the CB-in-loop matrix (scripts/run-epbs-cb-matrix.sh). Same loop and flags as
+# gloas-epbs-prysm-mainnet.yaml. Prysm's preset is compile-time and the release
+# publishes only mainnet-preset beacon-chain and validator images, so this runs
+# the mainnet preset (buildoor activates around slot 128).
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: prysm
+    cl_image: gcr.io/offchainlabs/prysm/beacon-chain:v7.2.0
+    vc_image: gcr.io/offchainlabs/prysm/validator:v7.2.0
+    cl_log_level: debug
+    vc_log_level: debug
+    # No vc_extra_params: upstream input_parser.star already appends
+    # --enable-builder to a prysm VC under mev_type: buildoor
+    # (apply_external_builder_flags), so repeating it here duplicates the flag.
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: mainnet
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

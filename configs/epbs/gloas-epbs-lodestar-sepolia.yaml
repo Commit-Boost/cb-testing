@@ -1,0 +1,36 @@
+# ePBS (gloas) devnet against the LODESTAR release Sepolia runs for its gloas
+# upgrade, for the CB-in-loop matrix (scripts/run-epbs-cb-matrix.sh). Same loop and
+# flags as gloas-epbs-lodestar.yaml. Lodestar selects the preset at runtime, so the
+# release image runs the minimal preset.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: lodestar
+    cl_image: chainsafe/lodestar:v1.49.0
+    vc_image: chainsafe/lodestar:v1.49.0
+    cl_log_level: debug
+    vc_log_level: debug
+    vc_extra_params:
+      - --graffiti=builder-dev
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

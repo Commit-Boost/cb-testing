@@ -1,0 +1,43 @@
+# ePBS (gloas) devnet against the GRANDINE release Sepolia runs for its gloas
+# upgrade, for the CB-in-loop matrix (scripts/run-epbs-cb-matrix.sh). Same loop and
+# flags as gloas-epbs-grandine.yaml (see it for the in-process validator and the
+# bare-hex keymanager token). The release image carries only the mainnet preset
+# (on a minimal genesis it exits with "minimal preset is not included in this
+# executable"), so this runs the mainnet preset (buildoor activates around slot
+# 128).
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: grandine
+    cl_image: sifrai/grandine:3.0.0-rc.0
+    cl_log_level: debug
+    cl_extra_params:
+      - --validator-api-token-file=/km-token/km-token.txt
+    cl_extra_mounts:
+      "/km-token": "km-token.txt"
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+# configs/epbs/km-token.txt without the 0x (no trailing newline)
+extra_files:
+  km-token.txt: "3ec0ad340bb9ca21e5593045b533d11d1b6784e03468af01db621db1804c2f0f"
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: mainnet
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info
