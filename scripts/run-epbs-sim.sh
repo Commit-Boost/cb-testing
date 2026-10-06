@@ -44,14 +44,6 @@
 #                      (builder_index == BUILDER_INDEX_SELF_BUILD), and CB returns
 #                      204 "no header available" and NEVER 500. Proves builder
 #                      failure never stalls the proposer.
-#   --assert direct    apply with `direct_entries = true` in the km overlay, so
-#                      each validator also gets a builder_config entry pointing
-#                      straight at buildoor (same auth_data as the CB entry).
-#                      HARD-fails unless the stored doc holds both entries, the
-#                      BN ranks a bid from BOTH CB and buildoor in >=
-#                      MIN_DIRECT_SLOTS slots, and after CB is STOPPED the chain
-#                      keeps producing builder-built blocks sourced directly
-#                      from buildoor (the redundancy the direct entry buys).
 #   --assert trusted-payment  set [pbs] max_execution_payment_gwei = "unclamped"
 #                      (the relays carry none, so it is the effective cap), start
 #                      the lodestar VC with --allowDangerousTrustedPayments, and
@@ -79,7 +71,7 @@
 # CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -154,11 +146,12 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config) : ;;
+  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
+  direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "the pipe refuses every private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|direct|trusted-payment|manual-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
@@ -173,10 +166,6 @@ esac
 
 # builder-down runs a second observe window after stopping buildoor
 BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor is stopped
-# direct: slots whose ranked candidates must include BOTH paths, and slots to watch
-# with CB stopped
-MIN_DIRECT_SLOTS="${MIN_DIRECT_SLOTS:-4}"
-CB_DOWN_SLOTS="${CB_DOWN_SLOTS:-12}"
 # trusted-payment: cb-km writes [pbs] max_execution_payment_gwei = "unclamped" as
 # the largest Uint64, so the BN counts the whole execution payment
 UNCLAMPED_CAP=18446744073709551615
@@ -339,83 +328,9 @@ assert_block_submission() {
   die "block-submission failed (forwarded=$reached need>=1, 4xx=$refused need0, unanswered=$unanswered need0)"
 }
 
-# --- assert direct: the BN reaches buildoor through CB AND directly --------------
-# Lodestar asks every builder_config entry for a bid in parallel and logs one
-# "Ranked builder bid candidates slot=N, candidates=<url>:total=..,<url>:..,
-# bidSource=<url>" line per proposal, so both paths are visible per slot.
-DIRECT_URL="$(sed -E 's|://[^@/]*@|://|' <<<"$BUILDOOR_RELAY_URL")"
+# CB's URL as the VC calls it: the km overlay's advertised_url, and the url of
+# the builder_config entry cb-km writes on every key
 CB_ENTRY_URL="http://${CB_NAME}:18550"
-
-# ranked lines for slots in [$1,$2] -> "slot cb direct bidSource" rows
-ranked_rows() {
-  bn_logs | grep 'Ranked builder bid candidates' | python3 -c '
-import re,sys
-s0,s1,cb,direct=int(sys.argv[1]),int(sys.argv[2]),sys.argv[3],sys.argv[4]
-for line in sys.stdin:
-    m=re.search(r"slot=(\d+)",line)
-    if not m or not s0<=int(m.group(1))<=s1: continue
-    cands=re.search(r"candidates=(.*?), bidSource=",line)
-    cands=cands.group(1) if cands else ""
-    src=re.search(r"bidSource=(\S+)",line)
-    print(m.group(1), int(cb+":" in cands), int(direct+":" in cands), src.group(1) if src else "-")
-' "$1" "$2" "$CB_ENTRY_URL" "$DIRECT_URL"
-}
-
-stop_cb() {
-  if [[ "$CB_LAUNCH" == "service" ]]; then
-    kurtosis service stop "$ENCLAVE" "$CB_NAME" >/dev/null 2>&1
-  else
-    docker stop "$CB_NAME" >/dev/null 2>&1
-  fi
-}
-
-assert_direct() { # $1,$2 = observed window
-  log "assert direct: builder_config holds a CB entry and a direct buildoor entry"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  local K1; K1="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"][0]["validating_pubkey"])')"
-  local urls; urls="$(km_entry_urls "$K1")"
-  echo "  $K1 entries: $(tr '\n' ' ' <<<"$urls")"
-  grep -qxF "$CB_ENTRY_URL" <<<"$urls" || die "direct: no CB entry ($CB_ENTRY_URL) stored"
-  grep -qxF "$DIRECT_URL" <<<"$urls" || die "direct: no direct entry ($DIRECT_URL) stored"
-
-  log "assert direct: the BN ranks bids from both paths in the same slot"
-  local rows; rows="$(ranked_rows "$1" "$2")"
-  local both; both=$(awk '$2==1 && $3==1' <<<"$rows" | wc -l)
-  echo "  ranked slots in [$1,$2]: $(wc -l <<<"$rows"), with both CB and direct candidates: $both"
-  grep -m3 'Ranked builder bid candidates' <<<"$(bn_logs)" | sed 's/^/    e.g. /' | cut -c1-300
-  (( both >= MIN_DIRECT_SLOTS )) || { echo "$rows"; die "direct: only $both slot(s) ranked both paths (need >=$MIN_DIRECT_SLOTS)"; }
-
-  log "assert direct: stop CB, blocks stay builder-built through the direct entry"
-  local stop_slot; stop_slot="$(bn_head_slot)"
-  stop_cb || die "could not stop $CB_NAME"
-  local target=$(( stop_slot + CB_DOWN_SLOTS )) cur=0
-  for i in $(seq 1 $(( CB_DOWN_SLOTS + 4 )) ); do
-    cur="$(bn_head_slot)"
-    printf '  head=%s / target=%s (CB down)\r' "$cur" "$target"
-    (( cur >= target )) && break
-    sleep 6
-  done
-  echo
-  local from=$(( stop_slot + 2 ))
-  local built_after; built_after="$(sed -n 's/^builder=//p' <<<"$(classify_blocks "$from" "$cur")")"
-  local n_built_after=0
-  [[ -n "$built_after" ]] && n_built_after=$(awk -F, '{print NF}' <<<"$built_after")
-  local after; after="$(ranked_rows "$from" "$cur")"
-  local direct_won; direct_won=$(awk -v u="$DIRECT_URL" '$4==u' <<<"$after" | wc -l)
-  local cb_seen; cb_seen=$(awk '$2==1' <<<"$after" | wc -l)
-  echo "  head advanced $(( cur - stop_slot )) slots with CB stopped"
-  echo "  builder-built blocks after stop: $n_built_after  [slots: $built_after]"
-  echo "  selections won by the direct entry: $direct_won; CB candidates after stop: $cb_seen"
-
-  log "RESULT"
-  if (( n_built_after >= 1 && direct_won >= 1 && cb_seen == 0 )); then
-    printf '\033[1;32mPASS: both paths ranked in %s slots; with CB down, %s blocks built via the direct entry\033[0m\n' \
-      "$both" "$n_built_after"
-    return 0
-  fi
-  echo "$after"
-  die "direct: CB down -> built=$n_built_after need>=1, direct wins=$direct_won need>=1, CB candidates=$cb_seen need=0"
-}
 
 # --- assert builder-down: builder failure never stalls the proposer -------------
 # buildoor is stopped after >=1 builder-built slot. The proposer must fall back to
@@ -496,8 +411,9 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
 # --allowDangerousTrustedPayments. lodestar's keymanager refuses any
 # builder_config entry with max_execution_payment > 0 (400, naming the flag), so
 # cb-km apply of the capped config must exit non-zero with a 400 on every key,
-# and no key may end up holding the cap. A direct POST of one projected doc ties
-# the 400 to the flag, not to some other rejection.
+# and no key may end up holding the cap. POSTing one projected doc by hand (the
+# first one `cb-km apply --dry-run` prints) ties the 400 to the flag, not to some
+# other rejection.
 assert_trusted_payment_refused() {
   log "trusted-payment control: cb-km apply of a capped config, VC WITHOUT --allowDangerousTrustedPayments"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
@@ -508,6 +424,8 @@ assert_trusted_payment_refused() {
   n_keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
     | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')" \
     || die "control: could not list the VC's keystores"
+  # cb-km reports each refusal on stderr as "ERROR: <vc>: POST <key> failed:
+  # builder_config POST for <key> on <vc> failed: 400 Bad Request: <VC message>".
   # || true: no match is a 0 here, not a reason for set -e to end the run
   refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: .*failed: 400' <<<"$out" \
     | grep -oE 'POST 0x[0-9a-f]{96}' | sort -u | wc -l || true)"
@@ -515,19 +433,22 @@ assert_trusted_payment_refused() {
   echo "  keys refused with HTTP 400:       $refused of $n_keys (need all)"
   { grep -m1 -E 'failed: 400' <<<"$out" || true; } | cut -c1-240 | sed 's/^/    e.g. /'
 
-  # one projected doc, POSTed by hand to read the VC's reason
-  local emit_dir="$RUN_DIR/emitted" key doc code body stored_cap
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --emit "$emit_dir" >/dev/null 2>&1 \
-    || die "control: cb-km apply --emit failed"
-  read -r key doc < <(python3 -c 'import json,sys;k=json.load(open(sys.argv[1]))["keys"][0];print(k["pubkey"],k["file"])' "$emit_dir/manifest.json") \
-    || die "control: no projected doc in $emit_dir/manifest.json"
+  # one projected doc, POSTed by hand to read the VC's reason: the first
+  # "would apply <key>: <doc>" line of a dry run
+  local dry line key doc code body stored_cap
+  dry="$("$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run 2>&1)" \
+    || die "control: cb-km apply --dry-run failed: $(tail -3 <<<"$dry")"
+  line="$(grep -m1 '^would apply ' <<<"$dry" || true)"
+  [[ "$line" =~ ^would\ apply\ (0x[0-9a-f]{96}):\ (\{.*\})$ ]] \
+    || die "control: cb-km apply --dry-run printed no 'would apply <key>: <doc>' line"
+  key="${BASH_REMATCH[1]}"; doc="${BASH_REMATCH[2]}"
   body="$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $KM_TOKEN" -H 'Content-Type: application/json' \
-    --data @"$emit_dir/$doc" "$VC_KM/eth/v1/validator/$key/builder_config")"
+    --data-binary "$doc" "$VC_KM/eth/v1/validator/$key/builder_config")"
   code="$(tail -1 <<<"$body")"; body="$(sed '$d' <<<"$body")"
   stored_cap="$(km_get "$key" | python3 -c \
     'import sys,json;d=json.load(sys.stdin)["data"];print(max([int(e.get("max_execution_payment") or 0) for e in d.get("builders") or []],default=0))')" \
     || die "control: could not read $key's stored builder_config"
-  echo "  direct POST of $key's projected doc: HTTP $code $body"
+  echo "  POST by hand of $key's projected doc: HTTP $code $body"
   echo "  largest cap stored on that key:   $stored_cap (need 0)"
 
   log "RESULT"
@@ -535,7 +456,7 @@ assert_trusted_payment_refused() {
     printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, cb-km apply exited %s with a 400 on all %s keys and stored no cap\033[0m\n' "$rc" "$n_keys"
     return 0
   fi
-  die "control: want cb-km exit != 0 (got $rc), 400 on all $n_keys keys (got $refused), a direct 400 naming the flag (got $code), stored cap 0 (got $stored_cap)"
+  die "control: want cb-km exit != 0 (got $rc), 400 on all $n_keys keys (got $refused), a 400 naming the flag on the hand POST (got $code), stored cap 0 (got $stored_cap)"
 }
 
 # --- assert trusted-payment: cb-km stored the unclamped cap on every entry ---------
@@ -721,8 +642,8 @@ write_documented_builder_configs() {
 }
 
 # ---- CB config + km overlay rendering ---------------------------------------
-# One code path for a live run, the pre-launch check and --render-only, so what
-# cb-km checks is what CB loads.
+# One code path for a live run, the pre-launch dry run and --render-only, so
+# what cb-km dry-runs is what CB loads.
 render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
   local out="$1" gen_time="$2" vc_km="$3"
   # Strict-shape it before it reaches sed: it interpolates into a config the CB
@@ -758,19 +679,16 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
       && grep -q '^max_execution_payment_gwei = "unclamped"$' "$out/cb-config.toml" \
       || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
   fi
-  # direct: a top-level key, so it must precede the [[vcs]] table or TOML scopes it there
-  if [[ "$ASSERT_MODE" == "direct" ]]; then
-    sed -i '1i direct_entries = true' "$out/km-overlay.toml"
-  fi
 }
 
-# cb-km refuses a [pbs] or [[mux]] key Commit-Boost does not read, and CB refuses
-# an unknown relay key, so a dry run proves the rendered pair loads. The projected
-# docs land in $1/km-dry-run.txt.
+# cb-km refuses a [pbs] or [[mux]] key Commit-Boost does not read, an unknown
+# relay key (as CB does) and any overlay key but advertised_url and [[vcs]], so a
+# dry run proves the rendered pair loads. The projected docs land in
+# $1/km-dry-run.txt.
 km_dry_run() { # $1=dir holding cb-config.toml + km-overlay.toml
   "$CB_KM_BIN" apply --config "$1/cb-config.toml" --overlay "$1/km-overlay.toml" --dry-run \
     > "$1/km-dry-run.txt" 2>&1 \
-    || { tail -20 "$1/km-dry-run.txt"; die "cb-km apply --dry-run refused $1/cb-config.toml"; }
+    || { tail -20 "$1/km-dry-run.txt"; die "cb-km apply --dry-run refused $1/cb-config.toml or $1/km-overlay.toml"; }
   echo "cb-km dry run: $(sed -r 's/\x1b\[[0-9;]*m//g' "$1/km-dry-run.txt" | grep -oE 'dry-run: .*' | tail -1)"
 }
 
@@ -859,8 +777,8 @@ fi
 # Every builder-built count below rests on this classifier; check it against its
 # boundary cases before spending a devnet on it.
 python3 scripts/epbs-blocks.py self-test || die "scripts/epbs-blocks.py self-test failed"
-# Render this mode's CB config with placeholder chain values and let cb-km check
-# it now: a key it refuses would otherwise surface only once the devnet is up.
+# Render this mode's CB config with placeholder chain values and dry-run cb-km
+# on it now: a key it refuses would otherwise surface only once the devnet is up.
 render_cb_config "$RUN_DIR" 0 "http://127.0.0.1:5062"
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   CB_SHA="$(cb_commit)"
@@ -1143,11 +1061,6 @@ if [[ "$ASSERT_MODE" == "builder-down" ]]; then
     || { cb_logs | tail -20; die "builder-down precondition: buildoor never built a block (built=$n_built, bids=$buildoor_bids)"; }
   echo "  precondition OK: buildoor built >=1 block before stop"
   assert_builder_down "$start_slot"
-  exit 0
-fi
-
-if [[ "$ASSERT_MODE" == "direct" ]]; then
-  assert_direct "$start_slot" "$end_slot"
   exit 0
 fi
 

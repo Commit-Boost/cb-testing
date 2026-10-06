@@ -280,8 +280,6 @@ feature into a live regression check:
   enough.
 - **`builder-down`**: buildoor stop never stalls the proposer (the chain advances on
   self-built blocks, CB answers 204, never 500).
-- **`direct`**: `direct_entries = true` in the overlay also points each key straight
-  at buildoor; with CB stopped, blocks stay builder-built through the direct entry.
 - **`trusted-payment`**: an unclamped trusted execution payment end to end. The mode
   sets `[pbs] max_execution_payment_gwei = "unclamped"` with no relay-level cap, so
   `[pbs]` holds the effective cap and cb-km writes the largest Uint64,
@@ -298,9 +296,10 @@ feature into a live regression check:
   BN's valuation is the only one.
   **Control:** the mode first stands up a separate devnet whose VC lacks the flag
   (about 1-2 min, the run stops after `cb-km apply`) and asserts lodestar's refusal:
-  `cb-km apply` exits non-zero with a 400 on every key, a direct POST of one
-  projected doc returns 400 naming `--allowDangerousTrustedPayments`, and no key
-  holds a cap. `TRUSTED_PAYMENT_CONTROL=0` skips it.
+  `cb-km apply` exits non-zero with a 400 on every key, a POST by hand of one
+  projected doc (the first `cb-km apply --dry-run` prints) returns 400 naming
+  `--allowDangerousTrustedPayments`, and no key holds a cap.
+  `TRUSTED_PAYMENT_CONTROL=0` skips it.
 - **`manual-config`**: the operator docs of a CB commit without `cb-km`, followed
   literally. The run builds CB from `CB_COMMIT` with no `cb-km`, renders a CB config
   with only keys that commit's `crates/common/src` names (no `min_bid_p2p_eth`,
@@ -321,6 +320,9 @@ Retired, each rejected by the script with its reason:
   request.
 - **`request-auth`**: CB no longer verifies the request auth (`verify_builder_request_auth`
   is gone, and cb-km refuses the key); the builder verifies it.
+- **`direct`**: cb-km no longer writes a direct builder entry next to the CB entry
+  (its overlay refuses `direct_entries`). With CB down the beacon node already falls
+  back to p2p bids and local blocks, so the entry mostly doubled bid requests.
 
 **No `pipe` mode.** With `advertised_urls` set, CB forwards a request whose auth
 data names no configured relay to the builder it names (the transient pipe,

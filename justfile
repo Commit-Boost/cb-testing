@@ -259,12 +259,13 @@ epbs-sim:
 #   just epbs-sim-assert preserve          --preserve-entries keeps a third-party entry.
 #   just epbs-sim-assert block-submission  CB forwards the POST /beacon_blocks reveal unparsed.
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
-#   just epbs-sim-assert direct            a direct buildoor entry keeps blocks builder-built with CB down.
 #   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.
 #   just epbs-sim-assert manual-config     no cb-km: builder config written with the CB docs' curl call.
 # Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
-# no timing games on the ePBS bid path). No pipe mode: the pipe refuses every private
-# address, and a devnet has no other (docs/EPBS.md).
+# no timing games on the ePBS bid path).
+# Retired: direct (cb-km no longer writes direct builder entries; the BN falls back to p2p bids when CB is down).
+# No pipe mode: the pipe refuses every private address, and a devnet has no other
+# (docs/EPBS.md).
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
 
