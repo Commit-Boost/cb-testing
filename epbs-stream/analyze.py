@@ -43,10 +43,11 @@ def cb_requests(path):
     by_slot = defaultdict(list)
     for r in reqs.values():
         text = "\n".join(r["lines"])
-        winner = re.search(r'auction winner .*?transport="(\w+)"', text)
+        # "auction winner" before the ePBS route logged its own "selected bid" line
+        winner = re.search(r'(?:auction winner|selected bid) .*?transport="(\w+)"', text)
         by_slot[r["slot"]].append({
             "winner": winner.group(1) if winner else None,
-            "no_header": "no header available for slot" in text,
+            "no_header": "no header available for slot" in text or "no bid for slot" in text,
             "resets": text.count(RESET),
             "stream_failed": text.count("stream failed"),
             "clean_no_bid": len(re.findall(r" no bid relay_id=", text)),
