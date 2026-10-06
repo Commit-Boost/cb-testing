@@ -308,8 +308,8 @@ feature into a live regression check:
   `TRUSTED_PAYMENT_CONTROL=0` skips it.
 - **`manual-config`**: the operator docs of a CB commit without `cb-km`, followed
   literally. The run builds CB from `CB_COMMIT` with no `cb-km`, renders a CB config
-  with only keys that commit's `crates/common/src` names (no `min_bid_p2p_eth`,
-  `builder_boost_factor_p2p` or `advertised_urls`), and writes every key the VC holds
+  with only keys that commit's `crates/common/src` names (no `min_bid_p2p_eth` or
+  `builder_boost_factor_p2p`), and writes every key the VC holds
   with the `curl` call under "Validator builder config" in that commit's
   `docs/docs/get_started/epbs.md`. The call runs as written; only the page's example
   `url` and `auth_data` are swapped for `http://cb-epbs:18550` and the hex of
@@ -366,8 +366,8 @@ Retired, each rejected by the script with its reason:
   (its overlay refuses `direct_entries`). With CB down the beacon node already falls
   back to p2p bids and local blocks, so the entry mostly doubled bid requests.
 
-**No `pipe` mode.** With `advertised_urls` set, CB forwards a request whose auth
-data names no configured relay to the builder it names (the transient pipe,
+**No `pipe` mode.** CB forwards a request whose auth data matches no configured
+relay to the builder it names (the transient pipe,
 `relay_id="pipe"` in its metrics). A devnet cannot exercise it:
 
 - CB refuses to dial a pipe target that resolves to a loopback, private,

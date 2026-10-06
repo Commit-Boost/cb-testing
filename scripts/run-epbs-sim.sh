@@ -817,10 +817,9 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
       configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
   grep -q '__' "$out/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
 
-  # manual-config: a commit without cb-km reads neither its p2p projection keys
-  # nor the pipe's advertised_urls
+  # manual-config: a commit without cb-km does not read its p2p projection keys
   if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|advertised_urls) = /d' \
+    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p) = /d' \
       -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' "$out/cb-config.toml"
   fi
 
