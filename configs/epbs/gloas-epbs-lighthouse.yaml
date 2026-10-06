@@ -1,0 +1,58 @@
+# ePBS (gloas) devnet against a LIGHTHOUSE CL/VC, for the CB-in-loop matrix
+# (scripts/run-epbs-cb-matrix.sh). Same loop as gloas-epbs-lodestar.yaml
+# (VC -> keymanager builder_config -> commit-boost -> buildoor).
+#
+# Lighthouse ships one image for the beacon node and the validator client, and
+# loads the minimal preset at runtime, so the gloas-epbs-matrix.yaml image is
+# used as is. The VC side of the gloas builder flow and the per-key builder_config
+# keymanager endpoint landed in sigp/lighthouse#9807 and #9864; a build without
+# them answers the builder_config call with 404.
+#
+# Builder flags come from ethereum-package under mev_type: buildoor
+# (apply_external_builder_flags): BN --builder=<buildoor> plus
+# --always-prepare-payload, VC --builder-proposals. Repeating them here would
+# duplicate them.
+#
+# Keymanager token: ethereum-package starts the lighthouse VC's HTTP API
+# (--http ... --unencrypted-http-transport) but mounts no token, so lighthouse
+# would generate its own. --http-token-path (lighthouse vc --help) points it at
+# the static token the harness reads from configs/epbs/km-token.txt instead.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8-fa18cdb
+    vc_type: lighthouse
+    vc_image: ethpandaops/lighthouse:glamsterdam-devnet-8-fa18cdb
+    cl_log_level: debug
+    vc_log_level: debug
+    vc_extra_params:
+      - --http-token-path=/km-token/km-token.txt
+    vc_extra_mounts:
+      "/km-token": "km-token.txt"
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+# must equal configs/epbs/km-token.txt (no trailing newline)
+extra_files:
+  km-token.txt: "0x3ec0ad340bb9ca21e5593045b533d11d1b6784e03468af01db621db1804c2f0f"
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

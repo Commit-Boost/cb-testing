@@ -1,0 +1,49 @@
+# ePBS (gloas) devnet against a TEKU CL/VC, for the CB-in-loop matrix
+# (scripts/run-epbs-cb-matrix.sh). Same loop as gloas-epbs-lodestar.yaml
+# (VC -> keymanager builder_config -> commit-boost -> buildoor).
+#
+# Teku loads the minimal preset at runtime, so the gloas-epbs-matrix.yaml image is
+# used as is. use_separate_vc: ethereum-package runs teku's validator in the beacon
+# process by default, and the harness reaches the keymanager API on the vc-1-*
+# service. The separate `teku validator-client` gets the keymanager API from
+# ethereum-package (--validator-api-enabled, --validator-api-bearer-file = the
+# static token in configs/epbs/km-token.txt, SSL off).
+#
+# Builder flags come from ethereum-package under mev_type: buildoor
+# (apply_external_builder_flags): BN --builder-endpoint=<buildoor> plus
+# --Xfork-choice-updated-always-send-payload-attributes, BN and VC
+# --validators-builder-registration-default-enabled. Repeating them here would
+# duplicate them.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: teku
+    cl_image: ethpandaops/teku:glamsterdam-devnet-8-c190221
+    use_separate_vc: true
+    vc_type: teku
+    vc_image: ethpandaops/teku:glamsterdam-devnet-8-c190221
+    cl_log_level: debug
+    vc_log_level: debug
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

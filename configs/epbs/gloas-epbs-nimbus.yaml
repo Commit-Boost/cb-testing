@@ -1,0 +1,51 @@
+# ePBS (gloas) devnet against a NIMBUS CL/VC, for the CB-in-loop matrix
+# (scripts/run-epbs-cb-matrix.sh). Same loop as gloas-epbs-lodestar.yaml
+# (VC -> keymanager builder_config -> commit-boost -> buildoor).
+#
+# MINIMAL preset. Nimbus's preset is compile-time, so the images are the
+# -minimal- siblings of the glamsterdam-devnet-8 build in
+# gloas-epbs-matrix-mainnet.yaml (same commit). Nimbus ships the beacon node and
+# the validator client as separate images, and use_separate_vc puts the
+# validator on the vc-1-* service where the harness reaches the keymanager API.
+# ethereum-package starts it with --keymanager and --keymanager-token-file = the
+# static token in configs/epbs/km-token.txt. The keymanager builder_config
+# endpoints landed in status-im/nimbus-eth2#8994; a build without them answers
+# the builder_config call with 404.
+#
+# Builder flags come from ethereum-package under mev_type: buildoor
+# (apply_external_builder_flags): BN --payload-builder=true
+# --payload-builder-url=<buildoor>, VC --payload-builder=true. Repeating them here
+# would duplicate them.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: nimbus
+    cl_image: ethpandaops/nimbus-eth2:glamsterdam-devnet-8-minimal-2a489eb
+    use_separate_vc: true
+    vc_type: nimbus
+    vc_image: ethpandaops/nimbus-validator-client:glamsterdam-devnet-8-minimal-2a489eb
+    cl_log_level: debug
+    vc_log_level: debug
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info

@@ -1,0 +1,55 @@
+# ePBS (gloas) devnet against GRANDINE, for the CB-in-loop matrix
+# (scripts/run-epbs-cb-matrix.sh). Same loop as gloas-epbs-lodestar.yaml
+# (VC -> keymanager builder_config -> commit-boost -> buildoor).
+#
+# MINIMAL preset. Grandine's preset is compile-time, so the image is the -minimal-
+# sibling of the glamsterdam-devnet-8 build in gloas-epbs-matrix-mainnet.yaml
+# (same commit).
+#
+# Grandine's validator runs inside the beacon process: ethereum-package has no
+# separate grandine VC, so there is no vc-1-* service and the harness reaches the
+# keymanager API on the cl-1-* service. ethereum-package enables it
+# (--enable-validator-api on the http-validator port) but cannot pass a token yet,
+# so --validator-api-token-file (grandine --help) points it at the static token
+# the harness reads from configs/epbs/km-token.txt.
+#
+# Builder flags come from ethereum-package under mev_type: buildoor
+# (apply_external_builder_flags): --builder-url=<buildoor> plus
+# --features=AlwaysPrepareExecutionPayload. Repeating them here would duplicate
+# them.
+participants:
+  - el_type: geth
+    el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
+    cl_type: grandine
+    cl_image: ethpandaops/grandine:glamsterdam-devnet-8-minimal-d6281c3
+    cl_log_level: debug
+    cl_extra_params:
+      - --validator-api-token-file=/km-token/km-token.txt
+    cl_extra_mounts:
+      "/km-token": "km-token.txt"
+    # PeerDAS/Fulu requires a supernode (or a node with 128+ validators).
+    supernode: true
+    keymanager_enabled: true
+    validator_count: 64
+# must equal configs/epbs/km-token.txt (no trailing newline)
+extra_files:
+  km-token.txt: "0x3ec0ad340bb9ca21e5593045b533d11d1b6784e03468af01db621db1804c2f0f"
+mev_type: buildoor
+buildoor_params:
+  image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
+  builder_api: true
+  epbs_builder: true
+  lifecycle: true
+  extra_args:
+    - --log-level=debug
+network_params:
+  preset: minimal
+  seconds_per_slot: 6
+  gloas_fork_epoch: 0
+  attestation_due_bps_gloas: 2500
+  withdrawal_type: "0x01"
+  validator_balance: 32
+  builder_count: 1
+  builder_balance: 100
+  deploy_eip8282_contracts: true
+global_log_level: info
