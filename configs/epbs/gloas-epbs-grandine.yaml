@@ -10,8 +10,11 @@
 # separate grandine VC, so there is no vc-1-* service and the harness reaches the
 # keymanager API on the cl-1-* service. ethereum-package enables it
 # (--enable-validator-api on the http-validator port) but cannot pass a token yet,
-# so --validator-api-token-file (grandine --help) points it at the static token
-# the harness reads from configs/epbs/km-token.txt.
+# so --validator-api-token-file (grandine --help) points it at the static token in
+# configs/epbs/km-token.txt, without its 0x: grandine hex-decodes the file
+# (validator/src/api.rs ApiToken::load refuses the 0x) and compares the bearer
+# against the bare hex. The harness sends the 0x form, so on grandine its
+# keystores listing gets 401; call the keymanager API with the bare hex instead.
 #
 # Builder flags come from ethereum-package under mev_type: buildoor
 # (apply_external_builder_flags): --builder-url=<buildoor> plus
@@ -31,9 +34,9 @@ participants:
     supernode: true
     keymanager_enabled: true
     validator_count: 64
-# must equal configs/epbs/km-token.txt (no trailing newline)
+# configs/epbs/km-token.txt without the 0x (no trailing newline)
 extra_files:
-  km-token.txt: "0x3ec0ad340bb9ca21e5593045b533d11d1b6784e03468af01db621db1804c2f0f"
+  km-token.txt: "3ec0ad340bb9ca21e5593045b533d11d1b6784e03468af01db621db1804c2f0f"
 mev_type: buildoor
 buildoor_params:
   image: ethpandaops/buildoor@sha256:b3dc726f8ba5ce944733f6e2b4bb5f8cb3885f98bacdc2a3e0bf3669f4b58064
