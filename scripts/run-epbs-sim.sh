@@ -956,7 +956,7 @@ PY
   fi
 fi
 
-# manual-config: the page's call sets a min_bid, which the beacon node applies to
+# manual-config: when the page's call sets a min_bid, the beacon node applies it to
 # CB's entry too, and buildoor's builder-API bid is only its subsidy (0.0001 ETH
 # by default): every bid CB returns would be floored and the block built from
 # buildoor's 0.101 ETH p2p bid. Raise the builder-API subsidy above the page's
@@ -964,7 +964,8 @@ fi
 # routes the proposer's bid requests through CB.
 MANUAL_CONFIG_SUBSIDY_GWEI=200000000
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-  docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1)"
+  # the page's call may set no min_bid: a grep that matches nothing must not end the run
+  docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)"
   (( ${docs_min_bid:-0} < MANUAL_CONFIG_SUBSIDY_GWEI )) \
     || die "manual-config: the page's min_bid $docs_min_bid is not below the builder-API subsidy $MANUAL_CONFIG_SUBSIDY_GWEI"
   RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
@@ -980,7 +981,7 @@ lines.insert(e+1,item.group(1)+"- "+flag+"\n")
 open(dst,"w").write("".join(lines))
 PY
   ARGS_FILE="$RENDERED_ARGS"
-  echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid $docs_min_bid (rendered -> $ARGS_FILE)"
+  echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid ${docs_min_bid:-(none)} (rendered -> $ARGS_FILE)"
 fi
 
 # clean any stale run (docker-path container is a separate object; the enclave rm
