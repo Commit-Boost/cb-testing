@@ -56,6 +56,9 @@
 #                      First runs a CONTROL devnet WITHOUT the flag (skip with
 #                      TRUSTED_PAYMENT_CONTROL=0): cb-km apply must exit non-zero
 #                      with a 400 on every key, the VC naming the flag.
+#   --assert relays-only  drop every [[mux]], so cb-km writes the [[relays]] builder
+#                      config to each key the VC holds, and require builder-built
+#                      blocks through CB as in the default mode
 #   --assert manual-config  run a CB commit that has no cb-km (CB_COMMIT) and write
 #                      each validator key's builder_config with the curl call in
 #                      that commit's docs/docs/get_started/epbs.md, run as written
@@ -76,7 +79,7 @@
 #                      requests and builder preferences per group, all under CM_OUT.
 #                      Then checks cb-km: --dry-run writes nothing, a plain apply
 #                      drops a third-party entry, --preserve-entries keeps it, and
-#                      --prune is refused when a mux has a URL loader. Reports the
+#                      --dry-run prints the [[relays]] config. Reports the
 #                      client's behaviour without judging it; fails only when the
 #                      observation is incomplete (a group with fewer than
 #                      CM_MIN_PROPOSALS blocks, an unclassified slot) or a cb-km
@@ -90,7 +93,7 @@
 # CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -182,12 +185,12 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial) : ;;
+  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "renamed: --assert dial" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 # config-matrix needs enough slots for every group to propose several times
 [[ -n "$OBSERVE_SLOTS" ]] || { [[ "$ASSERT_MODE" == "config-matrix" ]] && OBSERVE_SLOTS=64 || OBSERVE_SLOTS=16; }
@@ -469,8 +472,13 @@ assert_trusted_payment_refused() {
   # the status. || true: no match is a 0 here, not a reason for set -e to end the run
   refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: (.*failed: )?400' <<<"$out" \
     | grep -oE 'POST 0x[0-9a-f]{96}' | sort -u | wc -l || true)"
+  # cb-km stops at the first refusal that names the flag and says so once; an
+  # older cb-km wrote, and was refused, every key
+  local named=0
+  grep -q 'refuses a max_execution_payment above 0' <<<"$out" && named=1
   echo "  cb-km apply exit code:            $rc (need non-zero)"
-  echo "  keys refused with HTTP 400:       $refused of $n_keys (need all)"
+  echo "  cb-km named the flag and stopped: $([[ $named == 1 ]] && echo yes || echo no)"
+  echo "  keys refused with HTTP 400:       $refused of $n_keys (need 1 when it stopped, else all)"
   { grep -m1 -E 'failed: 400' <<<"$out" || true; } | cut -c1-240 | sed 's/^/    e.g. /'
 
   # one projected doc, POSTed by hand to read the VC's reason: the first
@@ -492,11 +500,14 @@ assert_trusted_payment_refused() {
   echo "  largest cap stored on that key:   $stored_cap (need 0)"
 
   log "RESULT"
-  if (( rc != 0 && n_keys >= 1 && refused == n_keys )) && [[ "$code" == 400 && "$body" == *allowDangerousTrustedPayments* && "$stored_cap" == 0 ]]; then
-    printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, cb-km apply exited %s with a 400 on all %s keys and stored no cap\033[0m\n' "$rc" "$n_keys"
+  local refusals_ok=0
+  if (( named == 1 )); then (( refused <= 1 )) && refusals_ok=1; else (( n_keys >= 1 && refused == n_keys )) && refusals_ok=1; fi
+  if (( rc != 0 && refusals_ok == 1 )) && [[ "$code" == 400 && "$body" == *allowDangerousTrustedPayments* && "$stored_cap" == 0 ]]; then
+    printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, cb-km apply exited %s, %s, and stored no cap\033[0m\n' \
+      "$rc" "$([[ $named == 1 ]] && echo "named the flag and stopped after $refused refusal" || echo "got a 400 on all $n_keys keys")"
     return 0
   fi
-  die "control: want cb-km exit != 0 (got $rc), 400 on all $n_keys keys (got $refused), a 400 naming the flag on the hand POST (got $code), stored cap 0 (got $stored_cap)"
+  die "control: want cb-km exit != 0 (got $rc), the flag named and one refusal or a 400 on all $n_keys keys (named=$named, refused=$refused), a 400 naming the flag on the hand POST (got $code), stored cap 0 (got $stored_cap)"
 }
 
 # --- assert trusted-payment: cb-km stored the unclamped cap on every entry ---------
@@ -757,9 +768,8 @@ cm_apply() {
 #   --dry-run          a projection that would change a key prints it and writes nothing
 #   plain apply        drops a third-party entry on a key (K2)
 #   --preserve-entries keeps the third-party entry beside CB's (K1)
-#   --prune            refused when a mux uses a URL loader, before any VC is contacted
 cm_km_checks() {
-  log "config-matrix: cb-km --dry-run, plain apply, --preserve-entries and --prune"
+  log "config-matrix: cb-km --dry-run, plain apply and --preserve-entries"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
   local d="$CM_OUT/km-checks" K1 K2 before after rc code ok fails=0
   mkdir -p "$d"; : > "$d/summary.txt"
@@ -795,20 +805,9 @@ cm_km_checks() {
   ok=0; { km_entry_urls "$K1" | grep -qxF "$CB_ENTRY_URL" && km_entry_urls "$K1" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
   check "--preserve-entries keeps it" $ok "POST 3rd-party to $K1: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K1" | paste -sd,)"
 
-  # --prune with a URL-loader mux: refused before any VC is contacted
-  { cat "$RUN_DIR/cb-config.toml"
-    printf '\n[[mux]]\nid = "url-loader"\nloader = { url = "http://127.0.0.1:9/keys.json" }\n\n'
-    printf '[[mux.relays]]\nid = "buildoor-url-loader"\nurl = "%s"\n' "$BUILDOOR_RELAY_URL"
-  } > "$d/url-loader-config.toml"
-  before="$(km_get "$K2" || true)"
-  rc=0; "$CB_KM_BIN" apply --config "$d/url-loader-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --prune > "$d/prune.txt" 2>&1 || rc=$?
-  after="$(km_get "$K2" || true)"
-  ok=0; { [[ "$rc" != 0 && "$before" == "$after" ]] && grep -q -- '--prune would clear' "$d/prune.txt" && ! grep -q '^accepted: ' "$d/prune.txt"; } || ok=1
-  check "--prune refused with a URL loader" $ok "exit $rc: $(sed -r 's/\x1b\[[0-9;]*m//g' "$d/prune.txt" | grep -m1 -- '--prune' | cut -c1-120)"
-  # the same config without --prune is accepted, so the refusal is about --prune
-  rc=0; "$CB_KM_BIN" apply --config "$d/url-loader-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run > "$d/url-loader-dry-run.txt" 2>&1 || rc=$?
-  ok=0; { [[ "$rc" == 0 ]] && grep -q 'projects none of its keys' "$d/url-loader-dry-run.txt"; } || ok=1
-  check "  same config, no --prune: loads" $ok "dry-run exit $rc: $(grep -m1 'WARN' "$d/url-loader-dry-run.txt" | cut -c1-110)"
+  # --dry-run also prints the [[relays]] config, which any key outside the muxes gets
+  ok=0; grep -q '^would apply to every other key: ' "$d/dry-run.txt" || ok=1
+  check "--dry-run prints the [[relays]] config" $ok "$(grep -m1 '^would apply to every other key' "$d/dry-run.txt" | cut -c1-110)"
   return $(( fails > 0 ))
 }
 
@@ -865,6 +864,19 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
   if [[ "$ASSERT_MODE" == "manual-config" ]]; then
     sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|max_execution_payment_gwei) = /d' \
       -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' "$out/cb-config.toml"
+  fi
+
+  # relays-only: no [[mux]], so every key gets the [[relays]] builder config
+  if [[ "$ASSERT_MODE" == "relays-only" ]]; then
+    python3 - "$out/cb-config.toml" <<'PY'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+start = re.search(r"^\[\[mux\]\]\s*$", s, re.M).start()
+end = re.search(r"^\[logs\.stdout\]\s*$", s, re.M).start()
+end = s.rfind("\n\n", start, end) + 2
+open(p, "w").write(s[:start] + s[end:])
+PY
+    grep -q '^\[\[mux\]\]' "$out/cb-config.toml" && die "relays-only: a [[mux]] is left in cb-config.toml"
   fi
 
   # trusted-payment: no cap anywhere, so cb-km writes its default, the largest
@@ -965,7 +977,7 @@ docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not 
 if [[ "$ASSERT_MODE" != "manual-config" ]]; then
   if [[ -z "$CB_KM_BIN" ]]; then
     if command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
-    else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
+    else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km --release)"; fi
   fi
   "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
 fi
@@ -973,7 +985,7 @@ fi
 if [[ "$ASSERT_MODE" == "preserve" ]]; then
   "$CB_KM_BIN" apply --help 2>&1 | grep -q -- '--preserve-entries' \
     || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build a commit-boost-client commit with it \
-(cargo build -p cb-km-tool --release) and set CB_KM_BIN"
+(cargo build -p cb-km --release) and set CB_KM_BIN"
 fi
 # Every builder-built count below rests on this classifier; check it against its
 # boundary cases before spending a devnet on it.

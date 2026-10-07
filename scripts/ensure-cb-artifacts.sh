@@ -81,7 +81,7 @@ if (( no_km )); then
 fi
 
 # 2. cb-km binary, from the same submodule. A stamp beside it records the commit
-#    it was built from, so a submodule bump rebuilds it even when no km-tool file
+#    it was built from, so a submodule bump rebuilds it even when no cb-km file
 #    changed (cb-km also parses the config through cb-common). A dirty tree always
 #    goes through cargo, which rebuilds only what changed.
 stamp="$kmbin.commit"
@@ -89,7 +89,9 @@ full_sha="$(git -C "$src" rev-parse HEAD)"
 dirty="$(git -C "$src" status --porcelain --untracked-files=no)"
 if [[ ! -x "$kmbin" || "$(cat "$stamp" 2>/dev/null)" != "$full_sha" || -n "$dirty" ]]; then
   echo "building cb-km from commit-boost-client @ $sha..." >&2
-  ( cd "$src" && cargo build -p cb-km-tool --release ) 1>&2
+  # the package was cb-km-tool before it was renamed cb-km
+  pkg=cb-km; [[ -d "$src/crates/km-tool" ]] && pkg=cb-km-tool
+  ( cd "$src" && cargo build -p "$pkg" --release ) 1>&2
   # a dirty build is no commit's, so it leaves no stamp to match later
   if [[ -z "$dirty" ]]; then echo "$full_sha" > "$stamp"; else rm -f "$stamp"; fi
 else
