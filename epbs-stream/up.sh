@@ -75,7 +75,7 @@ km_apply() {
 }
 
 if [[ $stage == all || $stage == services ]]; then
-  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km-tool --release in the CB checkout)"
+  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km --release in the CB checkout)"
   docker image inspect "$CB_IMAGE" "$STUB_IMAGE" >/dev/null || die "missing image (CB_IMAGE=$CB_IMAGE STUB_IMAGE=$STUB_IMAGE)"
 
   log "wait for head >= 1"
@@ -129,7 +129,7 @@ EOF
 fi
 
 if [[ $stage == cb ]]; then
-  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km-tool --release in the CB checkout)"
+  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km --release in the CB checkout)"
   docker image inspect "$CB_IMAGE" >/dev/null || die "missing image CB_IMAGE=$CB_IMAGE"
   log "replace cb-epbs"
   kurtosis service rm "$ENCLAVE" cb-epbs >/dev/null

@@ -579,14 +579,14 @@ if [[ -z "$CB_KM_BIN" ]]; then
   if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
   elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
   elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
-  else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
+  else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km --release)"; fi
 fi
 "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
 # preserve mode needs the merged --preserve-entries flag (epbs branch)
 if [[ "$ASSERT_MODE" == "preserve" ]]; then
   "$CB_KM_BIN" apply --help 2>&1 | grep -q -- '--preserve-entries' \
     || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build the epbs branch: \
-(cd /home/j/code/commit-boost-client && cargo build -p cb-km-tool --release) and set CB_KM_BIN"
+(cd /home/j/code/commit-boost-client && cargo build -p cb-km --release) and set CB_KM_BIN"
 fi
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"

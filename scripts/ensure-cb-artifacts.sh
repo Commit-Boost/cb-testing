@@ -44,13 +44,15 @@ else
   ( cd "$sub" && just build-all "km-e2e-$sha" ) 1>&2
 fi
 
-# 2. cb-km binary, from the same submodule. Rebuild if missing or if any km-tool
+# 2. cb-km binary, from the same submodule. Rebuild if missing or if any cb-km
 #    source is newer than the binary (the freshness guard).
 stale_src=""
-[[ -x "$kmbin" ]] && stale_src="$(find "$sub/crates/km-tool/src" -name '*.rs' -newer "$kmbin" 2>/dev/null | head -1 || true)"
+# the package was cb-km-tool, in crates/km-tool, before it was renamed cb-km
+pkg=cb-km; kmdir="$sub/crates/km"; [[ -d "$sub/crates/km-tool" ]] && { pkg=cb-km-tool; kmdir="$sub/crates/km-tool"; }
+[[ -x "$kmbin" ]] && stale_src="$(find "$kmdir/src" -name '*.rs' -newer "$kmbin" 2>/dev/null | head -1 || true)"
 if [[ ! -x "$kmbin" || -n "$stale_src" ]]; then
   echo "building cb-km from commit-boost-client @ $sha..." >&2
-  ( cd "$sub" && cargo build -p cb-km-tool --release ) 1>&2
+  ( cd "$sub" && cargo build -p "$pkg" --release ) 1>&2
 else
   echo "cb-km ok: $kmbin" >&2
 fi
