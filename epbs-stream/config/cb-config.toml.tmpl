@@ -4,6 +4,9 @@ chain = { genesis_time_secs = __GENESIS_TIME__, slot_time_secs = __SLOT_SECS__, 
 host = "0.0.0.0"
 port = 18550
 skip_sigverify = true
+# cb-km's default cap is unclamped, which the lodestar VC refuses without
+# --allowDangerousTrustedPayments
+max_execution_payment_gwei = 0
 # projection-only (KM tooling): key-level min_bid floors p2p bids above the
 # 0.101 ETH p2p bid; entries keep their explicit low min_bid so CB bids survive
 min_bid_p2p_eth = "0.2"
