@@ -1401,11 +1401,23 @@ built_slots="$(sed -n 's/^builder=//p' <<<"$classified")"
 payment_only_slots="$(sed -n 's/^payment_only=//p' <<<"$classified")"
 n_built=$(count_csv "$built_slots")
 n_payment_only=$(count_csv "$payment_only_slots")
+# buildoor also bids over p2p, so a builder-built block counts only when its bid
+# is one CB returned: same block hash, value and execution payment
+cb_log_file="$(mktemp "${TMPDIR:-/tmp}/epbs-cb-log.XXXXXX")"
+printf '%s\n' "$CB_LOG" > "$cb_log_file"
+sourced="$(python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" via-cb "$BN" "$start_slot" "$end_slot" "$cb_log_file")" \
+  || die "could not match the blocks' bids against CB's"
+rm -f "$cb_log_file"
+via_cb_slots="$(sed -n 's/^via_cb=//p' <<<"$sourced")"
+other_slots="$(sed -n 's/^builder_other=//p' <<<"$sourced")"
+n_via_cb=$(count_csv "$via_cb_slots")
 
 echo "  BN -> CB bid calls (window+):     $bid_calls"
 echo "  buildoor bids via CB:             $buildoor_bids"
 echo "  builder-built blocks on chain:    $n_built  [slots: $built_slots]"
 echo "    paid only via execution_payment (value = 0): $n_payment_only"
+echo "    built from a bid CB returned:   $n_via_cb  [slots: $via_cb_slots]"
+echo "    built from another bid (p2p):   $(count_csv "$other_slots")  [slots: $other_slots]"
 
 # builder-down diverges here: it only needs the builder PROVEN live (>=1
 # builder-built slot), then stops buildoor and asserts proposer liveness.
@@ -1464,9 +1476,9 @@ if [[ "$ASSERT_MODE" == "manual-config" ]]; then
 fi
 
 log "RESULT"
-if (( n_built >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
-  printf '\033[1;32mPASS: %s/%s observed slots builder-built via commit-boost (buildoor)\033[0m\n' \
-    "$n_built" "$OBSERVE_SLOTS"
+if (( n_via_cb >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
+  printf '\033[1;32mPASS: %s/%s observed slots built from a bid CB returned (buildoor)\033[0m\n' \
+    "$n_via_cb" "$OBSERVE_SLOTS"
   if [[ "$ASSERT_MODE" == "p2p" ]]; then
     printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
       "$p2p_rejected" "$cb_selected"
@@ -1479,5 +1491,5 @@ if (( n_built >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2
 else
   cb_logs | tail -30
   (( p2p_ok == 1 )) || die "p2p assertion failed (rejected=$p2p_rejected need>=1, cb_selected=$cb_selected need>=1, p2p_selected=$p2p_selected need=0)"
-  die "loop not satisfied (built=$n_built need>=$MIN_BUILDER_SLOTS, buildoor bids=$buildoor_bids, bid calls=$bid_calls)"
+  die "loop not satisfied (built from a CB bid=$n_via_cb need>=$MIN_BUILDER_SLOTS, builder-built=$n_built, buildoor bids=$buildoor_bids, bid calls=$bid_calls)"
 fi

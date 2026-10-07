@@ -38,6 +38,9 @@ Subcommands:
   reclassify <out-dir> <groups.json> <cb.log>
       recompute the outcomes and table of a finished run from its slots.json and
       CB log, without the devnet
+  via-cb <bn-url> <first> <last> <cb.log>
+      print via_cb=<slots> and builder_other=<slots>: the builder-built blocks in
+      [first, last] whose bid is one CB returned for that slot, and the rest
 """
 
 import json
@@ -298,6 +301,24 @@ def outcome(bid, cb_bids):
     return "builder-other"
 
 
+def via_cb(bn, first, last, cb_log):
+    cb_bids, _, _ = cb_evidence(cb_log)
+    found = {"via-cb": [], "builder-other": []}
+    for slot in range(int(first), int(last) + 1):
+        try:
+            with urllib.request.urlopen("{0}/eth/v2/beacon/blocks/{1}".format(bn, slot), timeout=10) as r:
+                msg = json.load(r)["data"]["message"]
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                continue
+            raise
+        kind = outcome(msg["body"]["signed_execution_payload_bid"]["message"], cb_bids.get(slot, []))
+        if kind in found:
+            found[kind].append(str(slot))
+    print("via_cb=" + ",".join(found["via-cb"]))
+    print("builder_other=" + ",".join(found["builder-other"]))
+
+
 def classify(argv):
     bn, first, last, groups_path, cb_log, bn_log, vc_log, out_dir = argv
     first, last = int(first), int(last)
@@ -438,6 +459,8 @@ def main():
         sys.exit(classify(argv))
     elif cmd == "reclassify":
         sys.exit(reclassify(*argv))
+    elif cmd == "via-cb":
+        via_cb(*argv)
     else:
         sys.exit("unknown subcommand " + cmd)
 
