@@ -9,6 +9,9 @@ port = 18550
 # --assert trusted-payment inserts its [pbs] key after. Every [pbs] and [[mux]]
 # key here must be one Commit-Boost reads: cb-km refuses any other.
 skip_sigverify = true
+# cb-km's default cap is unclamped, which the lodestar VC refuses without
+# --allowDangerousTrustedPayments; --assert trusted-payment drops this line
+max_execution_payment_gwei = 0
 # projection-only (KM tooling): key-level min_bid floors p2p bids above the
 # 0.101 ETH p2p bid; entries keep their explicit low min_bid so CB bids survive
 min_bid_p2p_eth = "0.2"

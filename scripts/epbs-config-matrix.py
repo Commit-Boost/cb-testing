@@ -8,11 +8,10 @@ render-args to value V = 0.2 ETH plus execution_payment P = 0.2 ETH, P claimed
 whatever the proposer advertised; its p2p bid is about 0.101 ETH; an empty devnet's
 local block is worth about 0):
 
-  g-default       nothing set: the validator client's own defaults apply
+  g-default       nothing set in the mux: cb-km's defaults under the template's
+                  [pbs] cap of 0 (min_bid 0, boost left to the client)
   g-boost0        builder_boost_factor = 0 at entry and key level: the local block
                   wins when the client applies the written boost
-  g-boost0-entry  entry boost 0, key-level (p2p) boost 100: the CB bid loses when the
-                  entry value governs builder-API bids, wins when the key-level does
   g-boost-high    builder_boost_factor = 1000: accepted and builder-built
   g-minbid-high   min_bid_eth = 1.0, above V + P: no bid via CB, and the key-level
                   min_bid (the same value) floors the p2p bid too
@@ -24,7 +23,7 @@ Subcommands:
   render-config <cb-config.toml> <groups.json>
       rewrite the rendered single-mux CB config in place into one mux per group
       (the relay URL and the 64 keys come from the template's mux), and drop the
-      [pbs] p2p projection keys so a group's key level is its own
+      [pbs] p2p projection keys so a group's key level is its entry values
   render-args <src.yaml> <dst.yaml> [--vc-param P]... [--buildoor-arg A]...
       copy a kurtosis args file, adding VC params to participant 1 and args to
       buildoor_params.extra_args
@@ -57,15 +56,8 @@ KEY_RE = re.compile(r"0x[0-9a-f]{96}")
 # name, [[mux]] lines, relay lines, expected outcomes under the keymanager spec,
 # what the group tests
 GROUPS = [
-    ("g-default", [], [], ["via-cb"], "VC defaults for every value cb-km leaves unset"),
+    ("g-default", [], [], ["via-cb"], "cb-km's defaults, under the template's [pbs] cap of 0"),
     ("g-boost0", ["builder_boost_factor = 0"], [], ["self"], "boost 0 prefers the local block"),
-    (
-        "g-boost0-entry",
-        ["builder_boost_factor = 0", "builder_boost_factor_p2p = 100"],
-        [],
-        ["builder-other", "self"],
-        "entry boost 0, key-level boost 100: which one governs the CB bid",
-    ),
     ("g-boost-high", ["builder_boost_factor = 1000"], [], ["via-cb"], "boost 1000 accepted"),
     ("g-minbid-high", ['min_bid_eth = "1.0"'], [], ["self"], "min_bid above the CB bid"),
     (

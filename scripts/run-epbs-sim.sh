@@ -44,8 +44,8 @@
 #                      (builder_index == BUILDER_INDEX_SELF_BUILD), and CB returns
 #                      204 "no header available" and NEVER 500. Proves builder
 #                      failure never stalls the proposer.
-#   --assert trusted-payment  set [pbs] max_execution_payment_gwei = "unclamped"
-#                      (the relays carry none, so it is the effective cap), start
+#   --assert trusted-payment  drop the template's [pbs] max_execution_payment_gwei
+#                      = 0, so cb-km writes its default, unclamped cap, start
 #                      the lodestar VC with --allowDangerousTrustedPayments, and
 #                      tell buildoor to claim half of each bid as execution_payment
 #                      (--builder-api-execution-payment-percent). HARD-fails unless
@@ -204,8 +204,8 @@ esac
 
 # builder-down runs a second observe window after stopping buildoor
 BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor is stopped
-# trusted-payment: cb-km writes [pbs] max_execution_payment_gwei = "unclamped" as
-# the largest Uint64, so the BN counts the whole execution payment
+# trusted-payment: with no cap set, cb-km writes the largest Uint64, so the BN
+# counts the whole execution payment
 UNCLAMPED_CAP=18446744073709551615
 # trusted-payment: 1 = first run the control devnet, whose VC lacks the flag
 TRUSTED_PAYMENT_CONTROL="${TRUSTED_PAYMENT_CONTROL:-1}"
@@ -500,10 +500,8 @@ assert_trusted_payment_refused() {
 }
 
 # --- assert trusted-payment: cb-km stored the unclamped cap on every entry ---------
-# The relays carry no max_execution_payment_gwei, so [pbs] "unclamped" holds the
-# effective cap and cb-km must write it, as the largest Uint64, onto every
-# builder_config entry of every key (a relay-only projection leaves the entries
-# uncapped, so the BN values the trusted payment at 0).
+# No max_execution_payment_gwei is set anywhere, so cb-km must write its default,
+# the largest Uint64, onto every builder_config entry of every key.
 assert_cap_projected() {
   log "assert trusted-payment: cb-km stored max_execution_payment = $UNCLAMPED_CAP on every entry"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
@@ -865,18 +863,17 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
 
   # manual-config: a commit without cb-km does not read its p2p projection keys
   if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p) = /d' \
+    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|max_execution_payment_gwei) = /d' \
       -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' "$out/cb-config.toml"
   fi
 
-  # trusted-payment: the [pbs] cap is the only max_execution_payment_gwei in the
-  # file, so it is the effective cap for both relay entries; cb-km writes it onto
-  # every builder_config entry as the largest Uint64.
+  # trusted-payment: no cap anywhere, so cb-km writes its default, the largest
+  # Uint64, onto every builder_config entry
   if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
-    sed -i 's|^skip_sigverify = .*$|&\nmax_execution_payment_gwei = "unclamped"|' "$out/cb-config.toml"
-    [[ "$(grep -c '^max_execution_payment_gwei = ' "$out/cb-config.toml")" == 1 ]] \
-      && grep -q '^max_execution_payment_gwei = "unclamped"$' "$out/cb-config.toml" \
-      || die "trusted-payment: want exactly one max_execution_payment_gwei ([pbs]) in cb-config.toml"
+    sed -i -e '/^max_execution_payment_gwei = /d' -e '/^# cb-km.s default cap is unclamped/d' \
+      -e '/^# --allowDangerousTrustedPayments; --assert trusted-payment drops this line/d' "$out/cb-config.toml"
+    grep -q 'max_execution_payment_gwei' "$out/cb-config.toml" \
+      && die "trusted-payment: want no max_execution_payment_gwei in cb-config.toml"
   fi
 
   # config-matrix: one mux per group of keys, each with its own values and relay
