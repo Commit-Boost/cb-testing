@@ -693,7 +693,7 @@ assert_dial() {
   log "assert dial: CB dials the builder its relay entries do not name"
   local CB_LOG dialed refused looped
   CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"
-  dialed=$(grep 'outside the config, dialing it' <<<"$CB_LOG" | grep -c "url=${DIAL_AUTH_URL}/" || true)
+  dialed=$(grep 'outside the config, dialing it' <<<"$CB_LOG" | grep -cE "origin=${DIAL_AUTH_URL}( |$)" || true)
   refused=$(grep -c 'resolves to a disallowed address' <<<"$CB_LOG" || true)
   looped=$(grep -c 'request came from a Commit-Boost' <<<"$CB_LOG" || true)
   echo "  requests CB dialed $DIAL_AUTH_URL for:       $dialed (need >= 1)"
