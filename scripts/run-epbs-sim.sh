@@ -327,38 +327,40 @@ classify_blocks() { # $1=s0 $2=s1
 # number of entries in a comma-separated slot list ("" -> 0)
 count_csv() { if [[ -n "$1" ]]; then awk -F, '{print NF}' <<<"$1"; else echo 0; fi; }
 
-# --- assert block-submission: CB forwards the reveal unparsed (blind pipe) -------
+# --- assert block-submission: CB forwards the reveal unparsed -----------------
 # The proposer reveals every builder-built block by POSTing the gloas
 # SignedBeaconBlock to its builder URL (CB) at POST /eth/v1/builder/beacon_blocks.
 # CB decodes nothing: it checks the request (a gloas Eth-Consensus-Version, an SSZ
-# body) and forwards the bytes to every configured relay. Its answer to the BN:
+# body), forwards the bytes to every configured relay and answers the BN 202 once
+# forwarded, whatever the relays answer:
 #   4xx -> refused before the forward: 400 (no gloas Eth-Consensus-Version) or
 #          415 (not SSZ). A regression on either side of the hop.
-#   5xx -> forwarded, and no relay accepted (NoBuilderResponse). EXPECTED while
-#          buildoor does not HTTP-accept the reveal (it gets the block over p2p).
-#   2xx -> forwarded, and buildoor accepted.
-# A forward buildoor never answered (timeout, connection failure) is CB's
-# "builder did not answer the signed block" warning: the bytes never reached the
-# builder, the one failure the pipe owns.
-# PASS: >=1 reveal reached the forward (2xx or 5xx), zero 4xx, zero unanswered.
+#   202 -> forwarded. CB's own log says whether a builder accepted it
+#          ("signed beacon block accepted") or none did ("no builder accepted"),
+#          which is expected while buildoor gets the block over p2p.
+# A forward that got no answer at all (timeout, connection failure) is a
+# "builder did not accept the block" line carrying a reqwest error.
+# A CB from before the always-202 change answered 5xx when no relay accepted.
+# PASS: >=1 reveal forwarded, zero 4xx, zero forwards without an answer.
 assert_block_submission() {
   log "assert block-submission: CB forwards the CL's gloas SignedBeaconBlock unparsed at /beacon_blocks"
-  local CB_LOG bb fwd_2xx refused no_accept unanswered reached
+  local CB_LOG bb fwd_2xx refused fwd_5xx accepted none_accepted unanswered reached
   CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"   # strip ANSI so the status parses
   bb="$(grep 'method=/eth/v1/builder/beacon_blocks' <<<"$CB_LOG" | grep -oE 'Responded with [0-9]{3}' || true)"
   fwd_2xx=$(grep -c 'Responded with 2' <<<"$bb" || true)
   refused=$(grep -c 'Responded with 4' <<<"$bb" || true)
-  no_accept=$(grep -c 'Responded with 5' <<<"$bb" || true)
-  unanswered=$(grep -c 'builder did not answer the signed block' <<<"$CB_LOG" || true)
-  reached=$(( fwd_2xx + no_accept ))
-  echo "  reveals forwarded (2xx + 5xx):                  $reached (need >= 1)"
-  echo "  /beacon_blocks 2xx (buildoor accepted):         $fwd_2xx"
-  echo "  /beacon_blocks 5xx (no relay accepted - ok):    $no_accept"
+  fwd_5xx=$(grep -c 'Responded with 5' <<<"$bb" || true)
+  accepted=$(grep -c 'signed beacon block accepted' <<<"$CB_LOG" || true)
+  none_accepted=$(grep -c 'no builder accepted the signed beacon block' <<<"$CB_LOG" || true)
+  unanswered=$(grep 'builder did not accept the block' <<<"$CB_LOG" | grep -c 'reqwest error' || true)
+  reached=$(( fwd_2xx + fwd_5xx ))
+  echo "  reveals forwarded (2xx, or 5xx on an older CB):  $reached (need >= 1)"
+  echo "  a builder accepted / none accepted (CB's log):  $accepted / $none_accepted"
   echo "  /beacon_blocks 4xx (refused before forward):    $refused (need 0)"
-  echo "  forwards buildoor never answered:               $unanswered (need 0)"
+  echo "  forwards with no answer (reqwest error):        $unanswered (need 0)"
   if (( reached >= 1 && refused == 0 && unanswered == 0 )); then
-    printf '\033[1;32mPASS: CB forwarded %s gloas SignedBeaconBlock(s) unparsed (%s accepted, %s unaccepted, 0 refused, 0 unanswered)\033[0m\n' \
-      "$reached" "$fwd_2xx" "$no_accept"
+    printf '\033[1;32mPASS: CB forwarded %s gloas SignedBeaconBlock(s) unparsed (builder accepted %s, none accepted %s, 0 refused, 0 unanswered)\033[0m\n' \
+      "$reached" "$accepted" "$none_accepted"
     return 0
   fi
   echo "  --- CB /beacon_blocks lines (tail) ---"
@@ -558,7 +560,9 @@ s0,s1,cb_url,cap,need=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5],int(sys.argv
 def gwei(eth): return int(Decimal(eth)*10**9)
 cb={}      # slot -> {(value, execution_payment)} of the bids buildoor gave CB, gwei
 for line in open(cb_log,errors="replace"):
-    if "received new header" not in line or 'relay_id="buildoor-mux"' not in line: continue
+    # A CB from before #505's review logs "received new header" with the relay id;
+    # later ones log "received header" for the bid they return (buildoor is the only relay)
+    if not ("received new header" in line and 'relay_id="buildoor-mux"' in line) and "received header " not in line: continue
     slot=re.search(r"\bslot=(\d+)",line)
     v=re.search(r'trustless_bid_eth="([0-9.]+)"',line)
     ep=re.search(r'execution_payment_eth="([0-9.]+)"',line)
