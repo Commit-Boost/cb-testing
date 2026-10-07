@@ -1,0 +1,23 @@
+diff --git a/crates/pbs/src/dial.rs b/crates/pbs/src/dial.rs
+index 19f85fb4..a04c0537 100644
+--- a/crates/pbs/src/dial.rs
++++ b/crates/pbs/src/dial.rs
+@@ -144,14 +144,10 @@ pub fn set_skip_dial_target_check(skip: bool) {
+ }
+ 
+ fn dial_target_check_enabled() -> bool {
+-    #[cfg(feature = "testing-flags")]
+-    {
+-        !SKIP_DIAL_TARGET_CHECK.with(|flag| flag.get())
+-    }
+-    #[cfg(not(feature = "testing-flags"))]
+-    {
+-        true
+-    }
++    // TEST BUILD ONLY (cb-testing --assert dial): a devnet has no public address.
++    // Both cfg branches, since workspace feature unification turns testing-flags
++    // on in the release build.
++    false
+ }
+ 
+ /// Internal addresses, also as the IPv4 inside a v4-mapped, v4-compatible or

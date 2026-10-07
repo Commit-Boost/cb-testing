@@ -182,12 +182,12 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix) : ;;
+  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
-  dial|pipe) no_mode "CB refuses to dial a private address and a devnet has no other; CB's integration tests cover it (docs/EPBS.md)" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  pipe) no_mode "renamed: --assert dial" ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 # config-matrix needs enough slots for every group to propose several times
 [[ -n "$OBSERVE_SLOTS" ]] || { [[ "$ASSERT_MODE" == "config-matrix" ]] && OBSERVE_SLOTS=64 || OBSERVE_SLOTS=16; }
@@ -664,6 +664,46 @@ check_config_keys() { # $1=cb-config.toml $2=commit
 
 # Each key the VC holds gets its builder config from the page's call, run as
 # written; a curl wrapper only records the status code and response body.
+# --- dial: every key's builder config names buildoor by URL, which no relay entry
+# matches (the entry names buildoor by IP), so CB dials it. A devnet has only
+# private addresses, which CB refuses to dial, so this needs a CB_COMMIT built with
+# scripts/cb-dial-test.patch (docs/EPBS.md, dial mode). buildoor accepts the URL
+# as auth data because it equals its --builder-api-url.
+DIAL_AUTH_URL="${DIAL_AUTH_URL:-http://buildoor:8080}"
+write_dial_builder_configs() {
+  log "dial: each key's builder config: url=$CB_ENTRY_URL auth_data=$DIAL_AUTH_URL"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  local keys body code n=0
+  keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
+    | python3 -c 'import sys,json;[print(k["validating_pubkey"]) for k in json.load(sys.stdin)["data"]]')" \
+    || die "dial: could not list the VC's keystores"
+  body="$(printf '{"builders":[{"url":"%s","auth_data":"0x%s","builder_pubkeys":[]}]}' "$CB_ENTRY_URL" \
+    "$(python3 -c 'import sys;print(sys.argv[1].encode().hex())' "$DIAL_AUTH_URL")")"
+  for key in $keys; do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $KM_TOKEN" \
+      -H 'Content-Type: application/json' -d "$body" "$VC_KM/eth/v1/validator/$key/builder_config")"
+    [[ "$code" == 2* ]] || die "dial: builder_config POST for $key got HTTP $code"
+    n=$((n + 1))
+  done
+  echo "  wrote $n builder configs"
+}
+
+# PASS: CB dialed buildoor for the bids, never refused its address, never looped
+assert_dial() {
+  log "assert dial: CB dials the builder its relay entries do not name"
+  local CB_LOG dialed refused looped
+  CB_LOG="$(cb_logs | sed -r 's/\x1b\[[0-9;]*m//g')"
+  dialed=$(grep 'outside the config, dialing it' <<<"$CB_LOG" | grep -c "url=${DIAL_AUTH_URL}/" || true)
+  refused=$(grep -c 'resolves to a disallowed address' <<<"$CB_LOG" || true)
+  looped=$(grep -c 'request came from a Commit-Boost' <<<"$CB_LOG" || true)
+  echo "  requests CB dialed $DIAL_AUTH_URL for:       $dialed (need >= 1)"
+  echo "  dials refused as a disallowed address:     $refused (need 0: is CB built with cb-dial-test.patch?)"
+  echo "  requests from a Commit-Boost refused:      $looped (need 0)"
+  (( dialed >= 1 && refused == 0 && looped == 0 )) || die "dial failed (dialed=$dialed refused=$refused looped=$looped)"
+  printf '\033[1;32mPASS: CB dialed %s for %s bid and preferences requests; the blocks above were built from those bids\033[0m\n' \
+    "$DIAL_AUTH_URL" "$dialed"
+}
+
 write_documented_builder_configs() {
   log "manual-config: each key's builder_config via the call in $DOCS_PAGE @ ${CB_SHA:0:12}"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
@@ -927,9 +967,7 @@ docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not 
 
 if [[ "$ASSERT_MODE" != "manual-config" ]]; then
   if [[ -z "$CB_KM_BIN" ]]; then
-    if [[ -x /home/j/code/commit-boost-client/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/commit-boost-client/target/release/cb-km
-    elif command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
-    elif [[ -x /home/j/code/cb-km-wt1/target/release/cb-km ]]; then CB_KM_BIN=/home/j/code/cb-km-wt1/target/release/cb-km
+    if command -v cb-km >/dev/null 2>&1; then CB_KM_BIN="$(command -v cb-km)"
     else die "cb-km binary not found - set CB_KM_BIN (build: cargo build -p cb-km-tool --release)"; fi
   fi
   "$CB_KM_BIN" --help >/dev/null 2>&1 || die "cb-km at $CB_KM_BIN not runnable"
@@ -937,8 +975,8 @@ fi
 # preserve mode needs the merged --preserve-entries flag (epbs branch)
 if [[ "$ASSERT_MODE" == "preserve" ]]; then
   "$CB_KM_BIN" apply --help 2>&1 | grep -q -- '--preserve-entries' \
-    || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build the epbs branch: \
-(cd /home/j/code/commit-boost-client && cargo build -p cb-km-tool --release) and set CB_KM_BIN"
+    || die "cb-km at $CB_KM_BIN lacks --preserve-entries; build a commit-boost-client commit with it \
+(cargo build -p cb-km-tool --release) and set CB_KM_BIN"
 fi
 # Every builder-built count below rests on this classifier; check it against its
 # boundary cases before spending a devnet on it.
@@ -1126,6 +1164,13 @@ echo "head slot = $head_slot"
 
 # ---- 3. render CB config + overlay from the live chain -----------------------
 log "rendering CB config from live BN"
+if [[ "$ASSERT_MODE" == "dial" ]]; then
+  bo_ip="$(docker network inspect "$NET" -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' \
+    | awk '/^buildoor--/{split($2,a,"/"); print a[1]}')"
+  [[ -n "$bo_ip" ]] || die "dial: cannot find buildoor's address on $NET"
+  BUILDOOR_RELAY_URL="$(sed -E "s|@buildoor:|@$bo_ip:|" <<<"$BUILDOOR_RELAY_URL")"
+  echo "dial: relay entry $BUILDOOR_RELAY_URL"
+fi
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
 echo "genesis_time=$GEN_TIME"
 render_cb_config "$RUN_DIR" "$GEN_TIME" "$VC_KM"
@@ -1171,6 +1216,8 @@ if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
 fi
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   write_documented_builder_configs
+elif [[ "$ASSERT_MODE" == "dial" ]]; then
+  write_dial_builder_configs
 elif [[ "$ASSERT_MODE" == "config-matrix" ]]; then
   cm_apply
 else
@@ -1330,6 +1377,7 @@ if (( n_built >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2
   # block-submission: also assert the reveal went through the blind pipe
   [[ "$ASSERT_MODE" == "block-submission" ]] && { assert_block_submission; }
   [[ "$ASSERT_MODE" == "trusted-payment" ]]  && { assert_trusted_payment "$start_slot" "$end_slot"; }
+  [[ "$ASSERT_MODE" == "dial" ]]             && { assert_dial; }
   exit 0
 else
   cb_logs | tail -30

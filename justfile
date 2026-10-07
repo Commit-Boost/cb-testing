@@ -265,8 +265,8 @@ epbs-sim:
 # Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
 # no timing games on the ePBS bid path).
 # Retired: direct (cb-km no longer writes direct builder entries; the BN falls back to p2p bids when CB is down).
-# No pipe mode: the pipe refuses every private address, and a devnet has no other
-# (docs/EPBS.md).
+#   CB_COMMIT=<CB with scripts/cb-dial-test.patch> just epbs-sim-assert dial
+#                                          CB dials a builder its relay entries do not name (docs/EPBS.md).
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
 

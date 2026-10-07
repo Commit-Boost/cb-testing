@@ -366,25 +366,31 @@ Retired, each rejected by the script with its reason:
   (its overlay refuses `direct_entries`). With CB down the beacon node already falls
   back to p2p bids and local blocks, so the entry mostly doubled bid requests.
 
-**No `dial` mode.** CB dials the builder named by auth data that matches no
-configured relay (`relay_id="dial"` in its metrics). A devnet cannot exercise it:
+**`dial` mode.** CB dials the builder named by auth data that matches no configured
+relay (`relay_id="dial"` in its metrics). Three things make a devnet run possible:
 
-- CB refuses to dial a target that resolves to a loopback, private,
-  link-local, CGNAT, broadcast or unspecified address (`400`, "the addressed
-  builder's host does not resolve in time or resolves to a disallowed address").
-  Every enclave service sits on a Docker bridge network in RFC 1918 space
-  (`172.16.0.0/12`), so every builder in the devnet is refused.
-- The only bypass is `cb_pbs::set_skip_dial_target_check`, a thread-local setter
-  compiled in by the `testing-flags` feature and called from inside CB's own test
-  process. No config key, env var or flag reaches it, so even a `testing-flags`
-  image would refuse the enclave's addresses.
-- Hostname auth data, what cb-km writes, is dialed as `https://<hostname>` on port
-  443, and buildoor serves plain HTTP on 8080.
+- CB refuses to dial a loopback, private, link-local, CGNAT, broadcast or
+  unspecified address, and every enclave service sits in RFC 1918 space. The mode
+  therefore needs a CB built with `scripts/cb-dial-test.patch`, which turns that
+  check off. Never merge it. Build the commit in the submodule's repo, then run:
+  ```bash
+  git -C commit-boost-client worktree add --detach ../cb-dial-test <CB commit>
+  git -C ../cb-dial-test apply "$PWD/scripts/cb-dial-test.patch"
+  git -C ../cb-dial-test commit -am "test-only: dial private addresses"
+  CB_COMMIT=$(git -C ../cb-dial-test rev-parse HEAD) just epbs-sim-assert dial
+  ```
+- The relay entry names buildoor by IP, so neither `buildoor` nor
+  `http://buildoor:8080` matches it, and each key's builder config, written by hand
+  instead of by cb-km, sends `http://buildoor:8080` as its auth data. buildoor
+  accepts it because it equals its `--builder-api-url`.
+- Hostname auth data would be dialed as `https://<hostname>` on port 443, which
+  buildoor does not serve; the URL form names the scheme and port.
 
-CB's integration tests cover the pipe instead
-(`commit-boost-client/tests/tests/pbs_get_execution_payload_bid.rs`,
-`pbs_submit_builder_preferences.rs`): they turn the check off in-process and dial a
-mock builder on loopback.
+PASS: the usual builder-built slots, every one from a bid CB dialed for, with no
+dial refused as a disallowed address and no request looping back from a
+Commit-Boost. The address check itself stays covered by CB's unit tests, and
+`commit-boost-client/tests/tests/pbs_get_execution_payload_bid.rs` dials a mock
+builder on loopback with the check off in-process.
 
 ## Known caveats
 
