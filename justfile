@@ -258,6 +258,7 @@ epbs-sim:
 #   just epbs-sim-assert p2p               min_bid p2p floor rejects buildoor's p2p bid.
 #   just epbs-sim-assert preserve          --preserve-entries keeps a third-party entry.
 #   just epbs-sim-assert relays-only       no [[mux]]: cb-km writes [[relays]] to every key.
+#   FILE_CONFIG=<file> just epbs-sim-assert file-config   the VC loads a builder config file, no keymanager write.
 #   just epbs-sim-assert block-submission  CB forwards the POST /beacon_blocks reveal unparsed.
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
 #   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.

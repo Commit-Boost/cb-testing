@@ -59,6 +59,14 @@
 #   --assert relays-only  drop every [[mux]], so cb-km writes the [[relays]] builder
 #                      config to each key the VC holds, and require builder-built
 #                      blocks through CB as in the default mode
+#   --assert file-config  no keymanager write: the VC loads FILE_CONFIG, a client's
+#                      builder config file (Lodestar --proposerSettingsFile, Prysm
+#                      --proposer-settings-file, Lighthouse builder_definitions.yml
+#                      in its validators dir), with the docs' example values
+#                      swapped for the sim's; blocks must be builder-built through
+#                      CB as in the default mode. The entry the file reaches
+#                      directly goes to FILE_CONFIG_DIRECT_URL, a closed port by
+#                      default, so a builder bid can only have come through CB
 #   --assert manual-config  run a CB commit that has no cb-km (CB_COMMIT) and write
 #                      each validator key's builder_config with the curl call in
 #                      that commit's docs/docs/get_started/epbs.md, run as written
@@ -93,7 +101,7 @@
 # CB_KM_BIN, else the submodule's, which cargo rebuilds if it is stale).
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -185,12 +193,12 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only) : ;;
+  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config) : ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, cb-km writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "renamed: --assert dial" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
 # config-matrix needs enough slots for every group to propose several times
 [[ -n "$OBSERVE_SLOTS" ]] || { [[ "$ASSERT_MODE" == "config-matrix" ]] && OBSERVE_SLOTS=64 || OBSERVE_SLOTS=16; }
@@ -478,7 +486,7 @@ assert_trusted_payment_refused() {
   grep -q 'refuses a max_execution_payment above 0' <<<"$out" && named=1
   echo "  cb-km apply exit code:            $rc (need non-zero)"
   echo "  cb-km named the flag and stopped: $([[ $named == 1 ]] && echo yes || echo no)"
-  echo "  keys refused with HTTP 400:       $refused of $n_keys (need 1 when it stopped, else all)"
+  echo "  per-key refusals with HTTP 400:   $refused of $n_keys (need 0 when it named the flag, else all)"
   { grep -m1 -E 'failed: 400' <<<"$out" || true; } | cut -c1-240 | sed 's/^/    e.g. /'
 
   # one projected doc, POSTed by hand to read the VC's reason: the first
@@ -501,10 +509,10 @@ assert_trusted_payment_refused() {
 
   log "RESULT"
   local refusals_ok=0
-  if (( named == 1 )); then (( refused <= 1 )) && refusals_ok=1; else (( n_keys >= 1 && refused == n_keys )) && refusals_ok=1; fi
+  if (( named == 1 )); then (( refused == 0 )) && refusals_ok=1; else (( n_keys >= 1 && refused == n_keys )) && refusals_ok=1; fi
   if (( rc != 0 && refusals_ok == 1 )) && [[ "$code" == 400 && "$body" == *allowDangerousTrustedPayments* && "$stored_cap" == 0 ]]; then
     printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, cb-km apply exited %s, %s, and stored no cap\033[0m\n' \
-      "$rc" "$([[ $named == 1 ]] && echo "named the flag and stopped after $refused refusal" || echo "got a 400 on all $n_keys keys")"
+      "$rc" "$([[ $named == 1 ]] && echo "named the flag once and wrote no capped key" || echo "got a 400 on all $n_keys keys")"
     return 0
   fi
   die "control: want cb-km exit != 0 (got $rc), the flag named and one refusal or a 400 on all $n_keys keys (named=$named, refused=$refused), a 400 naming the flag on the hand POST (got $code), stored cap 0 (got $stored_cap)"
@@ -630,6 +638,43 @@ DOCS_PAGE="docs/docs/get_started/epbs.md"
 # the page's example values, swapped for the sim's before the call runs
 DOCS_CB_URL="http://cb.example.com:18550"
 DOCS_AUTH_DATA="0x6275696c6465722d612e6578616d706c652e636f6d"   # builder-a.example.com
+
+# --- file-config: a client's builder config file, loaded by the VC -------------
+FILE_CONFIG="${FILE_CONFIG:-}"
+FILE_CONFIG_DIRECT_URL="${FILE_CONFIG_DIRECT_URL:-http://127.0.0.1:1}"
+FILE_CONFIG_OUT="${FILE_CONFIG_OUT:-}"           # where the rendered file is kept
+DOCS_DIRECT_URL="https://builder-a.example.com"
+DOCS_AUTH_DATA_B64="YnVpbGRlci1hLmV4YW1wbGUuY29t"   # builder-a.example.com, as Prysm writes bytes
+FC_MOUNT="/cb-file-config"
+
+# FILE_CONFIG with the example values swapped: CB's URL, buildoor's auth data in
+# hex and base64, and the directly reached entry
+render_file_config() { # $1=out path
+  [[ -f "$FILE_CONFIG" ]] || die "file-config: FILE_CONFIG=${FILE_CONFIG:-<unset>} is not a file"
+  local host hex b64
+  host="$(sed -E 's|^[a-z]+://([^@/]*@)?([^:/]+).*$|\2|' <<<"$BUILDOOR_RELAY_URL")"
+  hex="0x$(printf '%s' "$host" | xxd -p | tr -d '\n')"
+  b64="$(printf '%s' "$host" | base64 -w0)"
+  sed -e "s|$DOCS_CB_URL|$CB_ENTRY_URL|g" -e "s|$DOCS_DIRECT_URL|$FILE_CONFIG_DIRECT_URL|g" \
+    -e "s|$DOCS_AUTH_DATA|$hex|g" -e "s|$DOCS_AUTH_DATA_B64|$b64|g" "$FILE_CONFIG" > "$1"
+  # comments may name the example host; only values must not
+  if grep -v '^[[:space:]]*#' "$1" | grep -q 'example\.com\|YnVpbGRlci1h'; then
+    die "file-config: $FILE_CONFIG keeps an example value the harness does not swap: $(grep -v '^[[:space:]]*#' "$1" | grep -m1 'example\.com\|YnVpbGRlci1h')"
+  fi
+}
+
+# Lighthouse reads builder_definitions.yml from its validators dir at startup, a
+# keystore mount, so the file goes in after launch and the VC restarts
+install_lighthouse_file_config() { # $1=rendered file
+  local ctr dir
+  ctr="$(docker ps --format '{{.Names}}' | grep -m1 "^${VC_SVC}--")" || die "file-config: no container for $VC_SVC"
+  dir="$(docker inspect -f '{{range .Args}}{{println .}}{{end}}{{range .Config.Cmd}}{{println .}}{{end}}' "$ctr" \
+    | grep -oE -- '--validators-dir=[^ ]+' | head -1 | cut -d= -f2)"
+  [[ -n "$dir" ]] || die "file-config: cannot find --validators-dir in $ctr's command"
+  docker cp "$1" "$ctr:$dir/builder_definitions.yml" || die "file-config: docker cp into $ctr:$dir failed"
+  docker restart "$ctr" >/dev/null || die "file-config: restarting $ctr failed"
+  echo "file-config: $dir/builder_definitions.yml installed, $ctr restarted"
+}
 
 # the commit CB is built from: CB_COMMIT, else the submodule's checkout
 cb_commit() {
@@ -1094,11 +1139,15 @@ fi
 # min_bid and the p2p bid, so a block built via CB shows the documented call
 # routes the proposer's bid requests through CB.
 MANUAL_CONFIG_SUBSIDY_GWEI=200000000
-if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-  # the page's call may set no min_bid: a grep that matches nothing must not end the run
-  docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)"
+if [[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" ]]; then
+  # the page's call or the file may set no min_bid: a grep that matches nothing must not end the run
+  if [[ "$ASSERT_MODE" == "file-config" ]]; then
+    docs_min_bid="$(grep -oE 'min_bid"?: *"?[0-9]+' "$FILE_CONFIG" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)"
+  else
+    docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)"
+  fi
   (( ${docs_min_bid:-0} < MANUAL_CONFIG_SUBSIDY_GWEI )) \
-    || die "manual-config: the page's min_bid $docs_min_bid is not below the builder-API subsidy $MANUAL_CONFIG_SUBSIDY_GWEI"
+    || die "$ASSERT_MODE: the min_bid $docs_min_bid is not below the builder-API subsidy $MANUAL_CONFIG_SUBSIDY_GWEI"
   RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
   python3 - "$ARGS_FILE" "$RENDERED_ARGS" "--builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI" <<'PY' || die "manual-config: cannot use $ARGS_FILE (see above)"
 import re,sys
@@ -1113,6 +1162,42 @@ open(dst,"w").write("".join(lines))
 PY
   ARGS_FILE="$RENDERED_ARGS"
   echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid ${docs_min_bid:-(none)} (rendered -> $ARGS_FILE)"
+fi
+
+if [[ "$ASSERT_MODE" == "file-config" ]]; then
+  FC_CL="$(grep -m1 -oE 'cl_type: *[a-z]+' "$ARGS_FILE" | awk '{print $2}')"
+  # outside RUN_DIR, which the CB config render clears before the Lighthouse install
+  FC_OUT="${FILE_CONFIG_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/epbs-file-config.XXXXXX")}"
+  mkdir -p "$FC_OUT"
+  FC_RENDERED="$FC_OUT/$(basename "$FILE_CONFIG")"
+  render_file_config "$FC_RENDERED"
+  echo "file-config: $FILE_CONFIG for $FC_CL (rendered -> $FC_RENDERED)"
+  sed 's/^/    /' "$FC_RENDERED"
+  case "$FC_CL" in
+    lodestar) fc_flag=--proposerSettingsFile ;;
+    prysm) fc_flag=--proposer-settings-file ;;
+    lighthouse) fc_flag="" ;;
+    *) die "file-config: no file config for cl_type ${FC_CL:-<none>}" ;;
+  esac
+  if [[ -n "$fc_flag" ]]; then
+    RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+    python3 - "$ARGS_FILE" "$RENDERED_ARGS" "$FC_RENDERED" "$FC_MOUNT" <<'PY' || die "file-config: cannot add the file to $ARGS_FILE"
+import json,os,re,sys
+src,dst,path,mount=sys.argv[1:5]
+name=os.path.basename(path)
+lines=open(src).read().splitlines(keepends=True)
+i=next((i for i,l in enumerate(lines) if re.match(r"\s*-\s+el_type:",l)),None)
+if i is None: sys.exit("no participant to mount {0} into".format(name))
+indent=re.match(r"(\s*)-",lines[i]).group(1)+"  "
+lines.insert(i+1,indent+"vc_extra_mounts: "+json.dumps({mount:name})+"\n")
+body="".join("  "+l if l.strip() else l for l in open(path).read().splitlines(keepends=True))
+if lines and not lines[-1].endswith("\n"): lines[-1]+="\n"
+lines.append("extra_files:\n  "+json.dumps(name)+": |\n"+"".join("  "+l if l.strip() else "\n" for l in body.splitlines(keepends=True)))
+open(dst,"w").write("".join(lines))
+PY
+    ARGS_FILE="$RENDERED_ARGS"
+    VC_EXTRA_PARAMS="${VC_EXTRA_PARAMS:+$VC_EXTRA_PARAMS }$fc_flag=$FC_MOUNT/$(basename "$FC_RENDERED")"
+  fi
 fi
 
 # VC_EXTRA_PARAMS (any mode) and config-matrix's buildoor bid, rendered into a copy
@@ -1183,7 +1268,7 @@ fi
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
 echo "genesis_time=$GEN_TIME"
 render_cb_config "$RUN_DIR" "$GEN_TIME" "$VC_KM"
-[[ "$ASSERT_MODE" == "manual-config" ]] || km_dry_run "$RUN_DIR"
+[[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" ]] || km_dry_run "$RUN_DIR"
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
@@ -1225,6 +1310,9 @@ if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
 fi
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   write_documented_builder_configs
+elif [[ "$ASSERT_MODE" == "file-config" ]]; then
+  [[ "$FC_CL" == lighthouse ]] && install_lighthouse_file_config "$FC_RENDERED"
+  echo "file-config: no keymanager write; the VC loads $(basename "$FC_RENDERED")"
 elif [[ "$ASSERT_MODE" == "dial" ]]; then
   write_dial_builder_configs
 elif [[ "$ASSERT_MODE" == "config-matrix" ]]; then
