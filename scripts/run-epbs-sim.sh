@@ -465,9 +465,9 @@ assert_trusted_payment_refused() {
     | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')" \
     || die "control: could not list the VC's keystores"
   # cb-km reports each refusal on stderr as "ERROR: <vc>: POST <key> failed:
-  # builder_config POST for <key> on <vc> failed: 400 Bad Request: <VC message>".
-  # || true: no match is a 0 here, not a reason for set -e to end the run
-  refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: .*failed: 400' <<<"$out" \
+  # 400 Bad Request: <VC message>"; an older cb-km repeats "... failed:" before
+  # the status. || true: no match is a 0 here, not a reason for set -e to end the run
+  refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: (.*failed: )?400' <<<"$out" \
     | grep -oE 'POST 0x[0-9a-f]{96}' | sort -u | wc -l || true)"
   echo "  cb-km apply exit code:            $rc (need non-zero)"
   echo "  keys refused with HTTP 400:       $refused of $n_keys (need all)"
