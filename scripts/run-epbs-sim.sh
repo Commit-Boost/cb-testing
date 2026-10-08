@@ -300,7 +300,7 @@ assert_preserve() {
   local code
   code="$(km_post "$K2" "$TP_DOC")"; [[ "$code" == 2* ]] || die "control: POST third-party to K2 not accepted (HTTP $code)"
   km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: third-party entry not stored on K2"
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
+  cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml"
   km_entry_urls "$K2" | grep -qF "$CB_URL" || die "control: CB entry missing on K2 after plain apply"
   ! km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: plain apply did NOT drop the third-party entry"
   echo "  control OK: plain apply replaced K2 with only the CB entry (third-party dropped)"
@@ -309,7 +309,7 @@ assert_preserve() {
   log "preserve: apply --preserve-entries keeps a third-party entry"
   code="$(km_post "$K1" "$TP_DOC")"; [[ "$code" == 2* ]] || die "preserve: POST third-party to K1 not accepted (HTTP $code)"
   km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry not stored on K1"
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --preserve-entries
+  cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" --preserve-entries
   km_entry_urls "$K1" | grep -qF "$CB_URL" || die "preserve: CB entry missing on K1 after --preserve-entries"
   km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry DROPPED by --preserve-entries (regression)"
   echo "  preserve OK: K1 carries BOTH the CB entry and the third-party entry"
@@ -469,7 +469,7 @@ assert_trusted_payment_refused() {
   log "trusted-payment control: cb-km apply of a capped config, VC WITHOUT --allowDangerousTrustedPayments"
   KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
   local out rc=0
-  out="$("$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" 2>&1 \
+  out="$(cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>&1 \
     | sed -r 's/\x1b\[[0-9;]*m//g')" || rc=$?
   local n_keys refused
   n_keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
@@ -492,7 +492,7 @@ assert_trusted_payment_refused() {
   # one projected doc, POSTed by hand to read the VC's reason: the first
   # "would apply <key>: <doc>" line of a dry run
   local dry line key doc code body stored_cap
-  dry="$("$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run 2>&1)" \
+  dry="$(cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" --dry-run 2>&1)" \
     || die "control: cb-km apply --dry-run failed: $(tail -3 <<<"$dry")"
   line="$(grep -m1 '^would apply ' <<<"$dry" || true)"
   [[ "$line" =~ ^would\ apply\ (0x[0-9a-f]{96}):\ (\{.*\})$ ]] \
@@ -795,7 +795,7 @@ cm_apply() {
   mkdir -p "$CM_OUT"
   cp "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" "$RUN_DIR/cm-groups.json" "$RUN_DIR/km-dry-run.txt" "$CM_OUT/"
   local rc=0 accepted errors
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" \
+  cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" \
     > "$CM_OUT/km-apply.txt" 2>&1 || rc=$?
   echo "$rc" > "$CM_OUT/km-apply.rc"
   accepted=$(grep -c '^accepted: ' "$CM_OUT/km-apply.txt" || true)
@@ -828,7 +828,7 @@ cm_km_checks() {
   sed '/^id = "g-default"$/a builder_boost_factor = 55' "$RUN_DIR/cb-config.toml" > "$d/dry-config.toml"
   # each check runs as `{ ...; } || ok=1`, so a failing condition is a FAIL row, not a set -e exit
   before="$(km_get "$K1" || true)"
-  rc=0; "$CB_KM_BIN" apply --config "$d/dry-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --dry-run > "$d/dry-run.txt" 2>&1 || rc=$?
+  rc=0; cb_km_apply "$d/dry-config.toml" "$RUN_DIR/km-overlay.toml" --dry-run > "$d/dry-run.txt" 2>&1 || rc=$?
   after="$(km_get "$K1" || true)"
   printf '%s\n%s\n' "$before" "$after" > "$d/dry-run-get-before-after.json"
   ok=0; { grep -q "^would apply $K1: .*\"builder_boost_factor\":\"55\"" "$d/dry-run.txt" && grep -q 'nothing sent' "$d/dry-run.txt" \
@@ -840,12 +840,12 @@ cm_km_checks() {
   local TP_BP="0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416"
   local TP_DOC="{\"builders\":[{\"url\":\"$TP_URL\",\"auth_data\":\"$TP_AUTH\",\"builder_pubkeys\":[\"$TP_BP\"]}]}"
   code="$(km_post "$K2" "$TP_DOC")"
-  rc=0; "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" > "$d/apply-plain.txt" 2>&1 || rc=$?
+  rc=0; cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" > "$d/apply-plain.txt" 2>&1 || rc=$?
   km_get "$K2" > "$d/K2-after-plain-apply.json" || true
   ok=0; { km_entry_urls "$K2" | grep -qxF "$CB_ENTRY_URL" && ! km_entry_urls "$K2" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
   check "plain apply drops a 3rd-party entry" $ok "POST 3rd-party to $K2: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K2" | paste -sd,)"
   code="$(km_post "$K1" "$TP_DOC")"
-  rc=0; "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" --preserve-entries > "$d/apply-preserve.txt" 2>&1 || rc=$?
+  rc=0; cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" --preserve-entries > "$d/apply-preserve.txt" 2>&1 || rc=$?
   km_get "$K1" > "$d/K1-after-preserve.json" || true
   ok=0; { km_entry_urls "$K1" | grep -qxF "$CB_ENTRY_URL" && km_entry_urls "$K1" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
   check "--preserve-entries keeps it" $ok "POST 3rd-party to $K1: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K1" | paste -sd,)"
@@ -945,8 +945,30 @@ PY
 # relay key (as CB does) and any overlay key but advertised_url and [[vcs]], so a
 # dry run proves the rendered pair loads. The projected docs land in
 # $1/km-dry-run.txt.
+# cb-km's targets come from the rendered km-overlay.toml: as flags for a cb-km
+# that takes them, as --overlay for one from before the flags
+cb_km_apply() { # $1=cb-config.toml $2=km-overlay.toml, then more cb-km flags
+  local cfg=$1 overlay=$2 targets
+  shift 2
+  if "$CB_KM_BIN" apply --help 2>/dev/null | grep -q -- '--advertised-url'; then
+    mapfile -t targets < <(python3 - "$overlay" <<'PY'
+import sys, tomllib
+o = tomllib.load(open(sys.argv[1], "rb"))
+print("--advertised-url")
+print(o["advertised_url"])
+for vc in o.get("vcs", []):
+    print("--vc")
+    print("{0}={1}".format(vc["url"], vc["token_path"]))
+PY
+)
+    "$CB_KM_BIN" apply --config "$cfg" "${targets[@]}" "$@"
+  else
+    "$CB_KM_BIN" apply --config "$cfg" --overlay "$overlay" "$@"
+  fi
+}
+
 km_dry_run() { # $1=dir holding cb-config.toml + km-overlay.toml
-  "$CB_KM_BIN" apply --config "$1/cb-config.toml" --overlay "$1/km-overlay.toml" --dry-run \
+  cb_km_apply "$1/cb-config.toml" "$1/km-overlay.toml" --dry-run \
     > "$1/km-dry-run.txt" 2>&1 \
     || { tail -20 "$1/km-dry-run.txt"; die "cb-km apply --dry-run refused $1/cb-config.toml or $1/km-overlay.toml"; }
   echo "cb-km dry run: $(sed -r 's/\x1b\[[0-9;]*m//g' "$1/km-dry-run.txt" | grep -oE 'dry-run: .*' | tail -1)"
@@ -1319,7 +1341,7 @@ elif [[ "$ASSERT_MODE" == "config-matrix" ]]; then
   cm_apply
 else
   log "cb-km apply (point 64 validators' builder_config at CB)"
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml"
+  cb_km_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml"
   echo "apply OK"
 fi
 # checked before the activation wait: a missing cap fails here, minutes earlier
