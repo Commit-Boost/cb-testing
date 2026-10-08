@@ -50,6 +50,28 @@ BN_INNER="http://$BN_SVC:$BN_INNER_PORT"
 echo "BN=$BN ($BN_INNER) VC_KM=$VC_KM"
 echo "$BN" > "$RUN_DIR/bn.url"
 
+# cb-km's targets come from the rendered km-overlay.toml: as flags for a cb-km
+# that takes them, as --overlay for one from before the flags
+cb_km_apply() { # $1=cb-config.toml $2=km-overlay.toml, then more cb-km flags
+  local cfg=$1 overlay=$2 targets
+  shift 2
+  if "$CB_KM_BIN" apply --help 2>/dev/null | grep -q -- '--advertised-url'; then
+    mapfile -t targets < <(python3 - "$overlay" <<'PY'
+import sys, tomllib
+o = tomllib.load(open(sys.argv[1], "rb"))
+print("--advertised-url")
+print(o["advertised_url"])
+for vc in o.get("vcs", []):
+    print("--vc")
+    print("{0}={1}".format(vc["url"], vc["token_path"]))
+PY
+)
+    "$CB_KM_BIN" apply --config "$cfg" "${targets[@]}" "$@"
+  else
+    "$CB_KM_BIN" apply --config "$cfg" --overlay "$overlay" "$@"
+  fi
+}
+
 add_relay() {
   [[ -n "$HELIX_IMAGE" ]] || die "HELIX_IMAGE unset; run build-images.sh <helix-ref> or export it"
   kurtosis service add "$ENCLAVE" helix-relay "$HELIX_IMAGE" --files "/cfg:helix-cfg" \
@@ -70,7 +92,7 @@ add_cb() {
 
 km_apply() {
   log "cb-km apply (VC builder_config -> cb-epbs) with $CB_KM_BIN"
-  "$CB_KM_BIN" apply --config "$RUN_DIR/cb/cb-config.toml" --overlay "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/cb-km-apply.log" 2>&1
+  cb_km_apply "$RUN_DIR/cb/cb-config.toml" "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/cb-km-apply.log" 2>&1
   echo "cb-km: $(grep -c '^accepted' "$RUN_DIR/cb-km-apply.log") keys accepted"
 }
 
