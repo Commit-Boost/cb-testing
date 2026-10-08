@@ -215,7 +215,7 @@ sweep-gate jobs="2": build-orchestrator generate-configs pull-images
         configs/generated/cb-ws-stream-nokey.yml
 
 # Test a consensus-client build against the ePBS (gloas) sim, end to end.
-# The commit-boost artifacts (km-e2e image + cb-km) are built from the pinned
+# The commit-boost artifacts (km-e2e image + builder-config) are built from the pinned
 # commit-boost-client submodule on first run (~a few min once per submodule
 # commit; see scripts/ensure-cb-artifacts.sh), so this needs no prebuilt CB image.
 #   just epbs-test chainsafe/lodestar:v1.47.0-rc.0            # minimal preset (fast)
@@ -246,35 +246,36 @@ epbs-cb-matrix configs="":
 
 # ePBS (gloas) + commit-boost + keymanager loop (default: local/lodestar:km).
 # Stands up a gloas devnet with buildoor, adds commit-boost as a first-class
-# kurtosis enclave service (the PBS sidecar), runs `cb-km apply`, and asserts
+# kurtosis enclave service (the PBS sidecar), runs `builder-config apply`, and asserts
 # builder-built blocks flow VC -> CB -> buildoor. One devnet at a time (~15G).
 # See docs/EPBS.md (incl. the native-mev_type / submodule-upgrade blockers). Env
-# knobs: CB_LAUNCH (service|docker), OBSERVE_SLOTS, KEEP=1, CB_KM_BIN, CB_IMAGE, CL_IMAGE.
-# CB image + cb-km are auto-provisioned from the pinned submodule; PREREQ: local/lodestar:km.
+# knobs: CB_LAUNCH (service|docker), OBSERVE_SLOTS, KEEP=1, CB_BIN, CB_IMAGE, CL_IMAGE.
+# CB image + builder-config are auto-provisioned from the pinned submodule; PREREQ: local/lodestar:km.
 epbs-sim:
     ./scripts/run-epbs-sim.sh
 
 # ePBS sim with an opt-in feature-level regression assertion.
 #   just epbs-sim-assert p2p               min_bid p2p floor rejects buildoor's p2p bid.
 #   just epbs-sim-assert preserve          --preserve-entries keeps a third-party entry.
-#   just epbs-sim-assert relays-only       no [[mux]]: cb-km writes [[relays]] to every key.
+#   just epbs-sim-assert relays-only       no [[mux]]: builder-config writes [[relays]] to every key.
 #   FILE_CONFIG=<file> just epbs-sim-assert file-config   the VC loads a builder config file, no keymanager write.
 #   just epbs-sim-assert block-submission  CB forwards the POST /beacon_blocks reveal unparsed.
 #   just epbs-sim-assert builder-down      buildoor stop never stalls the proposer.
 #   just epbs-sim-assert trusted-payment   "unclamped" cap + lodestar trusted payments; BN counts the whole payment.
-#   just epbs-sim-assert manual-config     no cb-km: builder config written with the CB docs' curl call.
+#   just epbs-sim-assert manual-config     no builder-config: builder config written with the CB docs' curl call.
 #   just epbs-sim-assert config-matrix     per-group builder config values: what the VC stores and applies.
+#   just epbs-sim-assert detect            CB warns about exactly the keys with a missing or stale builder config.
 # Retired: request-auth (CB no longer verifies the request auth) and ladder (CB plays
 # no timing games on the ePBS bid path).
-# Retired: direct (cb-km no longer writes direct builder entries; the BN falls back to p2p bids when CB is down).
+# Retired: direct (builder-config no longer writes direct builder entries; the BN falls back to p2p bids when CB is down).
 #   CB_COMMIT=<CB with scripts/cb-dial-test.patch> just epbs-sim-assert dial
 #                                          CB dials a builder its relay entries do not name (docs/EPBS.md).
 epbs-sim-assert mode:
     ./scripts/run-epbs-sim.sh --assert {{mode}}
 
 # Render one mode's CB config + km overlay into a directory and check them with
-# `cb-km apply --dry-run`. No docker, no kurtosis: cb-km is CB_KM_BIN, else the
-# submodule's, rebuilt by cargo when it is not from the pinned commit.
+# `commit-boost builder-config print`. No docker, no kurtosis: the binary is CB_BIN,
+# else the submodule's, rebuilt by cargo when it is not from the pinned commit.
 #   just epbs-sim-render trusted-payment /tmp/epbs-render
 epbs-sim-render mode dir:
     ./scripts/run-epbs-sim.sh {{ if mode == "default" { "" } else { "--assert " + mode } }} --render-only {{dir}}
@@ -296,12 +297,12 @@ epbs-sim-builder-down:
 # through execution_payment. Requires 18446744073709551615 on every stored
 # builder_config entry, the BN selecting CB's bid in >= MIN_BUILDER_SLOTS slots, and
 # the BN valuing each at value + execution_payment. First runs a control devnet whose
-# VC lacks the flag (cb-km apply must 400 on every key); TRUSTED_PAYMENT_CONTROL=0
+# VC lacks the flag (builder-config apply must 400 on every key); TRUSTED_PAYMENT_CONTROL=0
 # skips it.
 epbs-sim-trusted-payment:
     ./scripts/run-epbs-sim.sh --assert trusted-payment
 
-# Run a CB commit without cb-km and write each key's builder_config with the curl
+# Run a CB commit without builder-config and write each key's builder_config with the curl
 # call in that commit's docs/docs/get_started/epbs.md, then assert builder-built
 # blocks via CB. CB_COMMIT picks the commit (default: the submodule's checkout);
 # it must be in the submodule's repo, and is built in .cb-worktrees/<sha>.

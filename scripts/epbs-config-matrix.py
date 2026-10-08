@@ -8,7 +8,7 @@ render-args to value V = 0.2 ETH plus execution_payment P = 0.2 ETH, P claimed
 whatever the proposer advertised; its p2p bid is about 0.101 ETH; an empty devnet's
 local block is worth about 0):
 
-  g-default       nothing set in the mux: cb-km's defaults under the template's
+  g-default       nothing set in the mux: builder-config's defaults under the template's
                   [pbs] cap of 0 (min_bid 0, boost left to the client)
   g-boost0        builder_boost_factor = 0 at entry and key level: the local block
                   wins when the client applies the written boost
@@ -27,8 +27,8 @@ Subcommands:
   render-args <src.yaml> <dst.yaml> [--vc-param P]... [--buildoor-arg A]...
       copy a kurtosis args file, adding VC params to participant 1 and args to
       buildoor_params.extra_args
-  stored <vc-km-url> <token-file> <groups.json> <km-dry-run.txt> <out.json>
-      GET every key's builder_config; per group, print the doc cb-km wrote next to
+  stored <vc-km-url> <token-file> <groups.json> <km-print.json> <out.json>
+      GET every key's builder_config; per group, print the doc builder-config wrote next to
       the doc the VC returns, and the fields the VC filled in or changed
   classify <bn-url> <first> <last> <groups.json> <cb.log> <bn.log> <vc.log> <out-dir>
       classify each slot in [first, last] by its proposer's group: via-cb (the
@@ -59,7 +59,7 @@ KEY_RE = re.compile(r"0x[0-9a-f]{96}")
 # name, [[mux]] lines, relay lines, expected outcomes under the keymanager spec,
 # what the group tests
 GROUPS = [
-    ("g-default", [], [], ["via-cb"], "cb-km's defaults, under the template's [pbs] cap of 0"),
+    ("g-default", [], [], ["via-cb"], "builder-config's defaults, under the template's [pbs] cap of 0"),
     ("g-boost0", ["builder_boost_factor = 0"], [], ["self"], "boost 0 prefers the local block"),
     ("g-boost-high", ["builder_boost_factor = 1000"], [], ["via-cb"], "boost 1000 accepted"),
     ("g-minbid-high", ['min_bid_eth = "1.0"'], [], ["self"], "min_bid above the CB bid"),
@@ -163,12 +163,12 @@ def render_args(argv):
 
 
 # ---- stored -------------------------------------------------------------------
-def written_docs(dry_run_path):
+def written_docs(printed_path):
+    """{key: doc} for every mux key of a `builder-config print` document"""
     docs = {}
-    for line in open(dry_run_path, errors="replace"):
-        m = re.match(r"would apply (0x[0-9a-f]{96}): (\{.*\})$", ANSI.sub("", line.strip()))
-        if m:
-            docs[m.group(1)] = json.loads(m.group(2))
+    for mux in json.load(open(printed_path))["muxes"].values():
+        for key in mux["keys"] + mux["fetched_keys"]:
+            docs[key] = mux["config"]
     return docs
 
 
@@ -185,10 +185,10 @@ def flat(doc):
     return out
 
 
-def stored(km, token_file, groups_path, dry_run_path, out_path):
+def stored(km, token_file, groups_path, printed_path, out_path):
     token = open(token_file).read().strip()
     groups = json.load(open(groups_path))
-    written = written_docs(dry_run_path)
+    written = written_docs(printed_path)
     result = {}
     for g in groups:
         result[g["name"]] = {}

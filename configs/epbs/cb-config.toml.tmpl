@@ -7,9 +7,9 @@ port = 18550
 # verifies them against the builder registry), so no signing-domain keys are set.
 # skip_sigverify only gates the legacy get_header path; it stays as the line
 # --assert trusted-payment inserts its [pbs] key after. Every [pbs] and [[mux]]
-# key here must be one Commit-Boost reads: cb-km refuses any other.
+# key here must be one Commit-Boost reads: builder-config refuses any other.
 skip_sigverify = true
-# cb-km's default cap is unclamped, which the lodestar VC refuses without
+# builder-config's default cap is unclamped, which the lodestar VC refuses without
 # --allowDangerousTrustedPayments; --assert trusted-payment drops this line
 max_execution_payment_gwei = 0
 # projection-only (KM tooling): key-level min_bid floors p2p bids above the
@@ -23,7 +23,7 @@ url = "__BUILDOOR_RELAY_URL__"
 
 [[mux]]
 id = "gloas-vc"
-# cb-km refuses a [pbs] builder_boost_factor_p2p without a mux boost
+# builder-config refuses a [pbs] builder_boost_factor_p2p without a mux boost
 builder_boost_factor = 100
 validator_pubkeys = [
     "0x81b676591b823270a3284ace7d81cbce2d6cdce55bb0e053874d7e3a08f729453009d3e662ec3130379f43c0f3210b6d",
