@@ -1154,16 +1154,17 @@ PY
   fi
 fi
 
-# manual-config: when the page's call sets a min_bid, the beacon node applies it to
-# CB's entry too, and buildoor's builder-API bid is only its subsidy (0.0001 ETH
-# by default): every bid CB returns would be floored and the block built from
-# buildoor's 0.101 ETH p2p bid. Raise the builder-API subsidy above the page's
-# min_bid and the p2p bid, so a block built via CB shows the documented call
-# routes the proposer's bid requests through CB.
+# manual-config, file-config and dial: buildoor's builder-API bid is only its
+# subsidy (0.0001 ETH by default), so its 0.101 ETH p2p bid would win, and any
+# min_bid the config sets would floor CB's bid too. Raise the builder-API subsidy
+# above both, so a block built from a bid CB returned shows the config routes the
+# proposer's bid requests through CB.
 MANUAL_CONFIG_SUBSIDY_GWEI=200000000
-if [[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" ]]; then
+if [[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" || "$ASSERT_MODE" == "dial" ]]; then
   # the page's call or the file may set no min_bid: a grep that matches nothing must not end the run
-  if [[ "$ASSERT_MODE" == "file-config" ]]; then
+  if [[ "$ASSERT_MODE" == "dial" ]]; then
+    docs_min_bid=""
+  elif [[ "$ASSERT_MODE" == "file-config" ]]; then
     docs_min_bid="$(grep -oE 'min_bid"?: *"?[0-9]+' "$FILE_CONFIG" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)"
   else
     docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)"
