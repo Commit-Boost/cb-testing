@@ -6,10 +6,10 @@
 #   up.sh [all|launch|services|inject|relay|cb]
 #
 #   launch    kurtosis run ethereum-package with the rendered devnet args
-#   services  stub simulator, helix-relay, commit-boost, then cb-km apply
+#   services  stub simulator, helix-relay, commit-boost, then builder-config apply
 #   inject    gloas_inject (INJECT_ARGS overrides its schedule)
 #   relay     replace helix-relay with $HELIX_IMAGE, keeping its config (e.g. to A/B a fix)
-#   cb        replace cb-epbs with $CB_IMAGE, keeping its config, and re-run $CB_KM_BIN apply
+#   cb        replace cb-epbs with $CB_IMAGE, keeping its config, and re-run builder-config apply
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -21,7 +21,7 @@ DEVNET_ARGS="${DEVNET_ARGS:-$REPO_ROOT/configs/epbs/gloas-epbs.yaml}"
 SECONDS_PER_SLOT="${SECONDS_PER_SLOT:-12}"
 STREAM_FOR_MS="${STREAM_FOR_MS:-300}"
 INJECT_ARGS="${INJECT_ARGS:---offsets-ms -1500,-500,100,300,500,1000,1100,1200 --duration-s 7200}"
-CB_KM_BIN="${CB_KM_BIN:-$(command -v cb-km || true)}"
+CB_BIN="${CB_BIN:-$(command -v commit-boost || true)}"
 KEYS="$HARNESS/keys"
 stage="${1:-all}"
 
@@ -50,13 +50,11 @@ BN_INNER="http://$BN_SVC:$BN_INNER_PORT"
 echo "BN=$BN ($BN_INNER) VC_KM=$VC_KM"
 echo "$BN" > "$RUN_DIR/bn.url"
 
-# cb-km's targets come from the rendered km-overlay.toml: as flags for a cb-km
-# that takes them, as --overlay for one from before the flags
-cb_km_apply() { # $1=cb-config.toml $2=km-overlay.toml, then more cb-km flags
+# builder-config's targets come from the rendered km-overlay.toml, as flags
+bc_apply() { # $1=cb-config.toml $2=km-overlay.toml, then more apply flags
   local cfg=$1 overlay=$2 targets
   shift 2
-  if "$CB_KM_BIN" apply --help 2>/dev/null | grep -q -- '--advertised-url'; then
-    mapfile -t targets < <(python3 - "$overlay" <<'PY'
+  mapfile -t targets < <(python3 - "$overlay" <<'PY'
 import sys, tomllib
 o = tomllib.load(open(sys.argv[1], "rb"))
 print("--advertised-url")
@@ -66,10 +64,7 @@ for vc in o.get("vcs", []):
     print("{0}={1}".format(vc["url"], vc["token_path"]))
 PY
 )
-    "$CB_KM_BIN" apply --config "$cfg" "${targets[@]}" "$@"
-  else
-    "$CB_KM_BIN" apply --config "$cfg" --overlay "$overlay" "$@"
-  fi
+  "$CB_BIN" builder-config apply --config "$cfg" "${targets[@]}" "$@"
 }
 
 add_relay() {
@@ -91,13 +86,13 @@ add_cb() {
 }
 
 km_apply() {
-  log "cb-km apply (VC builder_config -> cb-epbs) with $CB_KM_BIN"
-  cb_km_apply "$RUN_DIR/cb/cb-config.toml" "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/cb-km-apply.log" 2>&1
-  echo "cb-km: $(grep -c '^accepted' "$RUN_DIR/cb-km-apply.log") keys accepted"
+  log "builder-config apply (VC builder_config -> cb-epbs) with $CB_BIN"
+  bc_apply "$RUN_DIR/cb/cb-config.toml" "$RUN_DIR/km-overlay.toml" > "$RUN_DIR/builder-config-apply.log" 2>&1
+  echo "builder-config: $(grep -c '^accepted' "$RUN_DIR/builder-config-apply.log") keys accepted"
 }
 
 if [[ $stage == all || $stage == services ]]; then
-  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km --release in the CB checkout)"
+  "$CB_BIN" builder-config --help >/dev/null 2>&1 || die "no commit-boost with builder-config: set CB_BIN (cargo build -p commit-boost --release in the CB checkout)"
   docker image inspect "$CB_IMAGE" "$STUB_IMAGE" >/dev/null || die "missing image (CB_IMAGE=$CB_IMAGE STUB_IMAGE=$STUB_IMAGE)"
 
   log "wait for head >= 1"
@@ -151,7 +146,7 @@ EOF
 fi
 
 if [[ $stage == cb ]]; then
-  [[ -x "$CB_KM_BIN" ]] || die "cb-km not found: set CB_KM_BIN (cargo build -p cb-km --release in the CB checkout)"
+  "$CB_BIN" builder-config --help >/dev/null 2>&1 || die "no commit-boost with builder-config: set CB_BIN (cargo build -p commit-boost --release in the CB checkout)"
   docker image inspect "$CB_IMAGE" >/dev/null || die "missing image CB_IMAGE=$CB_IMAGE"
   log "replace cb-epbs"
   kurtosis service rm "$ENCLAVE" cb-epbs >/dev/null

@@ -21,7 +21,7 @@ lodestar VC --(keymanager builder_config)--> cb-epbs (get_header = "stream")
   in `builders`. The simulator is `stub/simstub.py`, which accepts every block.
 - **CB:** `CB_IMAGE`, using `config/cb-config.toml.tmpl`. This is cb-testing's ePBS template
   with buildoor replaced by `helix` / `helix-mux` entries that set `get_header = "stream"`, and
-  stdout logging at debug for the `cb_*` crates. `cb-km apply` points every validator's
+  stdout logging at debug for the `cb_*` crates. `commit-boost builder-config apply` points every validator's
   builder_config at CB.
 - **Injector:** `gloas_inject`, a test-harness bin on Helix branch `harness/gloas-inject`.
   It follows the BN's `payload_attributes` SSE and POSTs 8 rising bids per slot (0.05 to
@@ -40,8 +40,8 @@ Why 12 s slots: lodestar:km reports `SECONDS_PER_SLOT: 12` whatever the genesis 
   15 GB of free RAM.
 - Local images: `local/lodestar:km` (cb-testing's ePBS lodestar), `ubuntu:24.04`,
   `nicolaka/netshoot` (packet capture), and the CB image under test.
-- `cb-km` built from the same CB checkout as `CB_IMAGE` (`cargo build -p cb-km-tool --release`).
-  Pass its path as `CB_KM_BIN` unless it is on `PATH`.
+- `commit-boost` built from the same CB checkout as `CB_IMAGE` (`cargo build -p commit-boost --release`).
+  Pass its path as `CB_BIN` unless it is on `PATH`.
 - A Helix clone that holds both the ref under test and `harness/gloas-inject`. The default is
   `../../helix-epbs-stream` relative to this directory; override it with `HELIX_REPO`.
 
@@ -50,7 +50,7 @@ Why 12 s slots: lodestar:km reports `SECONDS_PER_SLOT: 12` whatever the genesis 
 ```bash
 cd epbs-stream
 ./build-images.sh feat/epbs-bid-stream        # any Helix ref; writes run/images.env
-CB_KM_BIN=/path/to/cb-km ./up.sh              # devnet + simstub + helix + CB + injector
+CB_BIN=/path/to/commit-boost ./up.sh              # devnet + simstub + helix + CB + injector
 ./scenario.sh                                 # bids, no bids, bids; capture; negative.sh; analyze
 ./down.sh                                     # remove the enclave and the capture sidecar
 ```
@@ -66,8 +66,8 @@ built from.
 
 `up.sh` runs in stages: `launch`, `services`, `inject`, `relay` and `cb`. `relay` swaps
 `helix-relay` for `$HELIX_IMAGE` and keeps its config, for an A/B test of a Helix change on
-the same devnet. `cb` does the same for `cb-epbs` with `$CB_IMAGE`, then re-runs `cb-km apply`
-with `$CB_KM_BIN`, for an A/B test of a CB change. To start or stop the bids by hand, run
+the same devnet. `cb` does the same for `cb-epbs` with `$CB_IMAGE`, then re-runs `builder-config apply`
+with `$CB_BIN`, for an A/B test of a CB change. To start or stop the bids by hand, run
 `kurtosis service stop|start epbs-stream helix-inject`.
 
 `negative.sh` sends hand-made websocket upgrades with a bad `X-Request-Auth` (missing, not
@@ -82,7 +82,7 @@ or a path pubkey that is not the slot's proposer. It exits non-zero unless all s
 | `ENCLAVE` | `epbs-stream` | |
 | `HELIX_IMAGE`, `INJECT_IMAGE`, `STUB_IMAGE` | from `run/images.env` | |
 | `CB_IMAGE` | `commit-boost/commit-boost:optiond-21fcef9` | CB `feat/epbs-bid-stream` @ 21fcef9 |
-| `CB_KM_BIN` | `cb-km` on `PATH` | |
+| `CB_BIN` | `commit-boost` on `PATH` | |
 | `HELIX_REPO` | `../../helix-epbs-stream` | |
 | `EP_PACKAGE` | `ethereum-package@6dd3f26` | |
 | `DEVNET_ARGS` | `../configs/epbs/gloas-epbs.yaml` | |
