@@ -1057,10 +1057,11 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
       configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
   grep -q '__' "$out/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
 
-  # manual-config: a commit without builder-config does not read its p2p projection keys
+  # manual-config: a commit without builder-config does not read the keys only it reads
   if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|max_execution_payment_gwei) = /d' \
-      -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' "$out/cb-config.toml"
+    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|max_execution_payment_gwei|builder_boost_factor) = /d' \
+      -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' \
+      -e '/^# builder-config refuses a \[pbs\] builder_boost_factor_p2p/d' "$out/cb-config.toml"
   fi
 
   # relays-only: no [[mux]], so every key gets the [[relays]] builder config
