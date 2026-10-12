@@ -584,6 +584,12 @@ PY
 # execution_payment > 0 and no selected slot mismatches or lacks either side.
 assert_trusted_payment() { # $1,$2 = observed window
   log "assert trusted-payment: the BN selects CB's execution-payment bid and counts the whole payment"
+  # The window ends as its last slot's bid is served, and CB's log stream can lag
+  # a few seconds, so wait (up to 15 s) for CB's bid line for that slot
+  local tries=0
+  until cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' | grep -qE "received header.*slot=$2([^0-9]|$)" || (( ++tries >= 15 )); do
+    sleep 1
+  done
   cb_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/cb.log"
   bn_logs | sed -r 's/\x1b\[[0-9;]*m//g' > "$RUN_DIR/bn.log"
   local report rc=0
