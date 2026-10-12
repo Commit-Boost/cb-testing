@@ -363,9 +363,10 @@ count_csv() { if [[ -n "$1" ]]; then awk -F, '{print NF}' <<<"$1"; else echo 0; 
 # forwarded, whatever the relays answer:
 #   4xx -> refused before the forward: 400 (no gloas Eth-Consensus-Version) or
 #          415 (not SSZ). A regression on either side of the hop.
-#   202 -> forwarded. CB's own log says whether a builder accepted it
-#          ("signed beacon block accepted") or none did ("no builder accepted"),
-#          which is expected while buildoor gets the block over p2p.
+#   202 -> forwarded. CB's own log says how many builders accepted it
+#          ("signed beacon block forwarded" with accepted=<n>; an older CB logged
+#          "signed beacon block accepted" or "no builder accepted"). None is
+#          expected while buildoor gets the block over p2p.
 # A forward that got no answer at all (timeout, connection failure) is a
 # "builder did not accept the block" line carrying a reqwest error.
 # A CB from before the always-202 change answered 5xx when no relay accepted.
@@ -378,8 +379,10 @@ assert_block_submission() {
   fwd_2xx=$(grep -c 'Responded with 2' <<<"$bb" || true)
   refused=$(grep -c 'Responded with 4' <<<"$bb" || true)
   fwd_5xx=$(grep -c 'Responded with 5' <<<"$bb" || true)
-  accepted=$(grep -c 'signed beacon block accepted' <<<"$CB_LOG" || true)
-  none_accepted=$(grep -c 'no builder accepted the signed beacon block' <<<"$CB_LOG" || true)
+  local fwd_lines
+  fwd_lines="$(grep 'signed beacon block forwarded' <<<"$CB_LOG" || true)"
+  accepted=$(( $(grep -c 'signed beacon block accepted' <<<"$CB_LOG" || true) + $(grep -cE 'accepted=[1-9]' <<<"$fwd_lines" || true) ))
+  none_accepted=$(( $(grep -c 'no builder accepted the signed beacon block' <<<"$CB_LOG" || true) + $(grep -cE 'accepted=0([^0-9]|$)' <<<"$fwd_lines" || true) ))
   unanswered=$(grep 'builder did not accept the block' <<<"$CB_LOG" | grep -c 'reqwest error' || true)
   reached=$(( fwd_2xx + fwd_5xx ))
   echo "  reveals forwarded (2xx, or 5xx on an older CB):  $reached (need >= 1)"
