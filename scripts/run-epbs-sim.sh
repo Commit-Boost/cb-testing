@@ -1153,8 +1153,9 @@ fi
 
 log "RESULT"
 if (( n_via_cb >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p2p_ok == 1 )); then
+  # the window counts both ends: OBSERVE_SLOTS + 1 slots
   printf '\033[1;32mPASS: %s/%s observed slots built from a bid CB returned (buildoor)\033[0m\n' \
-    "$n_via_cb" "$OBSERVE_SLOTS"
+    "$n_via_cb" "$(( end_slot - start_slot + 1 ))"
   if [[ "$ASSERT_MODE" == "p2p" ]]; then
     printf '\033[1;32mPASS: p2p floor PROVEN (%s rejected); %s blocks selected CB, 0 selected p2p\033[0m\n' \
       "$p2p_rejected" "$cb_selected"

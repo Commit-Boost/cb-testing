@@ -88,7 +88,7 @@ for cfg in "${CONFIGS[@]}"; do
   rc=$?
 
   # pull the builder-built ratio from the PASS/summary line if present
-  ratio="$(grep -oE '[0-9]+/[0-9]+ observed slots builder-built' "$logf" | tail -1 | grep -oE '^[0-9]+/[0-9]+')"
+  ratio="$(grep -oE '[0-9]+/[0-9]+ observed slots built from a bid CB returned' "$logf" | tail -1 | grep -oE '^[0-9]+/[0-9]+')"
   ratio="${ratio:-n/a}"
   if (( rc == 0 )); then
     ROWS+=("$(printf '%-24s %-9s %-6s %s' "$label" "$preset" "PASS" "$ratio")")

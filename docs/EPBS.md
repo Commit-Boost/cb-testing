@@ -10,7 +10,7 @@ just epbs-test <cl-image>   # test a CL build (see "Testing a CL")
 just epbs-sim               # default chainsafe/lodestar:v1.50.0 run
 ```
 
-Prints a clear `PASS: N/N observed slots builder-built via commit-boost (buildoor)`
+Prints a clear `PASS: N/M observed slots built from a bid CB returned (buildoor)`
 and exits non-zero on failure. One devnet at a time (~15G RAM).
 
 ## This is the only harness that runs gloas
@@ -35,7 +35,8 @@ First run builds the CB sidecar image from the pinned `commit-boost-client`
 submodule (sha-tagged, `scripts/ensure-cb-artifacts.sh`; ~a few min, once per submodule
 commit), then stands up the devnet. Needs `just` + Rust + Docker + Kurtosis.
 
-**Expected PASS:** `PASS: N/16 observed slots builder-built via commit-boost (buildoor)`,
+**Expected PASS:** `PASS: N/17 observed slots built from a bid CB returned (buildoor)` (the
+window counts both ends of `OBSERVE_SLOTS`),
 exit 0. On chain, each builder-built block carries a `signed_execution_payload_bid` whose
 `builder_index` names a registry builder rather than `BUILDER_INDEX_SELF_BUILD` (2**64 - 1).
 
