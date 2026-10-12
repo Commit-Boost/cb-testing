@@ -224,7 +224,8 @@ feature into a live regression check:
   endpoint (which pools it and gossips it). The BN's `produceBlockV4` therefore
   floors that p2p bid on every builder-built slot and selects the CB bid instead.
   The mode HARD-fails unless the floor fires at least once
-  (`Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=150000000`),
+  (`Best p2p bid below configured minimum slot=.., bidValue=0.10100 ETH, minBid=0.15000 ETH` on Lodestar
+  v1.50.0; an earlier gloas build logged `Ignoring p2p bid below min bid`),
   the selected `bidSource` is the CB URL on every selection, and no p2p bid ever
   wins. A floored p2p bid is nulled *before* candidate ranking, so it never
   appears in `Ranked builder bid candidates`; the rejection line is the floor's

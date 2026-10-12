@@ -19,7 +19,7 @@
 # Opt-in assertion modes turn a merged feature into a live regression check:
 #   --assert p2p       also assert the min_bid p2p floor: the BN floors
 #                      buildoor's 0.101 ETH p2p bid on every builder-built slot
-#                      ("Ignoring p2p bid below min bid"). HARD-fails unless the
+#                      ("Best p2p bid below configured minimum"). HARD-fails unless the
 #                      floor fires (>=1 rejection), CB is the selected bidSource
 #                      (>=1), and no p2p bid ever wins (0).
 #   --assert block-submission  also assert the blind-pipe reveal at POST
@@ -202,11 +202,13 @@ cb_logs() {
 
 # Beacon node logs: bid selection (the min_bid p2p floor + the winning bidSource)
 # is logged by the BN's produceBlockV4 path, not the VC. cl_log_level=debug in the
-# args file surfaces the debug-level "Ignoring p2p bid below min bid" line. `-a`
+# args file surfaces the floor's rejection line (P2P_FLOOR_LOG). `-a`
 # for the same reason as cb_logs: the rejection line lives in the full history,
 # not the 200-line tail (the tail hiding it was the sole cause of the earlier
 # "floor unexercised" flake).
 bn_logs() { kurtosis service logs -a "$ENCLAVE" "$BN_SVC" 2>&1 || true; }
+# Lodestar's p2p floor rejection: v1.50.0 logs the second, an earlier gloas build the first
+P2P_FLOOR_LOG='Ignoring p2p bid below min bid|Best p2p bid below configured minimum'
 
 # ---- keymanager helpers -------------------------------------------------------
 # Authenticated GET of a validator's builder_config, against the exposed VC
@@ -369,8 +371,10 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
 # selected CB's bid ("Selected builder block ... bidSource=<CB>"), the bid CB
 # received from buildoor-mux ("received new header", debug) must be that bid
 # (same value and execution_payment) and the BN's total for the CB candidate
-# ("Ranked builder bid candidates ... <CB>:total=N", debug) must be
-# value + execution_payment. PASS: >= MIN_BUILDER_SLOTS CB selections carry
+# must be value + execution_payment. Lodestar v1.50.0 logs the amounts in ETH to
+# five decimals and the total as bidCountedTotal on the selection line; an
+# earlier gloas build logged Gwei and "Ranked builder bid candidates ...
+# <CB>:total=N". The match is within what the log can show. PASS: >= MIN_BUILDER_SLOTS CB selections carry
 # execution_payment > 0 and no selected slot mismatches or lacks either side.
 assert_trusted_payment() { # $1,$2 = observed window
   log "assert trusted-payment: the BN selects CB's execution-payment bid and counts the whole payment"
@@ -390,6 +394,8 @@ from decimal import Decimal
 cb_log,bn_log=sys.argv[1],sys.argv[2]
 s0,s1,cb_url,cap,need=int(sys.argv[3]),int(sys.argv[4]),sys.argv[5],int(sys.argv[6]),int(sys.argv[7])
 def gwei(eth): return int(Decimal(eth)*10**9)
+# an amount from the BN's log and its precision in Gwei: Gwei as an integer, or ETH to five decimals
+def amount(text): return (gwei(text), 10**4) if "." in text else (int(text), 1)
 cb={}      # slot -> {(value, execution_payment)} of the bids buildoor gave CB, gwei
 for line in open(cb_log,errors="replace"):
     # A CB from before #505's review logs "received new header" with the relay id;
@@ -399,7 +405,7 @@ for line in open(cb_log,errors="replace"):
     v=re.search(r'trustless_bid_eth="([0-9.]+)"',line)
     ep=re.search(r'execution_payment_eth="([0-9.]+)"',line)
     if slot and v and ep: cb.setdefault(int(slot.group(1)),set()).add((gwei(v.group(1)),gwei(ep.group(1))))
-ranked,selected={},{}
+ranked,selected,counted,quantum={},{},{},{}
 source=re.compile(r"bidSource="+re.escape(cb_url)+r"(?=[,\s]|$)")
 for line in open(bn_log,errors="replace"):
     m=re.search(r"\bslot=(\d+)",line)
@@ -409,21 +415,26 @@ for line in open(bn_log,errors="replace"):
         t=re.search(re.escape(cb_url)+r":total=(\d+)",line)
         if t: ranked[slot]=int(t.group(1))
     elif "Selected builder block" in line and source.search(line):
-        v=re.search(r"\bbidValue=(\d+)",line)
-        ep=re.search(r"\bbidExecutionPayment=(\d+)",line)
-        if v and ep: selected[slot]=(int(v.group(1)),int(ep.group(1)))
+        v=re.search(r"\bbidValue=([0-9.]+)",line)
+        ep=re.search(r"\bbidExecutionPayment=([0-9.]+)",line)
+        t=re.search(r"\bbidCountedTotal=([0-9.]+)",line)
+        if v and ep:
+            (vg,q),(eg,_)=amount(v.group(1)),amount(ep.group(1))
+            selected[slot],quantum[slot]=(vg,eg),q
+            if t: counted[slot]=amount(t.group(1))[0]
+for slot,total in counted.items(): ranked.setdefault(slot,total)
 with_ep=[s for s in selected if selected[s][1]>0]
 problems,agree=[],[]
 for slot in sorted(selected):
     if slot not in cb:
         problems.append("slot {0}: the BN selected CB's bid but CB logged no bid from buildoor-mux".format(slot)); continue
-    if selected[slot] not in cb[slot]:
+    v,ep=selected[slot]; q=quantum[slot]
+    if not any(abs(cv-v)<q and abs(ce-ep)<q for cv,ce in cb[slot]):
         problems.append("slot {0}: the BN's selected value/execution_payment {1} is not a bid CB received {2}".format(slot,selected[slot],sorted(cb[slot]))); continue
-    v,ep=selected[slot]
     want=v+min(ep,cap)
     if slot not in ranked:
-        problems.append("slot {0}: no 'Ranked builder bid candidates' total for {1}".format(slot,cb_url)); continue
-    if ranked[slot]!=want:
+        problems.append("slot {0}: no total for {1} (Ranked builder bid candidates or bidCountedTotal)".format(slot,cb_url)); continue
+    if abs(ranked[slot]-want)>=2*q:
         problems.append("slot {0}: BN valuation {1} != value + execution_payment {2}".format(slot,ranked[slot],want)); continue
     agree.append(slot)
 print("  BN selected CB's bid in [{0},{1}]:           {2} slots".format(s0,s1,len(selected)))
@@ -1113,9 +1124,9 @@ fi
 # (POSTed to the BN's publishExecutionPayloadBid endpoint, which pools it AND
 # gossips it: "Published execution payload bid ... value=101000000"), so the BN's
 # produceBlockV4 floors it on every builder-built slot:
-#   "Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=150000000".
-# A floored p2p bid is nulled BEFORE the candidate ranking, so it never shows up
-# in "Ranked builder bid candidates"; the rejection line is the floor's only
+#   "Best p2p bid below configured minimum slot=.., bidValue=0.10100 ETH, minBid=0.15000 ETH"
+# (P2P_FLOOR_LOG). A floored p2p bid is nulled BEFORE the candidate ranking, so it
+# never shows up among the candidates; the rejection line is the floor's only
 # signal (do NOT gate on a p2p ranked-candidate; there is none when the floor
 # works). The guarantee, asserted HARD from the BN's full bid-selection log:
 # the floor FIRES (>=1 rejection), CB is the selected source (>=1), and no p2p
@@ -1124,21 +1135,21 @@ p2p_ok=1
 if [[ "$ASSERT_MODE" == "p2p" ]]; then
   log "assert p2p: min_bid p2p floor rejects buildoor's competing p2p bid; CB is selected"
   BN_LOG="$(bn_logs)"
-  p2p_rejected=$(grep -c 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
+  p2p_rejected=$(grep -cE "$P2P_FLOOR_LOG" <<<"$BN_LOG" || true)
   cb_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*cb-epbs' || true)
   p2p_selected=$(grep 'Selected builder block' <<<"$BN_LOG" | grep -c 'bidSource=[^, ]*p2p' || true)
-  sample=$(grep -m1 'Ignoring p2p bid below min bid' <<<"$BN_LOG" || true)
+  sample=$(grep -m1 -E "$P2P_FLOOR_LOG" <<<"$BN_LOG" || true)
   echo "  p2p bids rejected below floor:    $p2p_rejected"
   [[ -n "$sample" ]] && echo "    e.g. ${sample#*: }"
   echo "  blocks selected via CB bidSource: $cb_selected"
   echo "  blocks selected via p2p bidSource:$p2p_selected"
   if (( p2p_rejected < 1 )); then
     p2p_ok=0   # the floor never fired: buildoor's p2p bid was not rejected this run
-    echo "  the p2p floor never fired (no 'Ignoring p2p bid below min bid'); check buildoor's p2p-bidder"
-    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+    echo "  the p2p floor never fired (no rejection line); check buildoor's p2p-bidder"
+    bn_logs | grep -E "$P2P_FLOOR_LOG|Selected (builder|local) block|Ranked builder bid|Builder bid candidate" | tail -30
   elif (( cb_selected < 1 || p2p_selected > 0 )); then
     p2p_ok=0   # real breach: CB never won, or a p2p bid WON despite the floor
-    bn_logs | grep -E 'bid below min bid|Selected (builder|local) block|Ranked builder bid' | tail -30
+    bn_logs | grep -E "$P2P_FLOOR_LOG|Selected (builder|local) block|Ranked builder bid|Builder bid candidate" | tail -30
   else
     echo "  p2p floor PROVEN: $p2p_rejected competing p2p bid(s) rejected below the floor; CB won every selection"
   fi
