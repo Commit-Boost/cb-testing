@@ -27,10 +27,11 @@ Rust workspace (one lib, three bins):
 - **docs/EPBS.md** - the **ePBS (gloas) sim**: `just epbs-test <cl-image>` stands up a gloas devnet with
   buildoor + commit-boost and asserts builder-built blocks flow VC -> CB -> buildoor end to end. Read this to
   test a CL's gloas builder API (see its "Testing a CL" section), or before touching `scripts/run-epbs-sim.sh`
-  or `configs/epbs/`. The CB artifacts (image + `builder-config`) auto-build from the pinned submodule, sha-tagged.
+  or `configs/epbs/`. The VC gets its builder config from a proposer settings file the harness writes, as the
+  operator guide does. The CB image auto-builds from the pinned submodule, sha-tagged.
   Feature checks are opt-in `--assert <mode>` runs (`just epbs-sim-assert <mode>`, e.g.
   `block-submission`, `trusted-payment`), listed under its "Assertion modes"; `just epbs-sim-render
-  <mode> <dir>` checks a mode's rendered CB config with `commit-boost builder-config print`, no devnet.
+  <mode> <dir>` writes a mode's CB config and settings file, no devnet.
 - **README.md** - user-facing quick start (user-facing quick start).
 
 Internal back-room (agent working material, not part of the public docs surface):
@@ -216,14 +217,11 @@ cargo fmt --check >/dev/null 2>&1; echo "FMT_EXIT=$?"
 This is the same defect class the harness keeps finding in itself: a check that cannot distinguish
 "no signal" from "bad signal". Apply it to devnet runs too - an empty log tail is not a passing run.
 
-**A stale `commit-boost` binary (or `km-e2e` image) silently projects the WRONG config.** `builder-config` builds the
-keymanager `builder_config` docs; a binary from before a km-tool fix keeps the old projection - e.g.
-populating `builder_pubkeys` from the relay URL, which a spec-conformant CL then rejects as un-allowlisted, so
-every builder bid is dropped and the proposer self-builds. It presents as a broken CL, not a stale tool, which
-is exactly what makes it hard to diagnose. Both ePBS CB artifacts are now sha-tagged to the pinned
-`commit-boost-client` submodule (`scripts/ensure-cb-artifacts.sh`), so `just epbs-test` cannot run a stale one.
-If you ever build `commit-boost` by hand, rebuild it from the CURRENT submodule and confirm `builder-config print` emits
-`"builder_pubkeys":[]` - not a pubkey lifted from a relay URL.
+**A stale `km-e2e` image silently runs the WRONG CB.** A bid the CL drops for a reason it does not log
+(a `builder_pubkeys` mismatch, a fee recipient that differs from the proposer's preferences) presents as a
+broken CL, which is what makes it hard to diagnose. The CB image is sha-tagged to the pinned
+`commit-boost-client` submodule (`scripts/ensure-cb-artifacts.sh`), so `just epbs-test` cannot run a stale
+one. If you pin `CB_IMAGE` by hand, build it from the commit you mean to test.
 
 - **CB's synthetic status codes 555 and 556 are NOT relay-served.** 555 = `TIMEOUT_ERROR_CODE`, CB's own
   client-side deadline cancellation; 556 = WS transport error. They bucket separately (`timeout`,

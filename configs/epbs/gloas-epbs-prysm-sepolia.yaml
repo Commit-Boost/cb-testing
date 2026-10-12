@@ -7,8 +7,8 @@ participants:
   - el_type: geth
     el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: prysm
-    cl_image: gcr.io/offchainlabs/prysm/beacon-chain:v7.2.0
-    vc_image: gcr.io/offchainlabs/prysm/validator:v7.2.0
+    cl_image: gcr.io/offchainlabs/prysm/beacon-chain:v7.2.1
+    vc_image: gcr.io/offchainlabs/prysm/validator:v7.2.1
     cl_log_level: debug
     vc_log_level: debug
     # No vc_extra_params: upstream input_parser.star already appends

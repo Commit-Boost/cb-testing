@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ensure-cb-artifacts.sh - make the ePBS commit-boost artifacts reproducible.
 #
-# The ePBS sim needs two commit-boost artifacts that are NOT pullable: the CB
-# sidecar image (with the ePBS bid pipe) and the `commit-boost` binary, whose
-# `builder-config` subcommand writes the validators' builder config. Both are built from the pinned `commit-boost-client`
-# submodule and TAGGED BY ITS COMMIT SHA, so:
+# The ePBS sim needs the CB sidecar image (with the ePBS bid pipe), which is NOT
+# pullable; without --no-bin this also builds the `commit-boost` binary, for a CB
+# commit that has the parked `builder-config` subcommand. Both are built from the
+# pinned `commit-boost-client` submodule and TAGGED BY ITS COMMIT SHA, so:
 #   - a clone reproduces them from `git submodule update --init` + one build, and
 #   - a stale artifact can never be silently used (the tag encodes the source
 #     commit; a mismatched submodule bump forces a rebuild). This is the guard
@@ -15,9 +15,8 @@
 # Prints two eval-able lines on stdout (all human output goes to stderr):
 #   CB_IMAGE=commit-boost/commit-boost:km-e2e-<sha>
 #   CB_BIN=<abs path to the submodule's commit-boost binary>
-# --bin-only provisions and prints only CB_BIN (no docker), for
-# `run-epbs-sim.sh --render-only`. --no-bin provisions and prints only CB_IMAGE,
-# for a CB commit without `builder-config` (`--assert manual-config`).
+# --bin-only provisions and prints only CB_BIN (no docker). --no-bin provisions
+# and prints only CB_IMAGE, which is all run-epbs-sim.sh uses.
 #
 # CB_COMMIT=<commit-ish> builds both from that commit instead of the submodule's
 # checkout, in a detached worktree of the submodule's repo at

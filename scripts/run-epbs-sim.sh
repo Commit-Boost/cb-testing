@@ -1,117 +1,73 @@
 #!/usr/bin/env bash
-# run-epbs-sim.sh - reproducible ePBS (gloas) + commit-boost + keymanager loop.
+# run-epbs-sim.sh - reproducible ePBS (gloas) + commit-boost loop.
 #
-# Stands up a gloas devnet with buildoor (gloas_fork_epoch 0, minimal, 6s slots),
-# lodestar CL+VC with keymanager enabled, adds a commit-boost PBS sidecar as a
-# first-class kurtosis enclave service (CB_LAUNCH=service; docker = legacy path),
-# runs `builder-config apply` to point every validator's builder_config at commit-boost
-# (auth_data = buildoor's hostname), then observes the loop and asserts:
-#   BN -> CB execution_payload_bid calls, buildoor bids via CB ("received new
-#   header" from buildoor-mux; CB forwards each request to the one relay its
-#   auth data names and ranks nothing), and builder-built blocks on chain (the
-#   block's signed_execution_payload_bid
-#   names a registry builder, not BUILDER_INDEX_SELF_BUILD; see
-#   scripts/epbs-blocks.py).
-#
-# A real ethereum-package `epbs` mev_type that launches CB as the sidecar (no
-# manual add + no `builder-config apply`) needs an upstream-package change - see the
-# "Native ePBS mev_type: investigation & submodule-upgrade blockers" in docs/EPBS.md.
+# Stands up a gloas devnet with buildoor (gloas_fork_epoch 0, minimal, 6s slots)
+# and one consensus client, adds a commit-boost PBS sidecar as a first-class
+# kurtosis enclave service (CB_LAUNCH=service; docker = legacy path), and gives
+# the validator client a proposer settings file that points every key at
+# commit-boost (auth_data = buildoor's hostname), as the operator guide does:
+# Lodestar --proposerSettingsFile, Prysm --proposer-settings-file, Lighthouse
+# builder_definitions.yml in its validators dir. Then it observes the loop and
+# asserts:
+#   BN -> CB execution_payload_bid calls, buildoor bids via CB, and builder-built
+#   blocks on chain whose bid is one CB returned (scripts/epbs-blocks.py and
+#   scripts/epbs-sim-helpers.py via-cb).
+# The file sets min_bid 0.15 ETH: under buildoor's builder-API bid, raised to
+# 0.2 ETH, and over its 0.101 ETH p2p bid, so a block built from buildoor's bid
+# came through CB.
 #
 # Opt-in assertion modes turn a merged feature into a live regression check:
-#   --assert p2p       also assert the min_bid p2p floor. buildoor's p2p-bidder
-#                      publishes a 101000000 Gwei bid every slot, below the
-#                      200000000 Gwei floor, so the BN floors it on every
-#                      builder-built slot ("Ignoring p2p bid below min bid").
-#                      HARD-fails unless the floor fires (>=1 rejection), CB is
-#                      the selected bidSource (>=1), and no p2p bid ever wins (0).
-#   --assert preserve  after `builder-config apply`, POST a third-party builder_config
-#                      entry to a key, then `builder-config apply --preserve-entries` and
-#                      assert BOTH our entry and the third-party entry survive
-#                      (a plain apply drops it). Keymanager-only: skips the
-#                      builder-activation wait + observe window.
+#   --assert p2p       also assert the min_bid p2p floor: the BN floors
+#                      buildoor's 0.101 ETH p2p bid on every builder-built slot
+#                      ("Ignoring p2p bid below min bid"). HARD-fails unless the
+#                      floor fires (>=1 rejection), CB is the selected bidSource
+#                      (>=1), and no p2p bid ever wins (0).
 #   --assert block-submission  also assert the blind-pipe reveal at POST
 #                      /eth/v1/builder/beacon_blocks: the proposer reveals each
-#                      builder-built block through CB, which forwards the SSZ
-#                      bytes to buildoor unparsed. HARD-fails unless >=1 reveal
-#                      reached the forward (2xx = buildoor accepted, 5xx = it
-#                      answered without accepting) with zero 4xx (missing gloas
-#                      Eth-Consensus-Version, or a non-SSZ body) and zero
-#                      forwards buildoor never answered. CB decodes nothing, so
-#                      any preset works.
+#                      builder-built block through CB, which forwards the body to
+#                      buildoor undecoded. HARD-fails unless >=1 reveal reached
+#                      the forward with zero 4xx and zero forwards buildoor never
+#                      answered.
 #   --assert builder-down  after buildoor activates and >=1 builder-built slot is
 #                      seen, STOP buildoor and assert the proposer stays live: the
 #                      chain keeps advancing, the new blocks are self-built
 #                      (builder_index == BUILDER_INDEX_SELF_BUILD), and CB returns
-#                      204 "no header available" and NEVER 500. Proves builder
-#                      failure never stalls the proposer.
-#   --assert trusted-payment  drop the template's [pbs] max_execution_payment_gwei
-#                      = 0, so builder-config writes its default, unclamped cap, start
-#                      the lodestar VC with --allowDangerousTrustedPayments, and
-#                      tell buildoor to claim half of each bid as execution_payment
-#                      (--builder-api-execution-payment-percent). HARD-fails unless
-#                      builder-config stored 18446744073709551615 on every builder_config
-#                      entry of every key, the BN selects CB's execution-payment
-#                      bid in >= MIN_BUILDER_SLOTS slots, and for each of them the
-#                      BN values the bid CB forwarded at value + execution_payment.
-#                      First runs a CONTROL devnet WITHOUT the flag (skip with
-#                      TRUSTED_PAYMENT_CONTROL=0): builder-config apply must exit non-zero
-#                      with a 400 on every key, the VC naming the flag.
-#   --assert relays-only  drop every [[mux]], so builder-config writes the [[relays]] builder
-#                      config to each key the VC holds, and require builder-built
-#                      blocks through CB as in the default mode
-#   --assert file-config  no keymanager write: the VC loads FILE_CONFIG, a client's
-#                      builder config file (Lodestar --proposerSettingsFile, Prysm
-#                      --proposer-settings-file, Lighthouse builder_definitions.yml
-#                      in its validators dir), with the docs' example values
-#                      swapped for the sim's; blocks must be builder-built through
-#                      CB as in the default mode. The entry the file reaches
-#                      directly goes to FILE_CONFIG_DIRECT_URL, a closed port by
-#                      default, so a builder bid can only have come through CB.
-#                      With a Lodestar VC, builder-config apply must then stop
-#                      at the client's first 403 and write no key
-#   --assert detect    apply with the docs' pipe (print | apply --from -), then
-#                      give DETECT_KEYS mux keys an entry without auth_data and
-#                      DETECT_KEYS more auth data naming the [[relays]] relay,
-#                      moved to buildoor's address so it is another host.
-#                      Blocks must be builder-built through CB as in the default
-#                      mode, CB must warn about those keys and no other, and no
-#                      block of theirs may come from a bid CB returned
-#   --assert manual-config  run a CB commit that has no builder-config (CB_COMMIT) and write
-#                      each validator key's builder_config with the curl call in
-#                      that commit's docs/docs/get_started/epbs.md, run as written
-#                      with the sim's CB URL and buildoor's hostname auth data in
-#                      place of the page's example values. The CB config carries
-#                      only keys the commit's config code names. Then the default
-#                      builder-built assertion.
-#   --assert config-matrix  measure how the VC stores and applies each builder
-#                      config value, per client. The 64 keys split into seven
-#                      [[mux]] groups with different values (scripts/epbs-config-
-#                      matrix.py lists them and what each discriminates); builder-config
-#                      writes them, buildoor bids value 0.2 ETH + execution_payment
-#                      0.2 ETH whatever the proposer advertised, and every slot of
-#                      OBSERVE_SLOTS (64) is classified by its proposer's group as
-#                      via CB, another builder's bid, self-built or missed. Records
-#                      the stored doc of every key next to the doc builder-config wrote, the
-#                      client's own per-slot bid-selection lines and CB's bid
-#                      requests and builder preferences per group, all under CM_OUT.
-#                      Then checks builder-config: print writes nothing and shows
-#                      the [[relays]] config, a plain apply drops a third-party
-#                      entry, --preserve-entries keeps it, and print | apply
-#                      --from - stores what apply --config stored. Reports the
-#                      client's behaviour without judging it; fails only when the
-#                      observation is incomplete (a group with fewer than
-#                      CM_MIN_PROPOSALS blocks, an unclassified slot) or a builder-config
-#                      check fails. builder-config apply may exit non-zero here (a VC that
-#                      refuses a group's values); its output is recorded.
-# No flag = the default builder-built assertion (unchanged).
+#                      204 "no header available" and NEVER 500.
+#   --assert trusted-payment  the settings file sets max_execution_payment to the
+#                      largest Uint64, the lodestar VC starts with
+#                      --allowDangerousTrustedPayments, and buildoor claims half of
+#                      each bid as execution_payment. HARD-fails unless every key
+#                      loaded the cap, the BN selects CB's execution-payment bid in
+#                      >= MIN_BUILDER_SLOTS slots, and for each of them values the
+#                      bid at value + execution_payment. First checks, in a
+#                      container with no beacon node, that the VC refuses to start
+#                      on the same file without the flag (skip with
+#                      TRUSTED_PAYMENT_CONTROL=0).
+#   --assert relays-only  drop every [[mux]] from the CB config, so every key
+#                      reaches buildoor through [[relays]]
+#   --assert file-config  the VC loads FILE_CONFIG, a client's settings file from
+#                      the docs, with the docs' example values swapped for the
+#                      sim's. The entry the file reaches directly goes to
+#                      FILE_CONFIG_DIRECT_URL, a closed port by default, so a
+#                      builder bid can only have come through CB.
+#   --assert manual-config  the keymanager API instead of a settings file: run a
+#                      CB commit (CB_COMMIT) and write each key's builder_config
+#                      with the curl call in that commit's
+#                      docs/docs/get_started/epbs.md, run as written with the
+#                      sim's CB URL and buildoor's hostname in place of the page's
+#                      example values. Then the default assertion.
+#   --assert dial      the settings file's auth_data names buildoor by URL, which
+#                      no relay entry names (the relay entry names buildoor by IP),
+#                      so CB dials it. Needs a CB_COMMIT built with
+#                      scripts/cb-dial-test.patch, since devnet addresses are
+#                      private.
+# No flag = the default builder-built assertion.
 #
-# --render-only DIR renders the mode's CB config + km overlay into DIR through the
-# same code path as a live run (placeholder genesis time + keymanager URL), runs
-# `commit-boost builder-config print` on them and exits: no docker, no kurtosis
-# (the binary is CB_BIN, else the submodule's, which cargo rebuilds if stale).
+# --render-only DIR renders the mode's CB config and the VC's settings file into
+# DIR through the same code path as a live run, and exits: no docker, no kurtosis.
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config|detect] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -141,8 +97,8 @@ PRESET="${PRESET:-}"
 # never stale; see scripts/ensure-cb-artifacts.sh). Set explicitly to pin a
 # different CB image.
 CB_IMAGE="${CB_IMAGE:-}"
-# Build the CB image (and builder-config) from this commit instead of the submodule's
-# checkout; it must be in the submodule's repo (scripts/ensure-cb-artifacts.sh).
+# Build the CB image from this commit instead of the submodule's checkout; it must
+# be in the submodule's repo (scripts/ensure-cb-artifacts.sh).
 # manual-config also reads the docs page and checks the config keys at it.
 # Empty = the submodule's HEAD.
 export CB_COMMIT="${CB_COMMIT:-}"
@@ -159,7 +115,6 @@ CB_NAME="${CB_NAME:-cb-epbs}"            # must match advertised host in the tem
 #   docker            = legacy raw `docker run` on the enclave network (fallback).
 CB_LAUNCH="${CB_LAUNCH:-service}"
 CB_ARTIFACT="${CB_ARTIFACT:-cb-epbs-config}"  # kurtosis files-artifact name (service path)
-CB_BIN="${CB_BIN:-}"
 # The relay CB bids into, rendered into BOTH __BUILDOOR_RELAY_URL__ sites in
 # cb-config.toml.tmpl: the top-level [[relays]] entry and the [[mux.relays]]
 # entry the listed validator pubkeys route to. Substituting only one leaves the
@@ -168,7 +123,7 @@ CB_BIN="${CB_BIN:-}"
 # supplying its pubkey too. Default = the devnet's buildoor.
 BUILDOOR_RELAY_URL="${BUILDOOR_RELAY_URL:-http://0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416@buildoor:8080}"
 BUILDOOR_ACTIVATION_TIMEOUT="${BUILDOOR_ACTIVATION_TIMEOUT:-1200}"  # s to wait for the builder deposit to activate (queue delay varies run to run, seen out to ~slot 100)
-OBSERVE_SLOTS="${OBSERVE_SLOTS:-}"       # slots to watch once buildoor is active (16; config-matrix 64)
+OBSERVE_SLOTS="${OBSERVE_SLOTS:-16}"     # slots to watch once buildoor is active
 MIN_BUILDER_SLOTS="${MIN_BUILDER_SLOTS:-8}"  # PASS threshold (builder-built via CB; allows some missed slots)
 KEEP="${KEEP:-0}"                        # 1 = leave the enclave + CB running
 RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives here
@@ -176,18 +131,10 @@ RUN_DIR="configs/epbs/.run"              # rendered (gitignored) config lives he
 # args file (e.g. VC_EXTRA_PARAMS=--builder.selection=maxprofit on lodestar).
 VC_EXTRA_PARAMS="${VC_EXTRA_PARAMS:-}"
 # 0 = do not wait for buildoor's first bid via CB before observing: for a client
-# whose beacon node never requests bids (config-matrix on nimbus)
+# whose beacon node never requests bids
 WAIT_BUILDOOR="${WAIT_BUILDOOR:-1}"
 # observe from this head slot at the earliest (e.g. past a gloas fork at epoch 1)
 OBSERVE_FROM_SLOT="${OBSERVE_FROM_SLOT:-0}"
-# config-matrix: where the evidence lands, the fewest blocks each group must
-# propose for the observation to count, and buildoor's bid: a 0.4 ETH bid, half
-# claimed as execution_payment whatever max_execution_payment the proposer
-# advertised, so the beacon node's own cap alone decides what counts
-CM_OUT="${CM_OUT:-$RUN_DIR/config-matrix}"
-CM_MIN_PROPOSALS="${CM_MIN_PROPOSALS:-3}"
-CM_BUILDOOR_ARGS="${CM_BUILDOOR_ARGS:---builder-api-subsidy=400000000 --builder-api-execution-payment-percent=50 --builder-api-ignore-preference-limit}"
-
 # opt-in assertion mode (default = today's builder-built assertion)
 ASSERT_MODE="${ASSERT_MODE:-}"
 RENDER_ONLY=""
@@ -203,22 +150,14 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config|detect) : ;;
+  ""|p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config) : ;;
+  preserve|config-matrix|detect) no_mode "retired with builder-config, which is parked: the VC reads a proposer settings file" ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, builder-config writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "renamed: --assert dial" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|preserve|block-submission|builder-down|trusted-payment|manual-config|config-matrix|dial|relays-only|file-config|detect)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
-# config-matrix needs enough slots for every group to propose several times
-# detect misroutes a quarter of the keys, so it watches longer for the rest
-if [[ -z "$OBSERVE_SLOTS" ]]; then
-  case "$ASSERT_MODE" in config-matrix) OBSERVE_SLOTS=64 ;; detect) OBSERVE_SLOTS=24 ;; *) OBSERVE_SLOTS=16 ;; esac
-fi
-# detect: keys given each missing and stale config, and the [[relays]] host,
-# buildoor's address once the devnet is up (a placeholder until then)
-DETECT_KEYS="${DETECT_KEYS:-8}"
-DETECT_STALE_HOST="127.0.0.2"
 
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
 # activation poll room unless the caller already raised it above the default.
@@ -232,13 +171,11 @@ esac
 
 # builder-down runs a second observe window after stopping buildoor
 BUILDER_DOWN_SLOTS="${BUILDER_DOWN_SLOTS:-12}"  # slots to watch after buildoor is stopped
-# trusted-payment: with no cap set, builder-config writes the largest Uint64, so the BN
-# counts the whole execution payment
+# trusted-payment: the settings file's cap, the largest Uint64, so the BN counts the
+# whole execution payment
 UNCLAMPED_CAP=18446744073709551615
-# trusted-payment: 1 = first run the control devnet, whose VC lacks the flag
+# trusted-payment: 1 = first check the VC refuses the file without the flag
 TRUSTED_PAYMENT_CONTROL="${TRUSTED_PAYMENT_CONTROL:-1}"
-# internal: "control" marks the control phase's own run of this script
-TRUSTED_PAYMENT_PHASE="${TRUSTED_PAYMENT_PHASE:-}"
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -271,68 +208,16 @@ cb_logs() {
 # "floor unexercised" flake).
 bn_logs() { kurtosis service logs -a "$ENCLAVE" "$BN_SVC" 2>&1 || true; }
 
-# ---- keymanager helpers (used out-of-enclave, exactly like builder-config) -----------
-# Authenticated GET/POST of a validator's builder_config, against the same
-# exposed VC keymanager port + static token builder-config uses (see docs/EPBS.md,
-# "How the keymanager calls happen"). KM_TOKEN/VC_KM are set before use.
+# ---- keymanager helpers -------------------------------------------------------
+# Authenticated GET of a validator's builder_config, against the exposed VC
+# keymanager port + ethereum-package's static token (see docs/EPBS.md, "How the
+# keymanager calls happen"). KM_TOKEN/VC_KM are set before use.
 km_get()  { curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/validator/$1/builder_config"; }
-km_post() { # $1=pubkey $2=json-body -> prints the HTTP status code
-  curl -s -o /dev/null -w '%{http_code}' -X POST \
-    -H "Authorization: Bearer $KM_TOKEN" -H 'Content-Type: application/json' \
-    -d "$2" "$VC_KM/eth/v1/validator/$1/builder_config"
-}
 # the entry URLs stored on a key (one per line)
 km_entry_urls() {
   km_get "$1" | python3 -c \
     "import sys,json;d=json.load(sys.stdin).get('data',{});[print(e.get('url','')) for e in (d.get('builders') or [])]" \
     2>/dev/null || true
-}
-
-# --- assert preserve: --preserve-entries keeps a third-party builder entry ----
-# A plain `builder-config apply` full-replaces each key's builder_config, so an entry a
-# THIRD-PARTY writer pinned is erased. `--preserve-entries` GETs first and folds
-# such entries back in. This proves both halves live: a control key shows plain
-# apply dropping the entry; the preserve key shows both entries surviving.
-assert_preserve() {
-  log "assert preserve: third-party builder_config entry survives --preserve-entries"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  local CB_URL="http://cb-epbs:18550"
-  # two deterministic mux keys from configs/epbs/cb-config.toml.tmpl
-  local K1="0x81b676591b823270a3284ace7d81cbce2d6cdce55bb0e053874d7e3a08f729453009d3e662ec3130379f43c0f3210b6d"
-  local K2="0x81ea9f74ef7d935b807474e38954ae3934856219a23e074954b2e860c5a3c400f9aedb42cd27cb4ceb697ca36d1e58cb"
-  # a distinct third-party writer's entry (distinct url + auth_data); buildoor's
-  # pubkey is reused only as a valid BLS point for builder_pubkeys.
-  local TP_URL="http://third-party-relay:19999"
-  local TP_AUTH="0x74686972647061727479"   # "thirdparty"
-  local TP_BP="0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416"
-  local TP_DOC
-  TP_DOC="{\"builders\":[{\"url\":\"$TP_URL\",\"auth_data\":\"$TP_AUTH\",\"builder_pubkeys\":[\"$TP_BP\"]}]}"
-
-  # sanity: our apply put the CB entry on both keys
-  km_entry_urls "$K1" | grep -qF "$CB_URL" || die "preserve: CB entry not on $K1 after apply"
-  km_entry_urls "$K2" | grep -qF "$CB_URL" || die "preserve: CB entry not on $K2 after apply"
-
-  # --- CONTROL: a plain apply DROPS a third-party entry (K2) ---
-  log "control: plain apply drops a third-party entry"
-  local code
-  code="$(km_post "$K2" "$TP_DOC")"; [[ "$code" == 2* ]] || die "control: POST third-party to K2 not accepted (HTTP $code)"
-  km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: third-party entry not stored on K2"
-  bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml"
-  km_entry_urls "$K2" | grep -qF "$CB_URL" || die "control: CB entry missing on K2 after plain apply"
-  ! km_entry_urls "$K2" | grep -qF "$TP_URL" || die "control: plain apply did NOT drop the third-party entry"
-  echo "  control OK: plain apply replaced K2 with only the CB entry (third-party dropped)"
-
-  # --- PRESERVE: apply --preserve-entries KEEPS a third-party entry (K1) ---
-  log "preserve: apply --preserve-entries keeps a third-party entry"
-  code="$(km_post "$K1" "$TP_DOC")"; [[ "$code" == 2* ]] || die "preserve: POST third-party to K1 not accepted (HTTP $code)"
-  km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry not stored on K1"
-  bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" --preserve-entries
-  km_entry_urls "$K1" | grep -qF "$CB_URL" || die "preserve: CB entry missing on K1 after --preserve-entries"
-  km_entry_urls "$K1" | grep -qF "$TP_URL" || die "preserve: third-party entry DROPPED by --preserve-entries (regression)"
-  echo "  preserve OK: K1 carries BOTH the CB entry and the third-party entry"
-
-  log "RESULT"
-  printf '\033[1;32mPASS: --preserve-entries kept the third-party builder_config entry; plain apply dropped it\033[0m\n'
 }
 
 # head slot as a plain integer (0 on any error)
@@ -399,8 +284,7 @@ assert_block_submission() {
   die "block-submission failed (forwarded=$reached need>=1, 4xx=$refused need0, unanswered=$unanswered need0)"
 }
 
-# CB's URL as the VC calls it: the km overlay's advertised_url, and the url of
-# the builder_config entry builder-config writes on every key
+# CB's URL as the VC calls it: the url of the settings file's builder entry
 CB_ENTRY_URL="http://${CB_NAME}:18550"
 
 # --- assert builder-down: builder failure never stalls the proposer -------------
@@ -475,100 +359,6 @@ assert_builder_down() { # $1=slot at which buildoor was already confirmed buildi
   (( cb_500 == 0 )) || die "builder-down: CB returned $cb_500 x 500 with buildoor down (must be 204)"
   (( n_built_after == 0 )) || die "builder-down: $n_built_after builder-built block(s) appeared with buildoor DOWN"
   die "builder-down: expected self-built blocks (self=$n_self_after) and >=1 CB 204 (204=$cb_204)"
-}
-
-# --- assert trusted-payment, control: a VC without the flag refuses the cap ------
-# Run in the control phase's own devnet, whose lodestar VC lacks
-# --allowDangerousTrustedPayments. lodestar's keymanager refuses any
-# builder_config entry with max_execution_payment > 0 (400, naming the flag), so
-# builder-config apply of the capped config must exit non-zero with a 400 on every key,
-# and no key may end up holding the cap. POSTing one projected doc by hand (the
-# first mux's printed config) ties the 400 to the flag, not to some
-# other rejection.
-assert_trusted_payment_refused() {
-  log "trusted-payment control: builder-config apply of a capped config, VC WITHOUT --allowDangerousTrustedPayments"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  local out rc=0
-  out="$(bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>&1 \
-    | sed -r 's/\x1b\[[0-9;]*m//g')" || rc=$?
-  local n_keys refused
-  n_keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
-    | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')" \
-    || die "control: could not list the VC's keystores"
-  # builder-config reports each refusal on stderr as "ERROR: <vc>: POST <key> failed:
-  # 400 Bad Request: <VC message>"; an older build repeats "... failed:" before
-  # the status. || true: no match is a 0 here, not a reason for set -e to end the run
-  refused="$(grep -E 'POST 0x[0-9a-f]{96} failed: (.*failed: )?400' <<<"$out" \
-    | grep -oE 'POST 0x[0-9a-f]{96}' | sort -u | wc -l || true)"
-  # builder-config stops at the first refusal that names the flag and says so once; an
-  # older build wrote, and was refused, every key
-  local named=0
-  grep -q 'refuses a max_execution_payment above 0' <<<"$out" && named=1
-  echo "  builder-config apply exit code:            $rc (need non-zero)"
-  echo "  builder-config named the flag and stopped: $([[ $named == 1 ]] && echo yes || echo no)"
-  echo "  per-key refusals with HTTP 400:   $refused of $n_keys (need 0 when it named the flag, else all)"
-  { grep -m1 -E 'failed: 400' <<<"$out" || true; } | cut -c1-240 | sed 's/^/    e.g. /'
-
-  # one printed doc, POSTed by hand to read the VC's reason: the first mux's
-  # config, to its first key
-  local printed line key doc code body stored_cap
-  printed="$(bc_print "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>/dev/null)" \
-    || die "control: builder-config print failed"
-  line="$(python3 -c 'import sys,json;m=next(iter(json.load(sys.stdin)["muxes"].values()));print(m["keys"][0],json.dumps(m["config"],separators=(",",":")))' <<<"$printed")" \
-    || die "control: the printed document has no mux key"
-  key="${line%% *}"; doc="${line#* }"
-  body="$(curl -s -w '\n%{http_code}' -X POST -H "Authorization: Bearer $KM_TOKEN" -H 'Content-Type: application/json' \
-    --data-binary "$doc" "$VC_KM/eth/v1/validator/$key/builder_config")"
-  code="$(tail -1 <<<"$body")"; body="$(sed '$d' <<<"$body")"
-  stored_cap="$(km_get "$key" | python3 -c \
-    'import sys,json;d=json.load(sys.stdin)["data"];print(max([int(e.get("max_execution_payment") or 0) for e in d.get("builders") or []],default=0))')" \
-    || die "control: could not read $key's stored builder_config"
-  echo "  POST by hand of $key's projected doc: HTTP $code $body"
-  echo "  largest cap stored on that key:   $stored_cap (need 0)"
-
-  log "RESULT"
-  local refusals_ok=0
-  if (( named == 1 )); then (( refused == 0 )) && refusals_ok=1; else (( n_keys >= 1 && refused == n_keys )) && refusals_ok=1; fi
-  if (( rc != 0 && refusals_ok == 1 )) && [[ "$code" == 400 && "$body" == *allowDangerousTrustedPayments* && "$stored_cap" == 0 ]]; then
-    printf '\033[1;32mPASS: without --allowDangerousTrustedPayments, builder-config apply exited %s, %s, and stored no cap\033[0m\n' \
-      "$rc" "$([[ $named == 1 ]] && echo "named the flag once and wrote no capped key" || echo "got a 400 on all $n_keys keys")"
-    return 0
-  fi
-  die "control: want builder-config exit != 0 (got $rc), the flag named and one refusal or a 400 on all $n_keys keys (named=$named, refused=$refused), a 400 naming the flag on the hand POST (got $code), stored cap 0 (got $stored_cap)"
-}
-
-# --- assert trusted-payment: builder-config stored the unclamped cap on every entry ---------
-# No max_execution_payment_gwei is set anywhere, so builder-config must write its default,
-# the largest Uint64, onto every builder_config entry of every key.
-assert_cap_projected() {
-  log "assert trusted-payment: builder-config stored max_execution_payment = $UNCLAMPED_CAP on every entry"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  python3 - "$VC_KM" "$KM_TOKEN" "$UNCLAMPED_CAP" <<'PY' || die "trusted-payment: the cap is missing from stored builder_config entries"
-import json,sys,urllib.request
-km,token,cap=sys.argv[1],sys.argv[2],sys.argv[3]
-def get(path):
-    req=urllib.request.Request(km+path,headers={"Authorization":"Bearer "+token})
-    with urllib.request.urlopen(req,timeout=10) as r:
-        return json.load(r)
-keys=[k["validating_pubkey"] for k in get("/eth/v1/keystores")["data"]]
-entries,bad,sample=0,[],None
-for k in keys:
-    doc=get("/eth/v1/validator/{0}/builder_config".format(k))["data"]
-    sample=sample or (k,doc)
-    builders=doc.get("builders") or []
-    if not builders:
-        bad.append((k,"no builder entries"))
-    for e in builders:
-        entries+=1
-        if str(e.get("max_execution_payment"))!=cap:
-            bad.append((k,"{0}: max_execution_payment={1}".format(e.get("url"),e.get("max_execution_payment"))))
-print("  keys: {0}, entries: {1}, entries without the cap: {2}".format(len(keys),entries,len(bad)))
-if sample:
-    print("    e.g. {0}: {1}".format(sample[0][:20]+"...",json.dumps(sample[1])))
-for k,why in bad[:5]:
-    print("    {0}: {1}".format(k,why))
-sys.exit(1 if bad or not keys else 0)
-PY
 }
 
 # --- assert trusted-payment: the BN selects CB's bid and counts its whole payment --
@@ -655,10 +445,10 @@ PY
 }
 
 # --- manual-config: builder config written the way the CB docs page says -------
-# A CB commit without builder-config documents the keymanager call an operator makes
-# instead. This mode makes that call, taken from the page at the commit under
-# test, so a documented call that does not route the proposer's bid requests to
-# CB fails the run.
+# The CB docs page documents the keymanager call an operator can make instead of a
+# settings file. This mode makes that call, taken from the page at the commit
+# under test, so a documented call that does not route the proposer's bid
+# requests to CB fails the run.
 DOCS_PAGE="docs/docs/get_started/epbs.md"
 # the page's example values, swapped for the sim's before the call runs
 DOCS_CB_URL="http://cb.example.com:18550"
@@ -701,6 +491,115 @@ install_lighthouse_file_config() { # $1=rendered file
   echo "file-config: $dir/builder_definitions.yml installed, $ctr restarted"
 }
 
+# ---- the VC's proposer settings file ------------------------------------------
+# Every mode but manual-config writes one: a single builder entry, CB, whose
+# auth_data names buildoor's host (dial: buildoor's URL). min_bid floors
+# buildoor's 0.101 ETH p2p bid and passes its 0.2 ETH builder-API bid. Prysm's
+# file carries the VC's own fee recipient (ethereum-package's default), since the
+# beacon node discards a bid whose fee recipient differs from the proposer's
+# preferences.
+SETTINGS_MIN_BID_GWEI=150000000
+SETTINGS_FEE_RECIPIENT="0x8943545177806ED17B9F23F0a21ee5948eCaa776"
+
+write_settings_file() { # $1=cl_type $2=out path
+  local host auth cap=0
+  host="$(sed -E 's|^[a-z]+://([^@/]*@)?([^:/]+).*$|\2|' <<<"$BUILDOOR_RELAY_URL")"
+  auth="$host"; [[ "$ASSERT_MODE" == "dial" ]] && auth="$DIAL_AUTH_URL"
+  [[ "$ASSERT_MODE" == "trusted-payment" ]] && cap="$UNCLAMPED_CAP"
+  python3 - "$1" "$2" "$CB_ENTRY_URL" "0x$(printf '%s' "$auth" | xxd -p | tr -d '\n')" \
+    "$SETTINGS_MIN_BID_GWEI" "$cap" "$SETTINGS_FEE_RECIPIENT" <<'PY'
+import json, sys
+cl, out, url, auth, min_bid, cap, fee = sys.argv[1:]
+if cl == "lodestar":
+    text = ("default_config:\n  builder:\n"
+            f'    min_bid: "{min_bid}"\n    max_execution_payment: "{cap}"\n'
+            f'    builders:\n      - url: "{url}"\n        auth_data: "{auth}"\n')
+elif cl == "prysm":
+    text = json.dumps({"version": 2, "default_config": {"fee_recipient": fee, "builder": {
+        "min_bid": min_bid, "max_execution_payment": cap,
+        "builders": [{"url": url, "auth_data": auth}]}}}, indent=2) + "\n"
+else:
+    text = (f"min_bid: {min_bid}\nbuilders:\n  - enabled: true\n"
+            f'    url: "{url}"\n    auth_data: "{auth}"\n    max_execution_payment: {cap}\n')
+open(out, "w").write(text)
+PY
+}
+
+# Writes the run's settings file into $1 and sets SETTINGS_CL and SETTINGS_FILE:
+# file-config's FILE_CONFIG with the sim's values, otherwise the harness's own
+render_settings_file() { # $1=out dir
+  SETTINGS_CL="$(grep -m1 -oE 'cl_type: *[a-z]+' "$ARGS_FILE" | awk '{print $2}')"
+  case "$SETTINGS_CL" in
+    lodestar) SETTINGS_FILE="$1/proposer-settings.yaml" ;;
+    prysm) SETTINGS_FILE="$1/proposer-settings.json" ;;
+    lighthouse) SETTINGS_FILE="$1/builder_definitions.yml" ;;
+    *) die "no proposer settings file for cl_type ${SETTINGS_CL:-<none>}; --assert manual-config writes builder config through the keymanager API" ;;
+  esac
+  mkdir -p "$1"
+  if [[ "$ASSERT_MODE" == "file-config" ]]; then
+    SETTINGS_FILE="$1/$(basename "$FILE_CONFIG")"
+    render_file_config "$SETTINGS_FILE"
+  else
+    write_settings_file "$SETTINGS_CL" "$SETTINGS_FILE"
+  fi
+}
+
+# --- trusted-payment, control: the VC refuses the file's cap without the flag ---
+# Lodestar checks the settings file before it loads a keystore or calls a beacon
+# node, so this needs no devnet: the file alone must stop the VC with an error
+# naming the flag, and with the flag the VC must get past that check (it then
+# stops for want of a keystore).
+assert_trusted_payment_refused() { # $1=VC image $2=settings file
+  log "trusted-payment control: the VC refuses the file's cap without --allowDangerousTrustedPayments"
+  local image=$1 file=$2 dir out_without out_with rc=0
+  dir="$(cd "$(dirname "$file")" && pwd)"
+  vc_once() { # $@ = extra VC flags
+    timeout 60 docker run --rm --network none -v "$dir:/f:ro" "$image" validator --network sepolia --dataDir /tmp/vc \
+      --beaconNodes http://127.0.0.1:1 --proposerSettingsFile "/f/$(basename "$file")" "$@" 2>&1
+  }
+  out_without="$(vc_once)" || rc=$?
+  out_with="$(vc_once --allowDangerousTrustedPayments)" || true
+  local refused=0 passed=0
+  grep -q 'requires --allowDangerousTrustedPayments' <<<"$out_without" && (( rc != 0 )) && refused=1
+  grep -q 'requires --allowDangerousTrustedPayments' <<<"$out_with" || passed=1
+  echo "  without the flag: exit $rc, $(grep -m1 -oE '[^ ]*Configuring a builder max execution payment[^"]*' <<<"$out_without" || echo "no refusal")"
+  echo "  with the flag:    $(tail -1 <<<"$out_with" | cut -c1-160)"
+  (( refused == 1 && passed == 1 )) || die "control: want a refusal naming the flag without it (refused=$refused) and none with it (passed=$passed)"
+  printf '\033[1;32mPASS: the VC refuses the settings file'"'"'s cap without --allowDangerousTrustedPayments and accepts it with the flag\033[0m\n'
+}
+
+# --- trusted-payment: every key loaded the file's cap ---------------------------
+assert_cap_loaded() {
+  log "assert trusted-payment: every key's builder config holds max_execution_payment = $UNCLAMPED_CAP"
+  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
+  python3 - "$VC_KM" "$KM_TOKEN" "$UNCLAMPED_CAP" <<'PY' || die "trusted-payment: a key's builder config lacks the file's cap"
+import json,sys,urllib.request
+km,token,cap=sys.argv[1],sys.argv[2],sys.argv[3]
+def get(path):
+    req=urllib.request.Request(km+path,headers={"Authorization":"Bearer "+token})
+    with urllib.request.urlopen(req,timeout=10) as r:
+        return json.load(r)
+keys=[k["validating_pubkey"] for k in get("/eth/v1/keystores")["data"]]
+entries,bad,sample=0,[],None
+for k in keys:
+    doc=get("/eth/v1/validator/{0}/builder_config".format(k))["data"]
+    sample=sample or (k,doc)
+    builders=doc.get("builders") or []
+    if not builders:
+        bad.append((k,"no builder entries"))
+    for e in builders:
+        entries+=1
+        if str(e.get("max_execution_payment"))!=cap:
+            bad.append((k,"{0}: max_execution_payment={1}".format(e.get("url"),e.get("max_execution_payment"))))
+print("  keys: {0}, entries: {1}, entries without the cap: {2}".format(len(keys),entries,len(bad)))
+if sample:
+    print("    e.g. {0}: {1}".format(sample[0][:20]+"...",json.dumps(sample[1])))
+for k,why in bad[:5]:
+    print("    {0}: {1}".format(k,why))
+sys.exit(1 if bad or not keys else 0)
+PY
+}
+
 # the commit CB is built from: CB_COMMIT, else the submodule's checkout
 cb_commit() {
   git -C "$CB_SUB" rev-parse --verify --quiet "${CB_COMMIT:-HEAD}^{commit}" \
@@ -730,9 +629,8 @@ docs_builder_config_call() { # $1=commit
 }
 
 # Every key the rendered CB config sets must be a name in the commit's
-# crates/common/src, where Commit-Boost parses its config. A commit without
-# builder-config's guard ignores an unknown [pbs] or [[mux]] key, so a key it does not
-# know would load as if it took effect.
+# crates/common/src, where Commit-Boost parses its config. CB ignores an unknown
+# [pbs] or [[mux]] key, so a key it does not know would load as if it took effect.
 check_config_keys() { # $1=cb-config.toml $2=commit
   local key unknown=()
   for key in $(sed 's/#.*$//' "$1" | grep -oE '(^|[{,])[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=' | grep -oE '[A-Za-z0-9_-]+' | sort -u); do
@@ -750,24 +648,6 @@ check_config_keys() { # $1=cb-config.toml $2=commit
 # scripts/cb-dial-test.patch (docs/EPBS.md, dial mode). buildoor accepts the URL
 # as auth data because it equals its --builder-api-url.
 DIAL_AUTH_URL="${DIAL_AUTH_URL:-http://buildoor:8080}"
-write_dial_builder_configs() {
-  log "dial: each key's builder config: url=$CB_ENTRY_URL auth_data=$DIAL_AUTH_URL"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  local keys body code n=0
-  keys="$(curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" \
-    | python3 -c 'import sys,json;[print(k["validating_pubkey"]) for k in json.load(sys.stdin)["data"]]')" \
-    || die "dial: could not list the VC's keystores"
-  body="$(printf '{"builders":[{"url":"%s","auth_data":"0x%s","builder_pubkeys":[]}]}' "$CB_ENTRY_URL" \
-    "$(python3 -c 'import sys;print(sys.argv[1].encode().hex())' "$DIAL_AUTH_URL")")"
-  for key in $keys; do
-    code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $KM_TOKEN" \
-      -H 'Content-Type: application/json' -d "$body" "$VC_KM/eth/v1/validator/$key/builder_config")"
-    [[ "$code" == 2* ]] || die "dial: builder_config POST for $key got HTTP $code"
-    n=$((n + 1))
-  done
-  echo "  wrote $n builder configs"
-}
-
 # PASS: CB dialed buildoor for the bids, never refused its address, never looped
 assert_dial() {
   log "assert dial: CB dials the builder its relay entries do not name"
@@ -782,124 +662,6 @@ assert_dial() {
   (( dialed >= 1 && refused == 0 && looped == 0 )) || die "dial failed (dialed=$dialed refused=$refused looped=$looped)"
   printf '\033[1;32mPASS: CB dialed %s for %s bid and preferences requests; the blocks above were built from those bids\033[0m\n' \
     "$DIAL_AUTH_URL" "$dialed"
-}
-
-# --- detect: CB warns about the keys whose builder config names none of their relays ---
-# CB's log text for each miss, and its error for a request naming CB itself, at debug
-DETECT_NO_CONFIG_LOG="the key has no builder config"
-DETECT_STALE_LOG="builder config is stale"
-DETECT_NO_CONFIG_400="auth data names Commit-Boost itself, not a builder"
-
-detect_doc() { # stdin: a GET builder_config response; $1=drop, or the host to name as auth_data
-  python3 -c '
-import json, sys
-doc = json.load(sys.stdin)["data"]
-for entry in doc.get("builders") or []:
-    entry.pop("auth_data", None)
-    if sys.argv[1] != "drop":
-        entry["auth_data"] = "0x" + sys.argv[1].encode().hex()
-print(json.dumps(doc))' "$1"
-}
-
-write_detect_misroutes() {
-  log "detect: $DETECT_KEYS keys get an entry without auth_data, $DETECT_KEYS more name $DETECT_STALE_HOST"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  curl -sf -H "Authorization: Bearer $KM_TOKEN" "$VC_KM/eth/v1/keystores" > "$RUN_DIR/vc-keystores.json" \
-    || die "detect: could not list the VC's keystores"
-  # mux keys, whose relay is the mux's at buildoor
-  python3 - "$RUN_DIR/vc-keystores.json" "$RUN_DIR/km-print.json" "$DETECT_KEYS" > "$RUN_DIR/detect-keys.json" <<'PY' \
-    || die "detect: the VC holds too few mux keys"
-import json, sys
-held = {k["validating_pubkey"].lower() for k in json.load(open(sys.argv[1]))["data"]}
-muxed = sorted(held & {k for m in json.load(open(sys.argv[2]))["muxes"].values() for k in m["keys"]})
-n = int(sys.argv[3])
-if len(muxed) < 2 * n:
-    sys.exit(1)
-json.dump({"no_config": muxed[:n], "stale": muxed[n:2 * n]}, sys.stdout)
-PY
-  local key body code form="no auth_data" stale_form="0x$(printf '%s' "$DETECT_STALE_HOST" | xxd -p | tr -d '\n')"
-  for key in $(python3 -c 'import json,sys;print(*json.load(open(sys.argv[1]))["no_config"])' "$RUN_DIR/detect-keys.json"); do
-    body="$(km_get "$key" | detect_doc drop)" || die "detect: could not read $key's builder config"
-    code="$(km_post "$key" "$body")"
-    if [[ "$code" != 2* ]]; then
-      # a VC that requires auth_data gets what a beacon node derives without it
-      form="CB's hostname as auth_data (the VC refused an entry without it: HTTP $code)"
-      body="$(km_get "$key" | detect_doc "$CB_NAME")"
-      code="$(km_post "$key" "$body")"
-    fi
-    [[ "$code" == 2* ]] || die "detect: POST for $key got HTTP $code"
-  done
-  echo "  no config: $DETECT_KEYS keys, entry at CB with $form"
-  for key in $(python3 -c 'import json,sys;print(*json.load(open(sys.argv[1]))["stale"])' "$RUN_DIR/detect-keys.json"); do
-    body="$(km_get "$key" | detect_doc "$DETECT_STALE_HOST")" || die "detect: could not read $key's builder config"
-    code="$(km_post "$key" "$body")"
-    [[ "$code" == 2* ]] || die "detect: POST for $key got HTTP $code"
-  done
-  echo "  stale:     $DETECT_KEYS keys, auth_data $stale_form ($DETECT_STALE_HOST)"
-}
-
-# PASS: CB named only the misrouted keys, each under its own miss, and none of
-# their blocks came from a bid CB returned
-assert_detect() { # $1=the slots built from a bid CB returned, comma separated
-  log "assert detect: CB warns about the keys with a missing or stale builder config, and only those"
-  cb_logs > "$RUN_DIR/cb.log"
-  python3 - "$RUN_DIR/detect-keys.json" "$RUN_DIR/cb.log" "$BN" "$1" \
-    "$DETECT_NO_CONFIG_LOG" "$DETECT_STALE_LOG" "$DETECT_NO_CONFIG_400" <<'PY' || die "detect failed (see above)"
-import json, re, sys, urllib.request
-keys_path, log_path, bn, via_cb, no_config_log, stale_log, no_config_400 = sys.argv[1:]
-keys = json.load(open(keys_path))
-KEY = re.compile(r"0x[0-9a-f]{96}")
-named = {"no_config": set(), "stale": set()}
-counts = {"400 for a request naming CB": 0, "epoch summaries": 0}
-for line in open(log_path, errors="replace"):
-    if no_config_log in line:
-        named["no_config"].update(KEY.findall(line))
-    elif stale_log in line:
-        named["stale"].update(KEY.findall(line))
-    elif "more keys than logged" in line:
-        counts["epoch summaries"] += 1
-    if no_config_400 in line:
-        counts["400 for a request naming CB"] += 1
-
-def get(path):
-    return json.load(urllib.request.urlopen(bn + path, timeout=10))["data"]
-
-proposers = {}
-for slot in filter(None, via_cb.split(",")):
-    index = get("/eth/v1/beacon/headers/{0}".format(slot))["header"]["message"]["proposer_index"]
-    proposers[slot] = get("/eth/v1/beacon/states/head/validators/{0}".format(index))["validator"]["pubkey"]
-
-ok = True
-for miss in ("no_config", "stale"):
-    wrong = named[miss] - set(keys[miss])
-    via = sorted(s for s, k in proposers.items() if k in keys[miss])
-    print("  {0:9} warned for {1} of its {2} keys, {3} other keys; via-CB blocks: {4}".format(
-        miss, len(named[miss] & set(keys[miss])), len(keys[miss]), len(wrong), via or "none"))
-    for key in sorted(wrong):
-        print("    warned for a key not given this miss: {0}".format(key))
-    ok &= bool(named[miss]) and not wrong and not via
-for name, n in counts.items():
-    print("  {0}: {1}".format(name, n))
-sys.exit(0 if ok else 1)
-PY
-  printf '\033[1;32mPASS: CB warned about the keys with a missing or stale builder config and no others, and returned no bid for them\033[0m\n'
-}
-
-# --- file-config: a Lodestar VC under --proposerSettingsFile refuses every write ---
-assert_settings_file_refuses() {
-  log "file-config: builder-config apply against the Lodestar VC under --proposerSettingsFile"
-  local out rc=0 stopped written
-  out="$(bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>&1)" || rc=$?
-  printf '%s\n' "$out" > "$RUN_DIR/apply-under-settings-file.txt"
-  stopped=$(grep -c 'no further key was written to it' <<<"$out" || true)
-  written=$(grep -c '^accepted: ' <<<"$out" || true)
-  echo "  apply exit code:                  $rc (need 1)"
-  echo "  errors that stop the client:      $stopped (need 1)"
-  echo "  keys written:                     $written (need 0)"
-  grep -m1 'no further key' <<<"$out" | cut -c1-240 | sed 's/^/    /' || true
-  grep -m1 '^done: ' <<<"$out" | sed 's/^/    /' || true
-  (( rc == 1 && stopped == 1 && written == 0 )) || die "apply did not stop at the settings file's first 403 (see $RUN_DIR/apply-under-settings-file.txt)"
-  printf '\033[1;32mPASS: builder-config apply stopped at the first 403 and wrote no key\033[0m\n'
 }
 
 write_documented_builder_configs() {
@@ -923,132 +685,10 @@ write_documented_builder_configs() {
   echo "  $n keys written (HTTP $code), e.g. $key: $(km_get "$key")"
 }
 
-# --- config-matrix: per-group builder config, what the VC stores and applies ---
-CM_PY="$REPO_ROOT/scripts/epbs-config-matrix.py"
-km_get_groups() { # every group key's stored builder config, one JSON line per key
-  local key
-  for key in $(python3 -c 'import json,sys;[print(k) for g in json.load(open(sys.argv[1])) for k in g["keys"]]' "$RUN_DIR/cm-groups.json"); do
-    printf '%s %s\n' "$key" "$(km_get "$key" || echo GET-FAILED)"
-  done
-}
-cm_group_key() { # $1=group index $2=key index -> that key of cm-groups.json
-  python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[int(sys.argv[2])]["keys"][int(sys.argv[3])])' \
-    "$RUN_DIR/cm-groups.json" "$1" "$2"
-}
-
-# builder-config apply of every group. A VC may refuse a group's values (lodestar refuses
-# a nonzero max_execution_payment without --allowDangerousTrustedPayments), which
-# makes apply exit non-zero: that is a measurement here, so the exit code and the
-# refusals are recorded, and only an apply that wrote no key at all stops the run.
-cm_apply() {
-  log "config-matrix: builder-config apply, one mux per group"
-  mkdir -p "$CM_OUT"
-  cp "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" "$RUN_DIR/cm-groups.json" "$RUN_DIR/km-print.json" "$CM_OUT/"
-  local rc=0 accepted errors
-  bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" \
-    > "$CM_OUT/km-apply.txt" 2>&1 || rc=$?
-  echo "$rc" > "$CM_OUT/km-apply.rc"
-  accepted=$(grep -c '^accepted: ' "$CM_OUT/km-apply.txt" || true)
-  errors=$(grep -c '^ERROR: ' "$CM_OUT/km-apply.txt" || true)
-  echo "  builder-config apply exit $rc: $accepted keys accepted, $errors errors"
-  { grep -m2 '^ERROR: ' "$CM_OUT/km-apply.txt" || true; } | cut -c1-300 | sed 's/^/    /'
-  (( accepted >= 1 )) || die "config-matrix: builder-config apply wrote no key (see $CM_OUT/km-apply.txt)"
-  log "config-matrix: what each VC stores (GET) against what builder-config wrote"
-  python3 "$CM_PY" stored "$VC_KM" "$RUN_DIR/km-token.txt" "$RUN_DIR/cm-groups.json" \
-    "$RUN_DIR/km-print.json" "$CM_OUT/stored-docs.json" | tee "$CM_OUT/stored.txt" \
-    || echo "WARN: reading the stored docs failed (see above); the observation goes on"
-}
-
-# builder-config's own flags against the live VC, once the observation is over:
-#   print              shows a changed config and writes nothing
-#   plain apply        drops a third-party entry on a key (K2)
-#   --preserve-entries keeps the third-party entry beside CB's (K1)
-cm_km_checks() {
-  log "config-matrix: builder-config print, plain apply, --preserve-entries and --from"
-  KM_TOKEN="$(cat "$RUN_DIR/km-token.txt")"
-  local d="$CM_OUT/km-checks" K1 K2 before after rc code ok fails=0
-  mkdir -p "$d"; : > "$d/summary.txt"
-  check() { # $1=name $2=0 pass / non-zero fail $3=detail
-    local v=PASS; [[ "$2" == 0 ]] || { v=FAIL; fails=$(( fails + 1 )); }
-    printf '  %-34s %s  %s\n' "$1" "$v" "$3" | tee -a "$d/summary.txt"
-  }
-  K1="$(cm_group_key 0 0)"; K2="$(cm_group_key 0 1)"   # two g-default keys
-
-  # print: a config giving g-default boost 55 is printed, not written
-  sed '/^id = "g-default"$/a builder_boost_factor = 55' "$RUN_DIR/cb-config.toml" > "$d/print-config.toml"
-  # each check runs as `{ ...; } || ok=1`, so a failing condition is a FAIL row, not a set -e exit
-  before="$(km_get "$K1" || true)"
-  rc=0; bc_print "$d/print-config.toml" "$RUN_DIR/km-overlay.toml" > "$d/print.json" 2> "$d/print.err" || rc=$?
-  after="$(km_get "$K1" || true)"
-  printf '%s\n%s\n' "$before" "$after" > "$d/print-get-before-after.json"
-  ok=0; { python3 -c 'import json,sys;m=[m for m in json.load(open(sys.argv[1]))["muxes"].values() if sys.argv[2] in m["keys"]];sys.exit(0 if m and "\"builder_boost_factor\": \"55\"" in json.dumps(m[0]["config"]) else 1)' "$d/print.json" "$K1" \
-    && [[ "$rc" == 0 && -n "$before" && "$before" == "$after" ]]; } || ok=1
-  check "print writes nothing" $ok "exit $rc; prints boost 55 for $K1; stored doc unchanged: $([[ "$before" == "$after" ]] && echo yes || echo NO)"
-
-  # plain apply drops a third-party entry, --preserve-entries keeps it
-  local TP_URL="http://third-party-relay:19999" TP_AUTH="0x74686972647061727479"   # "thirdparty"
-  local TP_BP="0x8de7ec501d574152f52a962bf588573df2fc3563fd0c6077651208ed20f24f3d8572425706b343117b48bdca56808416"
-  local TP_DOC="{\"builders\":[{\"url\":\"$TP_URL\",\"auth_data\":\"$TP_AUTH\",\"builder_pubkeys\":[\"$TP_BP\"]}]}"
-  code="$(km_post "$K2" "$TP_DOC")"
-  rc=0; bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" > "$d/apply-plain.txt" 2>&1 || rc=$?
-  local rc_config=$rc
-  km_get "$K2" > "$d/K2-after-plain-apply.json" || true
-  km_get_groups > "$d/stored-after-apply-config.json"
-  ok=0; { km_entry_urls "$K2" | grep -qxF "$CB_ENTRY_URL" && ! km_entry_urls "$K2" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
-  check "plain apply drops a 3rd-party entry" $ok "POST 3rd-party to $K2: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K2" | paste -sd,)"
-  code="$(km_post "$K1" "$TP_DOC")"
-  rc=0; bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" --preserve-entries > "$d/apply-preserve.txt" 2>&1 || rc=$?
-  km_get "$K1" > "$d/K1-after-preserve.json" || true
-  ok=0; { km_entry_urls "$K1" | grep -qxF "$CB_ENTRY_URL" && km_entry_urls "$K1" | grep -qF "$TP_URL" && [[ "$code" == 2* ]]; } || ok=1
-  check "--preserve-entries keeps it" $ok "POST 3rd-party to $K1: HTTP $code; apply exit $rc; entries now: $(km_entry_urls "$K1" | paste -sd,)"
-
-  # print also shows the [[relays]] config, which any key outside the muxes gets
-  ok=0; python3 -c 'import json,sys;sys.exit(0 if json.load(open(sys.argv[1]))["default"] else 1)' "$d/print.json" || ok=1
-  check "print shows the [[relays]] config" $ok "default: $(python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1]))["default"])[:90])' "$d/print.json")"
-
-  # apply --from the piped document writes what apply --config wrote, and exits
-  # as it did (a VC refusing a group's values fails both); a plain write also
-  # drops the third-party entry --preserve-entries kept on K1
-  rc=0; bc_print "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>/dev/null \
-    | bc_apply_from - "$RUN_DIR/km-overlay.toml" > "$d/apply-from.txt" 2>&1 || rc=$?
-  km_get_groups > "$d/stored-after-apply-from.json"
-  ok=0; { [[ "$rc" == "$rc_config" ]] && cmp -s "$d/stored-after-apply-config.json" "$d/stored-after-apply-from.json"; } || ok=1
-  check "apply --from - writes what --config wrote" $ok "exit $rc (--config: $rc_config); $(grep -m1 '^done: ' "$d/apply-from.txt"); stored docs equal: $(cmp -s "$d/stored-after-apply-config.json" "$d/stored-after-apply-from.json" && echo yes || echo NO)"
-  return $(( fails > 0 ))
-}
-
-# After the observation window: save the clients' command lines and full logs,
-# classify every slot by its proposer's group, then run the builder-config checks.
-cm_report() { # $1,$2 = observed window
-  log "config-matrix: classify slots $1..$2 by the proposer's group"
-  mkdir -p "$CM_OUT/logs"
-  kurtosis enclave inspect "$ENCLAVE" > "$CM_OUT/inspect.txt" 2>&1 || true
-  local svc vc_log="$CM_OUT/logs/$VC_SVC.log" rc=0 km_rc=0
-  for svc in $(grep -oE '\b(cl-1-[a-z0-9-]+|vc-1-[a-z0-9-]+|buildoor[a-z0-9-]*)\b' "$CM_OUT/inspect.txt" | sort -u); do
-    kurtosis service inspect "$ENCLAVE" "$svc" > "$CM_OUT/inspect-$svc.txt" 2>&1 || true
-    kurtosis service logs -a "$ENCLAVE" "$svc" 2>&1 | sed -r 's/\x1b\[[0-9;]*m//g' > "$CM_OUT/logs/$svc.log" || true
-  done
-  cb_logs > "$CM_OUT/logs/$CB_NAME.log"
-  echo "$1 $2" > "$CM_OUT/window.txt"
-  CM_MIN_PROPOSALS="$CM_MIN_PROPOSALS" python3 "$CM_PY" classify "$BN" "$1" "$2" "$RUN_DIR/cm-groups.json" \
-    "$CM_OUT/logs/$CB_NAME.log" "$CM_OUT/logs/$BN_SVC.log" "$vc_log" "$CM_OUT" || rc=$?
-  cm_km_checks || km_rc=$?
-  log "RESULT"
-  if (( rc == 0 && km_rc == 0 )); then
-    printf '\033[1;32mPASS: config-matrix observed every group (>= %s blocks each) and the builder-config checks passed; evidence in %s\033[0m\n' \
-      "$CM_MIN_PROPOSALS" "$CM_OUT"
-    return 0
-  fi
-  (( rc == 0 )) || echo "  the observation is incomplete (see $CM_OUT/table.txt)"
-  (( km_rc == 0 )) || echo "  a builder-config check failed (see $CM_OUT/km-checks/summary.txt)"
-  return 1
-}
-
-# ---- CB config + km overlay rendering ---------------------------------------
-# One code path for a live run, the pre-launch print and --render-only, so what
-# builder-config prints is what CB loads.
-render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
-  local out="$1" gen_time="$2" vc_km="$3"
+# ---- CB config rendering ------------------------------------------------------
+# One code path for a live run, the pre-launch render and --render-only.
+render_cb_config() { # $1=out dir $2=genesis_time
+  local out="$1" gen_time="$2"
   # Strict-shape it before it reaches sed: it interpolates into a config the CB
   # process trusts, so a malformed BN response must fail loud, not inject.
   [[ "$gen_time" =~ ^[0-9]+$ ]] || die "genesis_time is not a plain integer: '$gen_time'"
@@ -1059,21 +699,9 @@ render_cb_config() { # $1=out dir $2=genesis_time $3=VC keymanager URL
   sed -e "s|__GENESIS_TIME__|$gen_time|" \
       -e "s|__BUILDOOR_RELAY_URL__|$BUILDOOR_RELAY_URL|g" \
       configs/epbs/cb-config.toml.tmpl > "$out/cb-config.toml"
-  # manual-config runs no builder-config, so it gets no overlay
-  [[ "$ASSERT_MODE" == "manual-config" ]] || \
-  sed -e "s|__VC_KM_URL__|$vc_km|" \
-      -e "s|__TOKEN_PATH__|$(cd "$out" && pwd)/km-token.txt|" \
-      configs/epbs/km-overlay.toml.tmpl > "$out/km-overlay.toml"
   grep -q '__' "$out/cb-config.toml" && die "unrendered placeholder in cb-config.toml"
 
-  # manual-config: a commit without builder-config does not read the keys only it reads
-  if [[ "$ASSERT_MODE" == "manual-config" ]]; then
-    sed -i -E -e '/^(min_bid_p2p_eth|builder_boost_factor_p2p|max_execution_payment_gwei|builder_boost_factor) = /d' \
-      -e '/^# projection-only \(KM tooling\)/d' -e '/^# 0\.101 ETH p2p bid; entries keep/d' \
-      -e '/^# builder-config refuses a \[pbs\] builder_boost_factor_p2p/d' "$out/cb-config.toml"
-  fi
-
-  # relays-only: no [[mux]], so every key gets the [[relays]] builder config
+  # relays-only: no [[mux]], so every key reaches buildoor through [[relays]]
   if [[ "$ASSERT_MODE" == "relays-only" ]]; then
     python3 - "$out/cb-config.toml" <<'PY'
 import re, sys
@@ -1085,106 +713,24 @@ open(p, "w").write(s[:start] + s[end:])
 PY
     grep -q '^\[\[mux\]\]' "$out/cb-config.toml" && die "relays-only: a [[mux]] is left in cb-config.toml"
   fi
-
-  # trusted-payment: no cap anywhere, so builder-config writes its default, the largest
-  # Uint64, onto every builder_config entry
-  if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
-    sed -i -e '/^max_execution_payment_gwei = /d' -e '/^# builder-config.s default cap is unclamped/d' \
-      -e '/^# --allowDangerousTrustedPayments; --assert trusted-payment drops this line/d' "$out/cb-config.toml"
-    grep -q 'max_execution_payment_gwei' "$out/cb-config.toml" \
-      && die "trusted-payment: want no max_execution_payment_gwei in cb-config.toml"
-  fi
-
-  # detect: the [[relays]] relay, which no mux key routes to, at buildoor's
-  # address, so auth data naming it is another relay's to every key
-  if [[ "$ASSERT_MODE" == "detect" ]]; then
-    python3 - "$out/cb-config.toml" "$DETECT_STALE_HOST" <<'PY' || die "detect: no [[relays]] url at buildoor to move"
-import re, sys
-path, host = sys.argv[1:]
-text, n = re.subn(r'(^\[\[relays\]\]\nid = "[^"]+"\nurl = "[^"@]*@)buildoor:', r"\g<1>" + host + ":", open(path).read(), flags=re.M)
-if n != 1:
-    sys.exit(1)
-open(path, "w").write(text)
-PY
-  fi
-  # config-matrix: one mux per group of keys, each with its own values and relay
-  # entry; the group list lands beside the config
-  if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
-    python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" render-config "$out/cb-config.toml" "$out/cm-groups.json" \
-      || die "config-matrix: could not split the template's mux into groups"
-  fi
+  return 0
 }
 
-# builder-config's flags from the rendered km-overlay.toml, one per line:
-# --advertised-url, then --vc <url>=<token file> per [[vcs]] (none with --print)
-overlay_flags() { # $1=km-overlay.toml [--print]
-  python3 - "$@" <<'PY'
-import sys, tomllib
-o = tomllib.load(open(sys.argv[1], "rb"))
-print("--advertised-url")
-print(o["advertised_url"])
-for vc in [] if "--print" in sys.argv else o.get("vcs", []):
-    print("--vc")
-    print("{0}={1}".format(vc["url"], vc["token_path"]))
-PY
-}
-
-bc_apply() { # $1=cb-config.toml $2=km-overlay.toml, then more apply flags
-  local cfg=$1 overlay=$2 flags
-  shift 2
-  mapfile -t flags < <(overlay_flags "$overlay")
-  "$CB_BIN" builder-config apply --config "$cfg" "${flags[@]}" "$@"
-}
-
-bc_apply_from() { # $1=printed document, or - for stdin $2=km-overlay.toml, then more apply flags
-  local from=$1 overlay=$2 flags
-  shift 2
-  mapfile -t flags < <(overlay_flags "$overlay")
-  "$CB_BIN" builder-config apply --from "$from" "${flags[@]}" "$@"
-}
-
-bc_print() { # $1=cb-config.toml $2=km-overlay.toml: the printed document on stdout
-  local flags
-  mapfile -t flags < <(overlay_flags "$2" --print)
-  "$CB_BIN" builder-config print --config "$1" "${flags[@]}"
-}
-
-# builder-config refuses a [pbs] or [[mux]] key Commit-Boost does not read and an
-# unknown relay key, as CB does, so a print proves the rendered config loads. The
-# document lands in $1/km-print.json.
-km_print() { # $1=dir holding cb-config.toml + km-overlay.toml
-  bc_print "$1/cb-config.toml" "$1/km-overlay.toml" > "$1/km-print.json" 2> "$1/km-print.err" \
-    || { tail -20 "$1/km-print.err"; die "builder-config print refused $1/cb-config.toml"; }
-  echo "builder-config print: $(python3 -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-keys = sum(len(m["keys"]) + len(m["fetched_keys"]) for m in d["muxes"].values())
-print("{0} muxes, {1} mux keys, {2} [[relays]] config".format(len(d["muxes"]), keys, "a" if d["default"] else "no"))
-' "$1/km-print.json")"
-}
-
-# ---- render-only: one mode's CB config + overlay, checked by builder-config, no devnet --
-if [[ -n "$RENDER_ONLY" && "$ASSERT_MODE" == "manual-config" ]]; then
-  # no builder-config: check the keys against the commit and print the call the run makes
-  CB_SHA="$(cb_commit)"
-  render_cb_config "$RENDER_ONLY" 0 "http://127.0.0.1:5062"
-  check_config_keys "$RENDER_ONLY/cb-config.toml" "$CB_SHA"
-  docs_builder_config_call "$CB_SHA" > "$RENDER_ONLY/builder-config-call.sh"
-  echo "rendered manual-config @ ${CB_SHA:0:12}: $RENDER_ONLY/cb-config.toml $RENDER_ONLY/builder-config-call.sh"
-  sed 's/^/    /' "$RENDER_ONLY/builder-config-call.sh"
-  exit 0
-fi
+# ---- render-only: one mode's CB config and settings file, no devnet ------------
 if [[ -n "$RENDER_ONLY" ]]; then
-  if [[ -z "$CB_BIN" ]]; then
-    # the submodule's commit-boost, rebuilt by cargo if it is not from the pinned commit
-    cb_art="$(bash "$REPO_ROOT/scripts/ensure-cb-artifacts.sh" --bin-only)" \
-      || die "provisioning commit-boost from the submodule failed (see build output above)"
-    eval "$cb_art"   # sets CB_BIN
+  render_cb_config "$RENDER_ONLY" 0
+  if [[ "$ASSERT_MODE" == "manual-config" ]]; then
+    # no settings file: check the keys against the commit and print the call the run makes
+    CB_SHA="$(cb_commit)"
+    check_config_keys "$RENDER_ONLY/cb-config.toml" "$CB_SHA"
+    docs_builder_config_call "$CB_SHA" > "$RENDER_ONLY/builder-config-call.sh"
+    echo "rendered manual-config @ ${CB_SHA:0:12}: $RENDER_ONLY/cb-config.toml $RENDER_ONLY/builder-config-call.sh"
+    sed 's/^/    /' "$RENDER_ONLY/builder-config-call.sh"
+    exit 0
   fi
-  [[ -x "$CB_BIN" ]] || die "commit-boost at $CB_BIN is not executable"
-  render_cb_config "$RENDER_ONLY" 0 "http://127.0.0.1:5062"
-  echo "rendered ${ASSERT_MODE:-default}: $RENDER_ONLY/cb-config.toml $RENDER_ONLY/km-overlay.toml"
-  km_print "$RENDER_ONLY"
+  render_settings_file "$RENDER_ONLY"
+  echo "rendered ${ASSERT_MODE:-default}: $RENDER_ONLY/cb-config.toml $SETTINGS_FILE"
+  sed 's/^/    /' "$SETTINGS_FILE"
   exit 0
 fi
 
@@ -1213,64 +759,40 @@ case "$EP_PACKAGE" in
   github.com/*|http*) : ;;                                  # remote ref: kurtosis fetches it
   *) [[ -d "$EP_PACKAGE" ]] || die "ethereum-package path $EP_PACKAGE missing" ;;
 esac
-# Provision the ePBS CB artifacts (image + commit-boost binary) from the pinned
-# submodule, sha-tagged so a stale build can never be silently used. Skipped when
-# the caller pins CB_IMAGE explicitly (advanced path; CB_BIN must then be set).
+# Provision the CB image from the pinned submodule, sha-tagged so a stale build
+# can never be silently used. Skipped when the caller pins CB_IMAGE explicitly.
 if [[ -z "$CB_IMAGE" ]]; then
-  # Capture stdout (the two eval-able lines); the script streams build output to
+  # Capture stdout (the eval-able line); the script streams build output to
   # stderr live. Hard-fail on a build error rather than silently continuing with
   # an empty CB_IMAGE (the "silence == success" trap).
-  bin_flag=""; [[ "$ASSERT_MODE" == "manual-config" ]] && bin_flag="--no-bin"
-  cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh" $bin_flag)" \
-    || die "provisioning CB artifacts from the submodule failed (see build output above)"
-  bin_override="$CB_BIN"
-  eval "$cb_art"   # sets CB_IMAGE + CB_BIN
-  # a caller's CB_BIN (e.g. a branch build) wins over the submodule's
-  [[ -n "$bin_override" ]] && CB_BIN="$bin_override"
+  cb_art="$(bash "$(dirname "$0")/ensure-cb-artifacts.sh" --no-bin)" \
+    || die "provisioning the CB image from the submodule failed (see build output above)"
+  eval "$cb_art"   # sets CB_IMAGE
 fi
 docker image inspect "$CB_IMAGE" >/dev/null 2>&1 || die "CB image $CB_IMAGE not present locally"
-
-if [[ "$ASSERT_MODE" != "manual-config" ]]; then
-  [[ -n "$CB_BIN" ]] || die "no commit-boost binary: set CB_BIN (build: cargo build -p commit-boost --release)"
-  "$CB_BIN" builder-config --help >/dev/null 2>&1 || die "$CB_BIN has no builder-config subcommand"
-fi
-# preserve mode needs the merged --preserve-entries flag (epbs branch)
-if [[ "$ASSERT_MODE" == "preserve" ]]; then
-  "$CB_BIN" builder-config apply --help 2>&1 | grep -q -- '--preserve-entries' \
-    || die "$CB_BIN lacks builder-config apply --preserve-entries"
-fi
 # Every builder-built count below rests on this classifier; check it against its
 # boundary cases before spending a devnet on it.
 python3 scripts/epbs-blocks.py self-test || die "scripts/epbs-blocks.py self-test failed"
-# Render this mode's CB config with placeholder chain values and print it now: a key it refuses would otherwise surface only once the devnet is up.
-render_cb_config "$RUN_DIR" 0 "http://127.0.0.1:5062"
+# Render this mode's CB config with placeholder chain values, and the VC's settings
+# file, now: a mistake in either would otherwise surface only once the devnet is up.
+render_cb_config "$RUN_DIR" 0
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   CB_SHA="$(cb_commit)"
   check_config_keys "$RUN_DIR/cb-config.toml" "$CB_SHA"
   docs_builder_config_call "$CB_SHA" >/dev/null
   echo "docs:    $DOCS_PAGE @ ${CB_SHA:0:12}"
 else
-  km_print "$RUN_DIR"
+  # outside RUN_DIR, which the CB config render clears before the Lighthouse install
+  render_settings_file "${FILE_CONFIG_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/epbs-settings.XXXXXX")}"
+  echo "settings: $SETTINGS_FILE for $SETTINGS_CL"
+  sed 's/^/    /' "$SETTINGS_FILE"
 fi
 avail_g=$(free -g | awk '/^Mem:/{print $7}')
 (( avail_g >= 10 )) || echo "WARN: only ${avail_g}G RAM available; a devnet wants ~15G"
-echo "CB bin:  ${CB_BIN:-none}"
 echo "CB img:  $CB_IMAGE"
 echo "CB join: $CB_LAUNCH"
 echo "assert:  ${ASSERT_MODE:-default (builder-built)}"
 echo "enclave: $ENCLAVE   observe: ${OBSERVE_SLOTS} slots   pass>=${MIN_BUILDER_SLOTS}"
-
-# trusted-payment: the control needs a VC WITHOUT --allowDangerousTrustedPayments,
-# and the flag is fixed for the VC's lifetime, so the control is its own devnet:
-# a run of this script in the control phase (it stops after builder-config apply, ~1-2
-# min, and removes its enclave) before this run launches with the flag.
-if [[ "$ASSERT_MODE" == "trusted-payment" && -z "$TRUSTED_PAYMENT_PHASE" && "$TRUSTED_PAYMENT_CONTROL" == "1" ]]; then
-  log "trusted-payment control phase (own devnet, VC without --allowDangerousTrustedPayments)"
-  TRUSTED_PAYMENT_PHASE=control KEEP=0 CB_IMAGE="$CB_IMAGE" CB_BIN="$CB_BIN" \
-    bash "$REPO_ROOT/scripts/run-epbs-sim.sh" --assert trusted-payment \
-    || die "trusted-payment control phase failed (its output is above)"
-  log "trusted-payment control phase passed; launching the devnet with the flag"
-fi
 
 # PRESET override: render a copy of the args file with network_params.preset
 # swapped, and launch from that. Leaves the committed args file untouched, so the
@@ -1295,25 +817,23 @@ if [[ -n "$CL_IMAGE" ]]; then
   echo "cl/vc:   $CL_IMAGE (rendered -> $ARGS_FILE)"
 fi
 
-# trusted-payment: lodestar's VC refuses a builder_config entry whose
+# trusted-payment: lodestar's VC refuses a settings file whose
 # max_execution_payment is above 0 unless started with
-# --allowDangerousTrustedPayments. Render a copy of the args file with the flag
-# added to the first vc_extra_params list (participant 1 = the VC builder-config
-# targets). The control phase launches without it, and checks it is absent.
+# --allowDangerousTrustedPayments. Check that refusal first, on the VC image the
+# run launches, then render a copy of the args file with the flag added to the
+# first vc_extra_params list (participant 1, the VC that loads the file).
 if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
-  tp_flag=add; [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]] && tp_flag=absent
+  [[ "$SETTINGS_CL" == lodestar ]] || die "trusted-payment: participant 1 runs $SETTINGS_CL; --allowDangerousTrustedPayments is a lodestar VC flag"
+  if [[ "$TRUSTED_PAYMENT_CONTROL" == "1" ]]; then
+    assert_trusted_payment_refused "$(grep -m1 -oE 'vc_image: *[^ ]+' "$ARGS_FILE" | awk '{print $2}')" "$SETTINGS_FILE"
+  fi
   RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
-  python3 - "$ARGS_FILE" "$RENDERED_ARGS" "$tp_flag" <<'PY' || die "trusted-payment: cannot use $ARGS_FILE (see above)"
+  python3 - "$ARGS_FILE" "$RENDERED_ARGS" <<'PY' || die "trusted-payment: cannot use $ARGS_FILE (see above)"
 import re,sys
-src,dst,want=sys.argv[1],sys.argv[2],sys.argv[3]
+src,dst=sys.argv[1],sys.argv[2]
 flag="--allowDangerousTrustedPayments"
 lines=open(src).read().splitlines(keepends=True)
-cl=next((m.group(1) for m in (re.match(r"\s*(?:-\s+)?cl_type:\s*(\S+)",l) for l in lines) if m),None)
-if cl!="lodestar":
-    sys.exit("participant 1 runs cl_type {0!r}; {1} is a lodestar VC flag".format(cl,flag))
-if any(flag in l for l in lines):
-    if want=="absent": sys.exit("the args file already passes {0}; the control needs a VC without it".format(flag))
-elif want=="add":
+if not any(flag in l for l in lines):
     i=next((i for i,l in enumerate(lines) if re.match(r"\s*vc_extra_params:\s*$",l)),None)
     item=re.match(r"(\s*)-\s",lines[i+1]) if i is not None and i+1<len(lines) else None
     if not item: sys.exit("no vc_extra_params list to add {0} to".format(flag))
@@ -1329,34 +849,26 @@ elif want=="add":
 open(dst,"w").write("".join(lines))
 PY
   ARGS_FILE="$RENDERED_ARGS"
-  if [[ "$tp_flag" == add ]]; then
-    grep -q -- '- --allowDangerousTrustedPayments$' "$ARGS_FILE" || die "trusted-payment: flag render failed"
-    grep -q -- '- --builder-api-execution-payment-percent=50$' "$ARGS_FILE" || die "trusted-payment: buildoor flag render failed"
-    echo "vc flag: --allowDangerousTrustedPayments (rendered -> $ARGS_FILE)"
-  else
-    echo "vc flag: none (control phase)"
-  fi
+  grep -q -- '- --allowDangerousTrustedPayments$' "$ARGS_FILE" || die "trusted-payment: flag render failed"
+  grep -q -- '- --builder-api-execution-payment-percent=50$' "$ARGS_FILE" || die "trusted-payment: buildoor flag render failed"
+  echo "vc flag: --allowDangerousTrustedPayments (rendered -> $ARGS_FILE)"
 fi
 
-# manual-config, file-config and dial: buildoor's builder-API bid is only its
-# subsidy (0.0001 ETH by default), so its 0.101 ETH p2p bid would win, and any
-# min_bid the config sets would floor CB's bid too. Raise the builder-API subsidy
-# above both, so a block built from a bid CB returned shows the config routes the
-# proposer's bid requests through CB.
-MANUAL_CONFIG_SUBSIDY_GWEI=200000000
-if [[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" || "$ASSERT_MODE" == "dial" ]]; then
-  # the page's call or the file may set no min_bid: a grep that matches nothing must not end the run
-  if [[ "$ASSERT_MODE" == "dial" ]]; then
-    docs_min_bid=""
-  elif [[ "$ASSERT_MODE" == "file-config" ]]; then
-    docs_min_bid="$(grep -oE 'min_bid"?: *"?[0-9]+' "$FILE_CONFIG" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)"
-  else
-    docs_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)"
-  fi
-  (( ${docs_min_bid:-0} < MANUAL_CONFIG_SUBSIDY_GWEI )) \
-    || die "$ASSERT_MODE: the min_bid $docs_min_bid is not below the builder-API subsidy $MANUAL_CONFIG_SUBSIDY_GWEI"
-  RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
-  python3 - "$ARGS_FILE" "$RENDERED_ARGS" "--builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI" <<'PY' || die "manual-config: cannot use $ARGS_FILE (see above)"
+# buildoor's builder-API bid is only its subsidy (0.0001 ETH by default), so its
+# 0.101 ETH p2p bid would win, and the config's min_bid would floor CB's bid too.
+# Raise the builder-API subsidy above both, so a block built from a bid CB
+# returned shows the config routes the proposer's bid requests through CB.
+BUILDER_API_SUBSIDY_GWEI=200000000
+# the page's call or the docs' file may set no min_bid: a grep that matches nothing must not end the run
+case "$ASSERT_MODE" in
+  manual-config) config_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)" ;;
+  file-config) config_min_bid="$(grep -oE 'min_bid"?: *"?[0-9]+' "$FILE_CONFIG" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)" ;;
+  *) config_min_bid="$SETTINGS_MIN_BID_GWEI" ;;
+esac
+(( ${config_min_bid:-0} < BUILDER_API_SUBSIDY_GWEI )) \
+  || die "the config's min_bid $config_min_bid is not below the builder-API subsidy $BUILDER_API_SUBSIDY_GWEI"
+RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
+python3 - "$ARGS_FILE" "$RENDERED_ARGS" "--builder-api-subsidy=$BUILDER_API_SUBSIDY_GWEI" <<'PY' || die "cannot add buildoor's subsidy to $ARGS_FILE (see above)"
 import re,sys
 src,dst,flag=sys.argv[1],sys.argv[2],sys.argv[3]
 lines=open(src).read().splitlines(keepends=True)
@@ -1367,28 +879,20 @@ if not item: sys.exit("no buildoor_params.extra_args list to add {0} to".format(
 lines.insert(e+1,item.group(1)+"- "+flag+"\n")
 open(dst,"w").write("".join(lines))
 PY
-  ARGS_FILE="$RENDERED_ARGS"
-  echo "buildoor: --builder-api-subsidy=$MANUAL_CONFIG_SUBSIDY_GWEI, above the page's min_bid ${docs_min_bid:-(none)} (rendered -> $ARGS_FILE)"
-fi
+ARGS_FILE="$RENDERED_ARGS"
+echo "buildoor: --builder-api-subsidy=$BUILDER_API_SUBSIDY_GWEI, above the config's min_bid ${config_min_bid:-(none)} (rendered -> $ARGS_FILE)"
 
-if [[ "$ASSERT_MODE" == "file-config" ]]; then
-  FC_CL="$(grep -m1 -oE 'cl_type: *[a-z]+' "$ARGS_FILE" | awk '{print $2}')"
-  # outside RUN_DIR, which the CB config render clears before the Lighthouse install
-  FC_OUT="${FILE_CONFIG_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/epbs-file-config.XXXXXX")}"
-  mkdir -p "$FC_OUT"
-  FC_RENDERED="$FC_OUT/$(basename "$FILE_CONFIG")"
-  render_file_config "$FC_RENDERED"
-  echo "file-config: $FILE_CONFIG for $FC_CL (rendered -> $FC_RENDERED)"
-  sed 's/^/    /' "$FC_RENDERED"
-  case "$FC_CL" in
+# The settings file goes to participant 1's VC: Lodestar and Prysm read it from a
+# mount at launch, Lighthouse from its validators dir once it is up
+if [[ "$ASSERT_MODE" != "manual-config" ]]; then
+  case "$SETTINGS_CL" in
     lodestar) fc_flag=--proposerSettingsFile ;;
     prysm) fc_flag=--proposer-settings-file ;;
     lighthouse) fc_flag="" ;;
-    *) die "file-config: no file config for cl_type ${FC_CL:-<none>}" ;;
   esac
   if [[ -n "$fc_flag" ]]; then
     RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
-    python3 - "$ARGS_FILE" "$RENDERED_ARGS" "$FC_RENDERED" "$FC_MOUNT" <<'PY' || die "file-config: cannot add the file to $ARGS_FILE"
+    python3 - "$ARGS_FILE" "$RENDERED_ARGS" "$SETTINGS_FILE" "$FC_MOUNT" <<'PY' || die "cannot add the settings file to $ARGS_FILE"
 import json,os,re,sys
 src,dst,path,mount=sys.argv[1:5]
 name=os.path.basename(path)
@@ -1403,27 +907,19 @@ lines.append("extra_files:\n  "+json.dumps(name)+": |\n"+"".join("  "+l if l.str
 open(dst,"w").write("".join(lines))
 PY
     ARGS_FILE="$RENDERED_ARGS"
-    VC_EXTRA_PARAMS="${VC_EXTRA_PARAMS:+$VC_EXTRA_PARAMS }$fc_flag=$FC_MOUNT/$(basename "$FC_RENDERED")"
+    VC_EXTRA_PARAMS="${VC_EXTRA_PARAMS:+$VC_EXTRA_PARAMS }$fc_flag=$FC_MOUNT/$(basename "$SETTINGS_FILE")"
   fi
 fi
 
-# VC_EXTRA_PARAMS (any mode) and config-matrix's buildoor bid, rendered into a copy
-# of the args file
-cm_args=()
-for p in $VC_EXTRA_PARAMS; do cm_args+=(--vc-param "$p"); done
-if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
-  for a in $CM_BUILDOOR_ARGS; do cm_args+=(--buildoor-arg "$a"); done
-fi
-if (( ${#cm_args[@]} )); then
+# VC_EXTRA_PARAMS, rendered into a copy of the args file
+vc_args=()
+for p in $VC_EXTRA_PARAMS; do vc_args+=(--vc-param "$p"); done
+if (( ${#vc_args[@]} )); then
   RENDERED_ARGS="$(mktemp "${TMPDIR:-/tmp}/gloas-epbs-args.XXXXXX.yaml")"
-  python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" render-args "$ARGS_FILE" "$RENDERED_ARGS" "${cm_args[@]}" \
-    || die "cannot add ${cm_args[*]} to $ARGS_FILE"
+  python3 "$REPO_ROOT/scripts/epbs-sim-helpers.py" render-args "$ARGS_FILE" "$RENDERED_ARGS" "${vc_args[@]}" \
+    || die "cannot add ${vc_args[*]} to $ARGS_FILE"
   ARGS_FILE="$RENDERED_ARGS"
-  echo "args:    ${cm_args[*]} (rendered -> $ARGS_FILE)"
-fi
-if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
-  mkdir -p "$CM_OUT"
-  cp "$ARGS_FILE" "$CM_OUT/args.yaml"
+  echo "args:    ${vc_args[*]} (rendered -> $ARGS_FILE)"
 fi
 
 # clean any stale run (docker-path container is a separate object; the enclave rm
@@ -1463,24 +959,18 @@ done
 (( head_slot >= 1 )) || die "beacon node did not advance past genesis"
 echo "head slot = $head_slot"
 
-# ---- 3. render CB config + overlay from the live chain -----------------------
+# ---- 3. render CB config from the live chain -----------------------------------
 log "rendering CB config from live BN"
-if [[ "$ASSERT_MODE" == "dial" || "$ASSERT_MODE" == "detect" ]]; then
+if [[ "$ASSERT_MODE" == "dial" ]]; then
   bo_ip="$(docker network inspect "$NET" -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' \
     | awk '/^buildoor--/{split($2,a,"/"); print a[1]}')"
-  [[ -n "$bo_ip" ]] || die "$ASSERT_MODE: cannot find buildoor's address on $NET"
-fi
-if [[ "$ASSERT_MODE" == "dial" ]]; then
+  [[ -n "$bo_ip" ]] || die "dial: cannot find buildoor's address on $NET"
   BUILDOOR_RELAY_URL="$(sed -E "s|@buildoor:|@$bo_ip:|" <<<"$BUILDOOR_RELAY_URL")"
   echo "dial: relay entry $BUILDOOR_RELAY_URL"
-elif [[ "$ASSERT_MODE" == "detect" ]]; then
-  DETECT_STALE_HOST="$bo_ip"
-  echo "detect: the [[relays]] relay at $bo_ip"
 fi
 GEN_TIME=$(curl -sf "$BN/eth/v1/beacon/genesis" | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['genesis_time'])")
 echo "genesis_time=$GEN_TIME"
-render_cb_config "$RUN_DIR" "$GEN_TIME" "$VC_KM"
-[[ "$ASSERT_MODE" == "manual-config" || "$ASSERT_MODE" == "file-config" ]] || km_print "$RUN_DIR"
+render_cb_config "$RUN_DIR" "$GEN_TIME"
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
 if [[ "$CB_LAUNCH" == "service" ]]; then
@@ -1515,41 +1005,16 @@ else
   echo "CB up: $(docker ps --filter name=^${CB_NAME}$ --format '{{.Status}}')"
 fi
 
-# ---- 5. apply the keymanager builder_config (route VC -> CB) -----------------
-if [[ "$TRUSTED_PAYMENT_PHASE" == "control" ]]; then
-  assert_trusted_payment_refused
-  exit 0
-fi
+# ---- 5. the VC's builder config (VC -> CB) ------------------------------------
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   write_documented_builder_configs
-elif [[ "$ASSERT_MODE" == "file-config" ]]; then
-  [[ "$FC_CL" == lighthouse ]] && install_lighthouse_file_config "$FC_RENDERED"
-  echo "file-config: no keymanager write; the VC loads $(basename "$FC_RENDERED")"
-elif [[ "$ASSERT_MODE" == "dial" ]]; then
-  write_dial_builder_configs
-elif [[ "$ASSERT_MODE" == "config-matrix" ]]; then
-  cm_apply
-elif [[ "$ASSERT_MODE" == "detect" ]]; then
-  log "builder-config print | apply --from - (point 64 validators' builder_config at CB)"
-  bc_print "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml" 2>/dev/null \
-    | bc_apply_from - "$RUN_DIR/km-overlay.toml"
-  echo "apply OK"
-  write_detect_misroutes
 else
-  log "builder-config apply (point 64 validators' builder_config at CB)"
-  bc_apply "$RUN_DIR/cb-config.toml" "$RUN_DIR/km-overlay.toml"
-  echo "apply OK"
+  [[ "$SETTINGS_CL" == lighthouse ]] && install_lighthouse_file_config "$SETTINGS_FILE"
+  echo "settings file: no keymanager write; the VC loads $(basename "$SETTINGS_FILE")"
 fi
 # checked before the activation wait: a missing cap fails here, minutes earlier
 if [[ "$ASSERT_MODE" == "trusted-payment" ]]; then
-  assert_cap_projected
-fi
-
-# preserve mode is a pure keymanager-API check: it needs the applied docs but not
-# the builder loop, so run it now and finish (skip activation wait + observe).
-if [[ "$ASSERT_MODE" == "preserve" ]]; then
-  assert_preserve
-  exit 0
+  assert_cap_loaded
 fi
 
 # ---- 6a. wait for buildoor to become active on chain -------------------------
@@ -1597,12 +1062,6 @@ for i in $(seq 1 $(( OBSERVE_SLOTS + 3 ))); do
 done
 echo
 
-# config-matrix records and classifies instead of asserting the builder loop
-if [[ "$ASSERT_MODE" == "config-matrix" ]]; then
-  cm_report "$start_slot" "$end_slot"
-  exit $?
-fi
-
 # ---- 7. assert --------------------------------------------------------------
 log "verifying the loop"
 # CB-side: bid requests + the bids buildoor returned through CB. CB ranks
@@ -1623,7 +1082,7 @@ n_payment_only=$(count_csv "$payment_only_slots")
 # is one CB returned: same block hash, value and execution payment
 cb_log_file="$(mktemp "${TMPDIR:-/tmp}/epbs-cb-log.XXXXXX")"
 printf '%s\n' "$CB_LOG" > "$cb_log_file"
-sourced="$(python3 "$REPO_ROOT/scripts/epbs-config-matrix.py" via-cb "$BN" "$start_slot" "$end_slot" "$cb_log_file")" \
+sourced="$(python3 "$REPO_ROOT/scripts/epbs-sim-helpers.py" via-cb "$BN" "$start_slot" "$end_slot" "$cb_log_file")" \
   || die "could not match the blocks' bids against CB's"
 rm -f "$cb_log_file"
 via_cb_slots="$(sed -n 's/^via_cb=//p' <<<"$sourced")"
@@ -1648,14 +1107,13 @@ if [[ "$ASSERT_MODE" == "builder-down" ]]; then
 fi
 
 # ---- 7b. p2p-floor assertion (opt-in) ---------------------------------------
-# The rendered CB config sets min_bid_p2p_eth = "0.2" (top-level [pbs]), which
-# builder-config projects as the key-level min_bid (200000000 Gwei), ABOVE buildoor's
-# 101000000 Gwei p2p bid, while the CB (builder-API) entry keeps min_bid = 0 so
-# CB bids survive. buildoor's p2p-bidder publishes a competing bid every slot
+# The settings file's min_bid (150000000 Gwei) is above buildoor's 101000000 Gwei
+# p2p bid and below its 200000000 Gwei builder-API bid, so CB bids survive.
+# buildoor's p2p-bidder publishes a competing bid every slot
 # (POSTed to the BN's publishExecutionPayloadBid endpoint, which pools it AND
 # gossips it: "Published execution payload bid ... value=101000000"), so the BN's
 # produceBlockV4 floors it on every builder-built slot:
-#   "Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=200000000".
+#   "Ignoring p2p bid below min bid slot=.. bidValue=101000000 minBid=150000000".
 # A floored p2p bid is nulled BEFORE the candidate ranking, so it never shows up
 # in "Ranked builder bid candidates"; the rejection line is the floor's only
 # signal (do NOT gate on a p2p ranked-candidate; there is none when the floor
@@ -1705,8 +1163,6 @@ if (( n_via_cb >= MIN_BUILDER_SLOTS && buildoor_bids >= 1 && bid_calls >= 1 && p
   [[ "$ASSERT_MODE" == "block-submission" ]] && { assert_block_submission; }
   [[ "$ASSERT_MODE" == "trusted-payment" ]]  && { assert_trusted_payment "$start_slot" "$end_slot"; }
   [[ "$ASSERT_MODE" == "dial" ]]             && { assert_dial; }
-  [[ "$ASSERT_MODE" == "detect" ]]           && { assert_detect "$via_cb_slots"; }
-  [[ "$ASSERT_MODE" == "file-config" && "$FC_CL" == lodestar ]] && { assert_settings_file_refuses; }
   exit 0
 else
   cb_logs | tail -30

@@ -1,7 +1,7 @@
 # ePBS (gloas) devnet, TWO consensus clients.
 #
 # WHY this variant exists: the single-lodestar gloas-epbs.yaml cannot FINALIZE on
-# the mainnet preset because the local/lodestar:km gloas image packs only ~1
+# the mainnet preset because the gloas lodestar image of the time packed only ~1
 # attestation aggregate per block; on mainnet's 32-slot epochs that leaves the
 # chain short of the 2/3 justification threshold, so it never finalizes, so
 # buildoor's builder deposit (activation needs a FINALIZED eligibility epoch)
@@ -32,8 +32,8 @@ participants:
     el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lodestar
     # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
-    cl_image: local/lodestar:km
-    vc_image: local/lodestar:km
+    cl_image: chainsafe/lodestar:v1.50.0
+    vc_image: chainsafe/lodestar:v1.50.0
     cl_log_level: debug
     vc_log_level: debug
     vc_extra_params:

@@ -24,8 +24,8 @@ known fork, not a scheduled one; check the epoch, not the presence of the name.
 released CL implements gloas, so the CL image is the variable under test.
 Its verdicts are not `cb-verify` checks: they are the `scripts/run-epbs-sim.sh --assert <mode>`
 modes listed under "Assertion modes" in EPBS.md. `trusted-payment` covers an ePBS path no classic
-scenario reaches: an `"unclamped"` `max_execution_payment_gwei` projected by `builder-config` and applied by
-the beacon node. `ladder` is retired, since CB plays no timing games on the ePBS bid path, and so is
+scenario reaches: a settings-file `max_execution_payment` of the largest Uint64, applied by the beacon
+node. `ladder` is retired, since CB plays no timing games on the ePBS bid path, and so is
 `request-auth`, since CB no longer verifies the request auth.
 
 ## The verdict model (read this first — it is load-bearing)

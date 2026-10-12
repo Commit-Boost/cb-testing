@@ -1,9 +1,9 @@
-# ePBS (gloas) devnet args for the commit-boost + keymanager builder-config loop.
+# ePBS (gloas) devnet args for the commit-boost loop.
 #
 # Launched against UPSTREAM github.com/ethpandaops/ethereum-package (see
 # scripts/run-epbs-sim.sh EP_PACKAGE). This repo's pinned ethereum-package
 # submodule predates gloas-genesis compatibility: it bakes a genesis.ssz the
-# gloas `local/lodestar:km` image cannot deserialize (progressiveContainer
+# gloas lodestar images cannot deserialize (progressiveContainer
 # offset mismatch) and its resolver wires a mev-boost sidecar. Upgrading the
 # submodule + wiring a real `epbs` mev_type that launches commit-boost as the
 # sidecar is the follow-up ticket; see docs/EPBS.md.
@@ -11,11 +11,11 @@
 # The fork's `epbs` mev_type wires sidecar=none (no commit-boost in the loop);
 # this scenario instead uses mev_type=buildoor (builder only, no sidecar) and
 # inserts commit-boost MANUALLY after launch so the VC's gloas bid flow is routed
-# VC -> keymanager builder_config -> commit-boost -> buildoor.
+# VC -> proposer settings file -> commit-boost -> buildoor.
 #
 # minimal preset + 6s slots so gloas activates at epoch 0 and the loop is observable fast
 # (8-slot epochs, buildoor activates ~slot 33). This is the FAST default for the
-# p2p/preserve/default assertion modes.
+# default and p2p assertion modes.
 #
 # NOTE the preset is a runtime knob: `PRESET=mainnet` makes scripts/run-epbs-sim.sh render
 # this file with preset=mainnet. No mode needs it: commit-boost forwards the revealed block
@@ -29,8 +29,8 @@ participants:
     el_image: ethpandaops/geth:glamsterdam-devnet-8-aa1f2fc
     cl_type: lodestar
     # nflaig/builder-api-2: gloas builder api + keymanager builder_config support
-    cl_image: local/lodestar:km
-    vc_image: local/lodestar:km
+    cl_image: chainsafe/lodestar:v1.50.0
+    vc_image: chainsafe/lodestar:v1.50.0
     cl_log_level: debug
     vc_log_level: debug
     vc_extra_params:
