@@ -647,7 +647,9 @@ cb_commit() {
 docs_builder_config_call() { # $1=commit
   local page call host auth
   page="$(git -C "$CB_SUB" show "$1:$DOCS_PAGE")" || die "no $DOCS_PAGE at $1"
-  call="$(awk '/^#+ /{s=($0 ~ /validator-builder-config|Validator builder config|Point each validator key at Commit-Boost/)} s && /^```bash$/{f=1; next} f && /^```$/{exit} f' <<<"$page")"
+  # the first bash block under that heading that calls builder_config, so another
+  # command shown there (the hex of a hostname) is not taken for the call
+  call="$(awk '/^#+ /{s=($0 ~ /validator-builder-config|Validator builder config|Point each validator key at Commit-Boost/)} s && /^```bash$/{f=1; b=""; next} f && /^```$/{f=0; if (b ~ /\/builder_config/) {printf "%s", b; exit}; next} f{b=b $0 "\n"}' <<<"$page")"
   # a curl call, or the token piped into one (`printf ... | curl ... -H @-`)
   [[ "$call" == *curl* && "$call" == *"/builder_config"* ]] \
     || die "$DOCS_PAGE at $1 has no curl call to builder_config under its builder config heading"
