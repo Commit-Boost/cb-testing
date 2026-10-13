@@ -175,6 +175,8 @@ commit-boost in the loop.)
 | `FILE_CONFIG` | empty | `--assert file-config`: the docs' settings file to load instead of the harness's |
 | `FILE_CONFIG_DIRECT_URL` | `http://127.0.0.1:1` | `--assert file-config`: where the docs file's directly reached entry goes |
 | `FILE_CONFIG_OUT` | a temp dir | where the rendered settings file is kept |
+| `OPERATOR_DIR` | `configs/epbs/.run/operator` | `--assert operator`: where the brief is written and `done` or `abort` is awaited |
+| `OPERATOR_TIMEOUT` | `3600` | `--assert operator`: seconds to wait for `OPERATOR_DIR/done` |
 | `VC_EXTRA_PARAMS` | empty | extra params for participant 1's VC, space-separated, rendered into a copy of the args file (e.g. `--builder.selection=maxprofit`) |
 | `WAIT_BUILDOOR` | `1` | `0` observes without waiting for buildoor's first bid via CB, for a beacon node that never requests bids |
 | `OBSERVE_FROM_SLOT` | `0` | wait for this head slot before the observation window opens (e.g. past a gloas fork at epoch 1) |
@@ -271,6 +273,15 @@ feature into a live regression check:
   p2p bid, so the run also prints how many selections came via CB and via p2p.
   `CB_COMMIT=<sha> just epbs-sim-render manual-config <dir>` checks the keys and
   writes the call to `<dir>/builder-config-call.sh` without a devnet.
+- **`operator`**: a person, or an agent with no other context, sets Commit-Boost up
+  from the docs. The VC starts with a settings file holding only the fee recipient
+  (Lighthouse with no `builder_definitions.yml`), and no CB runs. Once buildoor's
+  chain is up the run writes `OPERATOR_DIR/brief.md`. The brief lists what an
+  operator knows about their node: its containers, the VC's command line and
+  settings file, the relay URL, the CB image and the container name `CB_NAME`. It
+  says nothing about this harness. The run waits up to `OPERATOR_TIMEOUT` for
+  `OPERATOR_DIR/done` (or fails on `OPERATOR_DIR/abort`), then makes the default
+  builder-built assertion against the operator's CB container.
 - **`file-config`**: the docs' settings file (`FILE_CONFIG`) instead of the
   harness's, with the docs' example values swapped for the sim's: CB's URL,
   buildoor's auth data in hex and base64, and `FILE_CONFIG_DIRECT_URL` (a closed port

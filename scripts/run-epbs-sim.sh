@@ -56,6 +56,12 @@
 #                      docs/docs/get_started/epbs.md, run as written with the
 #                      sim's CB URL and buildoor's hostname in place of the page's
 #                      example values. Then the default assertion.
+#   --assert operator  a person sets up Commit-Boost from the docs. The VC starts
+#                      with no builder entries and no CB runs. The run writes an
+#                      operator brief (OPERATOR_DIR/brief.md: the node's
+#                      containers, files and relay, nothing about this harness),
+#                      waits for OPERATOR_DIR/done, then makes the default
+#                      assertion against the CB container named CB_NAME.
 #   --assert dial      the settings file's auth_data names buildoor by URL, which
 #                      no relay entry names (the relay entry names buildoor by IP),
 #                      so CB dials it. Needs a CB_COMMIT built with
@@ -67,7 +73,7 @@
 # DIR through the same code path as a live run, and exits: no docker, no kurtosis.
 #
 # One devnet at a time (~15G). Usage:
-#   scripts/run-epbs-sim.sh [--assert p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config] [--render-only DIR]
+#   scripts/run-epbs-sim.sh [--assert p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config|operator] [--render-only DIR]
 # (or `just epbs-sim` / `just epbs-sim-assert <mode>`).
 set -euo pipefail
 
@@ -150,14 +156,20 @@ while [[ $# -gt 0 ]]; do
 done
 no_mode() { printf -- '--assert %s is not a mode: %s\n' "$ASSERT_MODE" "$1" >&2; exit 2; }
 case "$ASSERT_MODE" in
-  ""|p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config) : ;;
+  ""|p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config|operator) : ;;
   preserve|config-matrix|detect) no_mode "retired with builder-config, which is parked: the VC reads a proposer settings file" ;;
   ladder) no_mode "retired, CB plays no timing games on the ePBS bid path" ;;
   request-auth) no_mode "retired, CB no longer verifies the request auth (verify_builder_request_auth is gone); the builder does" ;;
   direct) no_mode "retired, builder-config writes no direct builder entries (the overlay refuses direct_entries); with CB down the beacon node falls back to p2p bids and local blocks" ;;
   pipe) no_mode "renamed: --assert dial" ;;
-  *) printf 'unknown --assert mode: %s (want p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config)\n' "$ASSERT_MODE" >&2; exit 2 ;;
+  *) printf 'unknown --assert mode: %s (want p2p|block-submission|builder-down|trusted-payment|manual-config|dial|relays-only|file-config|operator)\n' "$ASSERT_MODE" >&2; exit 2 ;;
 esac
+
+# operator: where the brief goes and the done (or abort) file is awaited
+OPERATOR_DIR="${OPERATOR_DIR:-$REPO_ROOT/$RUN_DIR/operator}"
+OPERATOR_TIMEOUT="${OPERATOR_TIMEOUT:-3600}"   # s to wait for OPERATOR_DIR/done
+# the operator runs CB as a plain container on the enclave network
+[[ "$ASSERT_MODE" == "operator" ]] && CB_LAUNCH=docker
 
 # mainnet has 32-slot epochs, so buildoor activates ~slot 128 not ~33; give the
 # activation poll room unless the caller already raised it above the default.
@@ -518,10 +530,17 @@ write_settings_file() { # $1=cl_type $2=out path
   auth="$host"; [[ "$ASSERT_MODE" == "dial" ]] && auth="$DIAL_AUTH_URL"
   [[ "$ASSERT_MODE" == "trusted-payment" ]] && cap="$UNCLAMPED_CAP"
   python3 - "$1" "$2" "$CB_ENTRY_URL" "0x$(printf '%s' "$auth" | xxd -p | tr -d '\n')" \
-    "$SETTINGS_MIN_BID_GWEI" "$cap" "$SETTINGS_FEE_RECIPIENT" <<'PY'
+    "$SETTINGS_MIN_BID_GWEI" "$cap" "$SETTINGS_FEE_RECIPIENT" "$ASSERT_MODE" <<'PY'
 import json, sys
-cl, out, url, auth, min_bid, cap, fee = sys.argv[1:]
-if cl == "lodestar":
+cl, out, url, auth, min_bid, cap, fee, mode = sys.argv[1:]
+# operator: the fee recipient only, so the VC loads the file and asks no builder
+if mode == "operator" and cl == "lodestar":
+    text = f'default_config:\n  fee_recipient: "{fee}"\n'
+elif mode == "operator" and cl == "prysm":
+    text = json.dumps({"version": 2, "default_config": {"fee_recipient": fee}}, indent=2) + "\n"
+elif mode == "operator":
+    text = "# not installed: Lighthouse starts with no builder_definitions.yml\n"
+elif cl == "lodestar":
     text = ("default_config:\n  builder:\n"
             f'    min_bid: "{min_bid}"\n    max_execution_payment: "{cap}"\n'
             f'    builders:\n      - url: "{url}"\n        auth_data: "{auth}"\n')
@@ -694,6 +713,59 @@ write_documented_builder_configs() {
     n=$(( n + 1 ))
   done
   echo "  $n keys written (HTTP $code), e.g. $key: $(km_get "$key")"
+}
+
+# ---- operator: the brief, then wait for the operator ----------------------------
+# The brief holds what an operator knows about their own node and nothing about
+# this harness, so the docs alone must get them from there to bids through CB.
+operator_handoff() {
+  local vc_ctr bn_ctr vc_cmd file_line
+  vc_ctr="$(docker ps --format '{{.Names}}' | grep -m1 "^${VC_SVC}--")" || die "operator: no container for $VC_SVC"
+  bn_ctr="$(docker ps --format '{{.Names}}' | grep -m1 "^${BN_SVC}--")" || die "operator: no container for $BN_SVC"
+  vc_cmd="$(docker inspect -f '{{join .Config.Entrypoint " "}} {{join .Args " "}}' "$vc_ctr")"
+  case "$SETTINGS_CL" in
+    lighthouse) file_line="It has no builder_definitions.yml yet. Its validators directory is \`$(grep -oE -- '--validators-dir=[^ ]+' <<<"$vc_cmd" | head -1 | cut -d= -f2)\` inside the container." ;;
+    *) file_line="It loads its proposer settings file from \`$FC_MOUNT/$(basename "$SETTINGS_FILE")\` inside the container. Today the file sets only the fee recipient." ;;
+  esac
+  rm -rf "$OPERATOR_DIR"; mkdir -p "$OPERATOR_DIR/work"
+  cat > "$OPERATOR_DIR/brief.md" <<BRIEF
+# Your node
+
+You run one validator node on an Ethereum test network where the Gloas fork (ePBS)
+is active. Everything runs as Docker containers on the Docker network \`$NET\`.
+Containers on that network reach each other by container name.
+
+- **Beacon node:** $SETTINGS_CL, container \`$bn_ctr\`. Its HTTP API is $BN from this
+  host. The network's settings (spec, genesis) are available from that API.
+- **Validator client:** $SETTINGS_CL, container \`$vc_ctr\`, started with:
+
+  \`\`\`
+  $vc_cmd
+  \`\`\`
+
+  $file_line
+  Its fee recipient is \`$SETTINGS_FEE_RECIPIENT\`. Copy files in and out with
+  \`docker cp\`, and restart it with \`docker restart $vc_ctr\`. You can't change its
+  command line.
+- **Relay:** you want bids from the relay at \`$BUILDOOR_RELAY_URL\`.
+- **Commit-Boost:** not running yet. Use the image \`$CB_IMAGE\` and run it as a
+  container named \`$CB_NAME\` on the network \`$NET\`, so the rest of the node can
+  reach it. Keep your files in \`$OPERATOR_DIR/work\`.
+
+Goal: your validator's bid requests for that relay go through Commit-Boost.
+
+When you're done, create the file \`$OPERATOR_DIR/done\`. If you can't finish,
+write the reason to \`$OPERATOR_DIR/abort\`.
+BRIEF
+  echo "OPERATOR READY: $OPERATOR_DIR/brief.md (waiting up to ${OPERATOR_TIMEOUT}s for $OPERATOR_DIR/done)"
+  local waited=0
+  until [[ -e "$OPERATOR_DIR/done" ]]; do
+    [[ -e "$OPERATOR_DIR/abort" ]] && die "operator aborted: $(head -c 500 "$OPERATOR_DIR/abort")"
+    (( waited < OPERATOR_TIMEOUT )) || die "operator: no $OPERATOR_DIR/done after ${OPERATOR_TIMEOUT}s"
+    sleep 10; waited=$(( waited + 10 ))
+  done
+  docker ps --format '{{.Names}}' | grep -qx "$CB_NAME" || die "operator: done, but no running container named $CB_NAME"
+  echo "operator: done after ${waited}s; $CB_NAME is running"
 }
 
 # ---- CB config rendering ------------------------------------------------------
@@ -873,6 +945,7 @@ BUILDER_API_SUBSIDY_GWEI=200000000
 # the page's call or the docs' file may set no min_bid: a grep that matches nothing must not end the run
 case "$ASSERT_MODE" in
   manual-config) config_min_bid="$(docs_builder_config_call "$CB_SHA" | grep -oE '"min_bid": *"[0-9]+"' | grep -oE '[0-9]+' | head -1 || true)" ;;
+  operator) config_min_bid="" ;;
   file-config) config_min_bid="$(grep -oE 'min_bid"?: *"?[0-9]+' "$FILE_CONFIG" | grep -oE '[0-9]+$' | sort -n | tail -1 || true)" ;;
   *) config_min_bid="$SETTINGS_MIN_BID_GWEI" ;;
 esac
@@ -984,7 +1057,9 @@ echo "genesis_time=$GEN_TIME"
 render_cb_config "$RUN_DIR" "$GEN_TIME"
 
 # ---- 4. place commit-boost PBS in the loop (VC -> CB -> buildoor) ------------
-if [[ "$CB_LAUNCH" == "service" ]]; then
+if [[ "$ASSERT_MODE" == "operator" ]]; then
+  echo "operator: no CB launched, the operator starts $CB_NAME"
+elif [[ "$CB_LAUNCH" == "service" ]]; then
   log "adding commit-boost PBS as a first-class enclave service ($CB_NAME)"
   # Upload the rendered CB config as a kurtosis files-artifact and add CB as a
   # real enclave service: it gets enclave DNS ($CB_NAME resolvable by the VC and
@@ -1019,6 +1094,8 @@ fi
 # ---- 5. the VC's builder config (VC -> CB) ------------------------------------
 if [[ "$ASSERT_MODE" == "manual-config" ]]; then
   write_documented_builder_configs
+elif [[ "$ASSERT_MODE" == "operator" ]]; then
+  operator_handoff
 else
   [[ "$SETTINGS_CL" == lighthouse ]] && install_lighthouse_file_config "$SETTINGS_FILE"
   echo "settings file: no keymanager write; the VC loads $(basename "$SETTINGS_FILE")"
