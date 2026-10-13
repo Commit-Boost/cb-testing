@@ -483,6 +483,7 @@ FILE_CONFIG_DIRECT_URL="${FILE_CONFIG_DIRECT_URL:-http://127.0.0.1:1}"
 FILE_CONFIG_OUT="${FILE_CONFIG_OUT:-}"           # where the rendered file is kept
 DOCS_DIRECT_URL="https://builder-a.example.com"
 DOCS_AUTH_DATA_B64="YnVpbGRlci1hLmV4YW1wbGUuY29t"   # builder-a.example.com, as Prysm writes bytes
+DOCS_FEE_RECIPIENT="0x<your fee recipient>"            # the docs' Prysm placeholder
 FC_MOUNT="/cb-file-config"
 
 # FILE_CONFIG with the example values swapped: CB's URL, buildoor's auth data in
@@ -494,7 +495,8 @@ render_file_config() { # $1=out path
   hex="0x$(printf '%s' "$host" | xxd -p | tr -d '\n')"
   b64="$(printf '%s' "$host" | base64 -w0)"
   sed -e "s|$DOCS_CB_URL|$CB_ENTRY_URL|g" -e "s|$DOCS_DIRECT_URL|$FILE_CONFIG_DIRECT_URL|g" \
-    -e "s|$DOCS_AUTH_DATA|$hex|g" -e "s|$DOCS_AUTH_DATA_B64|$b64|g" "$FILE_CONFIG" > "$1"
+    -e "s|$DOCS_AUTH_DATA|$hex|g" -e "s|$DOCS_AUTH_DATA_B64|$b64|g" \
+    -e "s|$DOCS_FEE_RECIPIENT|$SETTINGS_FEE_RECIPIENT|g" "$FILE_CONFIG" > "$1"
   # comments may name the example host; only values must not
   if grep -v '^[[:space:]]*#' "$1" | grep -q 'example\.com\|YnVpbGRlci1h'; then
     die "file-config: $FILE_CONFIG keeps an example value the harness does not swap: $(grep -v '^[[:space:]]*#' "$1" | grep -m1 'example\.com\|YnVpbGRlci1h')"
@@ -719,10 +721,11 @@ write_documented_builder_configs() {
 # The brief holds what an operator knows about their own node and nothing about
 # this harness, so the docs alone must get them from there to bids through CB.
 operator_handoff() {
-  local vc_ctr bn_ctr vc_cmd file_line
+  local vc_ctr bn_ctr vc_cmd bn_cmd file_line
   vc_ctr="$(docker ps --format '{{.Names}}' | grep -m1 "^${VC_SVC}--")" || die "operator: no container for $VC_SVC"
   bn_ctr="$(docker ps --format '{{.Names}}' | grep -m1 "^${BN_SVC}--")" || die "operator: no container for $BN_SVC"
   vc_cmd="$(docker inspect -f '{{join .Config.Entrypoint " "}} {{join .Args " "}}' "$vc_ctr")"
+  bn_cmd="$(docker inspect -f '{{join .Config.Entrypoint " "}} {{join .Args " "}}' "$bn_ctr")"
   case "$SETTINGS_CL" in
     lighthouse) file_line="It has no builder_definitions.yml yet. Its validators directory is \`$(grep -oE -- '--validators-dir=[^ ]+' <<<"$vc_cmd" | head -1 | cut -d= -f2)\` inside the container." ;;
     *) file_line="It loads its proposer settings file from \`$FC_MOUNT/$(basename "$SETTINGS_FILE")\` inside the container. Today the file sets only the fee recipient." ;;
@@ -735,8 +738,14 @@ You run one validator node on an Ethereum test network where the Gloas fork (ePB
 is active. Everything runs as Docker containers on the Docker network \`$NET\`.
 Containers on that network reach each other by container name.
 
-- **Beacon node:** $SETTINGS_CL, container \`$bn_ctr\`. Its HTTP API is $BN from this
-  host. The network's settings (spec, genesis) are available from that API.
+- **Beacon node:** $SETTINGS_CL, container \`$bn_ctr\`, started with:
+
+  \`\`\`
+  $bn_cmd
+  \`\`\`
+
+  Its HTTP API is $BN from this host. The network's settings (spec, genesis) are
+  available from that API.
 - **Validator client:** $SETTINGS_CL, container \`$vc_ctr\`, started with:
 
   \`\`\`

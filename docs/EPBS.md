@@ -84,12 +84,11 @@ commit-boost in the loop.)
 - **`--builder.selection` defaults to `executiononly`** (always self-build) on lodestar and likely
   others. ethereum-package starts the lodestar VC with `--builder`, so the sim is fine, but a bare CL
   run with a builder configured self-builds until selection is set.
-- **CB `/eth/v1/builder/beacon_blocks` reveal 500s are EXPECTED with buildoor.** The proposer POSTs its
-  signed gloas block to CB, which fans it out to the builders; buildoor reveals the execution payload
-  over P2P (native gloas transport) and does not HTTP-accept the forward, so CB returns 500
-  (`NoBuilderResponse`). The block is still canonical and the default assertion counts it. CB forwards
-  the block's bytes unparsed, so this 500 says only that no relay accepted the forward - see
-  `--assert block-submission` below, which asserts the forward itself.
+- **CB answers `/eth/v1/builder/beacon_blocks` with 202 whatever buildoor says.** The proposer POSTs its
+  signed gloas block to CB, which forwards it to every configured relay; buildoor reveals the execution
+  payload over P2P and may not accept the forward. CB logs how many relays accepted it
+  (`signed beacon block forwarded accepted=..`) and answers 202 either way. `--assert block-submission`
+  below asserts the forward itself.
 - **CB's log level is `[logs.stdout] level` in its config, not `RUST_LOG`.** CB builds its log
   filter from the config file and never reads `RUST_LOG`, so the `RUST_LOG=debug` this harness used
   to pass was ignored and CB logged at `info`. The template sets `level = "debug"` (the per-header
