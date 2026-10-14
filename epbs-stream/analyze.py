@@ -4,7 +4,8 @@
   a. no-bid slots: CB logs no "Connection reset without closing handshake" / "stream failed",
      and cb_pbs_relay_stream_fallback_total{endpoint="get_execution_payload_bid_stream"} does
      not move between the pause and resume snapshots
-  b. bid slots: CB still picks stream-carried bids (`auction winner ... transport="stream"`)
+  b. bid slots: CB still picks stream-carried bids (`auction winner ... transport="stream"`, or
+     since #509 "received new bid from ws stream")
   c. the stream ends with a close frame: in the capture, the relay sends a WebSocket close on
      every no-bid stream, and CB logs a clean end ("no bid") for each no-bid request
   negative: negative.sh refused all seven bad upgrades with a 4xx
@@ -43,10 +44,13 @@ def cb_requests(path):
     by_slot = defaultdict(list)
     for r in reqs.values():
         text = "\n".join(r["lines"])
-        # "auction winner" before the ePBS route logged its own "selected bid" line
+        # "auction winner" before the ePBS route logged its own "selected bid" line. Since
+        # #509 dropped the HTTP race, a stream relay's ePBS bid comes only over the stream
+        # and CB logs no transport field, so the stream's own receipt line is the winner.
         winner = re.search(r'(?:auction winner|selected bid) .*?transport="(\w+)"', text)
+        winner = winner.group(1) if winner else ("stream" if "received new bid from ws stream" in text else None)
         by_slot[r["slot"]].append({
-            "winner": winner.group(1) if winner else None,
+            "winner": winner,
             "no_header": "no header available for slot" in text or "no bid for slot" in text,
             "resets": text.count(RESET),
             "stream_failed": text.count("stream failed"),
